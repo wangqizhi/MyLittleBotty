@@ -14,11 +14,10 @@ Notes:
   - Requires login: gh auth login
   - Reads version from Cargo.toml and uses tag: v<version>
   - Uses title: MyLittleBotty v<version>
-  - Expects existing build artifact: release/mylittlebotty
+  - Expects existing build artifact: release/mylittlebotty-v<version>
 USAGE
 }
 
-ASSET_PATH="$ROOT_DIR/release/mylittlebotty"
 CARGO_TOML="$ROOT_DIR/Cargo.toml"
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -58,6 +57,8 @@ fi
 
 TAG="v$VERSION"
 TITLE="MyLittleBotty v$VERSION"
+ASSET_PATH="$ROOT_DIR/release/mylittlebotty-v$VERSION"
+UPLOAD_TMP_PATH="/tmp/mylittlebotty"
 
 if [[ ! -f "$ASSET_PATH" ]]; then
   echo "Error: build artifact not found: $ASSET_PATH"
@@ -86,8 +87,12 @@ else
 fi
 
 echo "[3/3] Uploading artifact..."
-gh release upload "$TAG" "$ASSET_PATH" --clobber
+cp "$ASSET_PATH" "$UPLOAD_TMP_PATH"
+chmod +x "$UPLOAD_TMP_PATH"
+gh release upload "$TAG" "$UPLOAD_TMP_PATH" --clobber
+rm -f "$UPLOAD_TMP_PATH"
 
 echo "Publish completed successfully."
 echo "Tag: $TAG"
-echo "Asset: $ASSET_PATH"
+echo "Local artifact: $ASSET_PATH"
+echo "Uploaded asset name: mylittlebotty"
