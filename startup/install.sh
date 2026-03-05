@@ -14,6 +14,45 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+find_botty_pids() {
+  pgrep -f 'Botty-Boss|Botty-Guy|mylittlebotty.*--boss-daemon|mylittlebotty.*--guy' || true
+}
+
+stop_running_botty_if_needed() {
+  local pids
+  pids="$(find_botty_pids)"
+  if [[ -z "$pids" ]]; then
+    return 0
+  fi
+
+  echo "Detected running Botty process(es):"
+  ps -p "$(echo "$pids" | paste -sd, -)" -o pid=,command= || true
+  echo ""
+  read -r -p "Stop these processes and continue install? [y/N]: " answer
+  case "${answer:-}" in
+    y|Y|yes|YES)
+      kill $pids || true
+      sleep 1
+      local remaining
+      remaining="$(find_botty_pids)"
+      if [[ -n "$remaining" ]]; then
+        kill -9 $remaining || true
+      fi
+      remaining="$(find_botty_pids)"
+      if [[ -n "$remaining" ]]; then
+        echo "Error: failed to stop all Botty processes."
+        exit 1
+      fi
+      ;;
+    *)
+      echo "Installation aborted."
+      exit 1
+      ;;
+  esac
+}
+
+stop_running_botty_if_needed
+
 URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
 
 echo "Downloading latest release asset..."
