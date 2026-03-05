@@ -18,3 +18,5 @@ install_script_url = "https://raw.githubusercontent.com/wangqizhi/MyLittleBotty/
 
 [dependencies]
 libc = "0.2"
+crossterm = "0.28.1"
+ratatui = { version = "0.29.0", default-features = false, features = ["crossterm"] }

@@ -2,6 +2,7 @@
 mod botty_boss;
 #[path = "botty/botty-guy.rs"]
 mod botty_guy;
+mod io;
 
 use std::env;
 
@@ -32,6 +33,14 @@ fn main() {
     if args.get(1).map(|s| s.as_str()) == Some("update") {
         if let Err(err) = botty_boss::update_self() {
             eprintln!("failed to update mylittlebotty: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if args.get(1).map(|s| s.as_str()) == Some("tui") {
+        if let Err(err) = io::run("tui") {
+            eprintln!("failed to run tui: {err}");
             std::process::exit(1);
         }
         return;

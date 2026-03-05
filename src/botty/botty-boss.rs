@@ -4,15 +4,25 @@ use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::BufWriter;
 use std::io::Write;
+use std::os::unix::net::UnixListener;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
+use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 const DOWNLOAD_URL: &str = env!("BOTTY_DOWNLOAD_URL");
 const LATEST_RELEASE_API_URL: &str = env!("BOTTY_LATEST_RELEASE_API_URL");
 const INSTALL_SCRIPT_URL: &str = env!("BOTTY_INSTALL_SCRIPT_URL");
 const CURL_MAX_TIME_SECONDS: &str = "60";
+const GUY_DEFAULT_ROLE: &str = "leader";
 
 pub fn start_daemon() -> io::Result<()> {
     if is_boss_running()? {
@@ -69,6 +79,19 @@ fn boss_pid_file() -> PathBuf {
         .join(format!("boss{}.pid", runtime_suffix()))
 }
 
+pub fn chat_socket_path() -> PathBuf {
+    botty_root_dir()
+        .join("run")
+        .join(format!("chat{}.sock", runtime_suffix()))
+}
+
+pub fn ensure_chat_ready() -> io::Result<()> {
+    if !is_boss_running()? {
+        start_daemon()?;
+    }
+    wait_for_chat_socket(Duration::from_secs(5))
+}
+
 pub fn is_boss_running() -> io::Result<bool> {
     let pid_file = boss_pid_file();
     let Some(pid) = read_pid_file(&pid_file)? else {
@@ -115,6 +138,8 @@ pub fn stop_all() -> io::Result<()> {
     }
 
     let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_file(chat_socket_path());
+    let _ = fs::remove_file(guy_role_config_file());
     if forced == 0 {
         println!("Stopped Botty-Boss and Botty-Guy");
     } else {
@@ -475,27 +500,225 @@ pub fn run_supervisor() {
     set_process_name(boss_process_name());
     println!("Botty-Boss supervisor is running");
 
-    loop {
-        match spawn_guy().and_then(|mut child| child.wait()) {
-            Ok(status) => report_exit(status),
-            Err(err) => eprintln!("Botty-Boss failed to run Botty-Guy: {err}"),
+    let _socket_guard = match bind_chat_socket() {
+        Ok(guard) => guard,
+        Err(err) => {
+            eprintln!("Botty-Boss failed to bind chat socket: {err}");
+            return;
         }
+    };
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        println!("Botty-Boss restarting Botty-Guy...");
+    let mut guy_bridge = match GuyBridge::spawn() {
+        Ok(bridge) => bridge,
+        Err(err) => {
+            eprintln!("Botty-Boss failed to run Botty-Guy: {err}");
+            return;
+        }
+    };
+
+    loop {
+        match _socket_guard.listener.accept() {
+            Ok((stream, _)) => {
+                if let Err(err) = handle_chat_client(stream, &mut guy_bridge) {
+                    eprintln!("Botty-Boss failed to handle chat session: {err}");
+                }
+            }
+            Err(err) => eprintln!("Botty-Boss accept error: {err}"),
+        }
     }
 }
 
-fn spawn_guy() -> io::Result<std::process::Child> {
-    let exe = env::current_exe()?;
+struct ChatSocketGuard {
+    path: PathBuf,
+    listener: UnixListener,
+}
 
-    Command::new(exe)
-        .arg0(guy_process_name())
-        .arg("--guy")
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
+impl Drop for ChatSocketGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn bind_chat_socket() -> io::Result<ChatSocketGuard> {
+    let path = chat_socket_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+    let listener = UnixListener::bind(&path)?;
+    Ok(ChatSocketGuard { path, listener })
+}
+
+struct GuyBridge {
+    child: std::process::Child,
+    stdin: BufWriter<std::process::ChildStdin>,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl GuyBridge {
+    fn spawn() -> io::Result<Self> {
+        let exe = env::current_exe()?;
+        let mut child = Command::new(exe)
+            .arg0(guy_process_name())
+            .arg("--guy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+
+        let child_pid = i32::try_from(child.id())
+            .map_err(|_| io::Error::other("failed to convert guy pid to i32"))?;
+        persist_guy_role(child_pid, GUY_DEFAULT_ROLE)?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("failed to capture guy stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("failed to capture guy stdout"))?;
+
+        Ok(Self {
+            child,
+            stdin: BufWriter::new(stdin),
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn ask(&mut self, message: &str) -> io::Result<String> {
+        if self.child.try_wait()?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Botty-Guy has exited",
+            ));
+        }
+
+        writeln!(self.stdin, "{message}")?;
+        self.stdin.flush()?;
+
+        let mut response = String::new();
+        let bytes = self.stdout.read_line(&mut response)?;
+        if bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Botty-Guy connection closed",
+            ));
+        }
+
+        Ok(response.trim_end().to_string())
+    }
+}
+
+fn guy_role_config_file() -> PathBuf {
+    botty_root_dir()
+        .join("config")
+        .join(format!("guy-role-map{}.conf", runtime_suffix()))
+}
+
+fn persist_guy_role(pid: i32, role: &str) -> io::Result<()> {
+    let path = guy_role_config_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut entries = read_guy_role_entries(&path)?;
+    entries.retain(|(saved_pid, _)| *saved_pid != pid && is_process_alive(*saved_pid));
+    entries.push((pid, role.to_string()));
+    entries.sort_unstable_by_key(|(saved_pid, _)| *saved_pid);
+
+    let mut content = String::new();
+    for (saved_pid, saved_role) in entries {
+        content.push_str(&format!("{saved_pid}={saved_role}\n"));
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn read_guy_role_entries(path: &PathBuf) -> io::Result<Vec<(i32, String)>> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some((pid_part, role_part)) = trimmed.split_once('=') else {
+            continue;
+        };
+
+        if let Ok(saved_pid) = pid_part.trim().parse::<i32>() {
+            let saved_role = role_part.trim();
+            if !saved_role.is_empty() {
+                entries.push((saved_pid, saved_role.to_string()));
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+impl Drop for GuyBridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn handle_chat_client(stream: UnixStream, guy_bridge: &mut GuyBridge) -> io::Result<()> {
+    let read_stream = stream.try_clone()?;
+    let mut reader = BufReader::new(read_stream);
+    let mut writer = BufWriter::new(stream);
+    let mut input = String::new();
+
+    loop {
+        input.clear();
+        let bytes = reader.read_line(&mut input)?;
+        if bytes == 0 {
+            return Ok(());
+        }
+
+        let message = input.trim_end();
+        if message.is_empty() {
+            continue;
+        }
+
+        let response = match guy_bridge.ask(message) {
+            Ok(response) => response,
+            Err(_) => {
+                *guy_bridge = GuyBridge::spawn()?;
+                guy_bridge.ask(message)?
+            }
+        };
+
+        writeln!(writer, "{response}")?;
+        writer.flush()?;
+    }
+}
+
+fn wait_for_chat_socket(timeout: Duration) -> io::Result<()> {
+    let socket = chat_socket_path();
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        if socket.exists() && UnixStream::connect(&socket).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("chat socket not ready: {}", socket.display()),
+    ))
 }
 
 fn runtime_suffix() -> &'static str {
@@ -519,14 +742,6 @@ fn guy_process_name() -> &'static str {
         "Botty-Guy-dev"
     } else {
         "Botty-Guy"
-    }
-}
-
-fn report_exit(status: ExitStatus) {
-    if let Some(code) = status.code() {
-        eprintln!("Botty-Guy exited with code {code}");
-    } else {
-        eprintln!("Botty-Guy was terminated by signal");
     }
 }
 

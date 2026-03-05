@@ -1,11 +1,36 @@
 use std::ffi::CString;
+use std::io;
+use std::io::BufRead;
+use std::io::Write;
 
 pub fn run() {
     set_process_name(guy_process_name());
-    println!("helloworld");
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut lines = stdin.lock().lines();
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
+    while let Some(line_result) = lines.next() {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("Botty-Guy failed to read input: {err}");
+                break;
+            }
+        };
+        let message = line.trim();
+        if message.is_empty() {
+            continue;
+        }
+
+        let reply = format!("收到：{message}");
+        if let Err(err) = writeln!(stdout, "{reply}") {
+            eprintln!("Botty-Guy failed to write output: {err}");
+            break;
+        }
+        if let Err(err) = stdout.flush() {
+            eprintln!("Botty-Guy failed to flush output: {err}");
+            break;
+        }
     }
 }
 
