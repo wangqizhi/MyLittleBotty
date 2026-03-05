@@ -9,12 +9,14 @@ use std::process::{Command, ExitStatus, Stdio};
 
 pub fn start_daemon() -> io::Result<()> {
     let exe = env::current_exe()?;
-    fs::create_dir_all("log")?;
+    let log_dir = botty_root_dir().join("log");
+    fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join("boss.log");
 
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("log/boss.log")?;
+        .open(log_path)?;
     let err_file = log_file.try_clone()?;
 
     let mut cmd = Command::new(&exe);
@@ -38,6 +40,13 @@ pub fn start_daemon() -> io::Result<()> {
     cmd.spawn()?;
 
     Ok(())
+}
+
+fn botty_root_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mylittlebotty")
 }
 
 pub fn run_supervisor() {
