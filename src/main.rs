@@ -22,6 +22,14 @@ fn main() {
         return;
     }
 
+    if args.get(1).map(|s| s.as_str()) == Some("restart") {
+        if let Err(err) = botty_boss::restart_all() {
+            eprintln!("failed to restart Botty processes: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("status") {
         if let Err(err) = botty_boss::print_status() {
             eprintln!("failed to query Botty status: {err}");
@@ -48,6 +56,16 @@ fn main() {
 
     if args.iter().any(|a| a == "--guy") {
         botty_guy::run();
+        return;
+    }
+
+    if args.iter().any(|a| a == "--input-telegram") {
+        botty_guy::run_telegram_input();
+        return;
+    }
+
+    if args.iter().any(|a| a == "--input-feishu") {
+        botty_guy::run_feishu_input();
         return;
     }
 

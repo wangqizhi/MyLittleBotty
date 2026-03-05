@@ -23,6 +23,7 @@ const LATEST_RELEASE_API_URL: &str = env!("BOTTY_LATEST_RELEASE_API_URL");
 const INSTALL_SCRIPT_URL: &str = env!("BOTTY_INSTALL_SCRIPT_URL");
 const CURL_MAX_TIME_SECONDS: &str = "60";
 const GUY_DEFAULT_ROLE: &str = "leader";
+const CHAT_META_PREFIX: &str = "__botty_meta__";
 
 pub fn start_daemon() -> io::Result<()> {
     if is_boss_running()? {
@@ -115,6 +116,10 @@ pub fn stop_all() -> io::Result<()> {
 
     targets.extend(find_pids_by_pattern(boss_process_name())?);
     targets.extend(find_pids_by_pattern(guy_process_name())?);
+    for spec in input_process_specs() {
+        let name = spec.process_name();
+        targets.extend(find_pids_by_pattern(&name)?);
+    }
     targets.sort_unstable();
     targets.dedup();
 
@@ -145,6 +150,14 @@ pub fn stop_all() -> io::Result<()> {
     } else {
         println!("Stopped Botty-Boss and Botty-Guy (force killed {forced})");
     }
+    Ok(())
+}
+
+pub fn restart_all() -> io::Result<()> {
+    stop_all()?;
+    start_daemon()?;
+    wait_for_chat_socket(Duration::from_secs(5))?;
+    println!("Botty-Boss restarted");
     Ok(())
 }
 
@@ -297,8 +310,10 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
     if let Some(boss_pid) = read_pid_file(&boss_pid_file())? {
         if is_process_alive(boss_pid) {
             boss_pids.push(boss_pid);
-            guy_pids = find_descendant_pids(boss_pid)?;
-            guy_pids.retain(|pid| is_process_alive(*pid));
+            let descendants = find_descendant_pids(boss_pid)?;
+            let mut candidates = find_pids_by_pattern(guy_process_name())?;
+            candidates.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
+            guy_pids = candidates;
         } else {
             let _ = fs::remove_file(boss_pid_file());
         }
@@ -515,6 +530,8 @@ pub fn run_supervisor() {
             return;
         }
     };
+    let config = load_setup_config().unwrap_or_default();
+    let _input_bridges = spawn_enabled_input_processes(&config);
 
     loop {
         match _socket_guard.listener.accept() {
@@ -612,6 +629,81 @@ impl GuyBridge {
     }
 }
 
+struct InputProcessBridge {
+    child: std::process::Child,
+}
+
+impl Drop for InputProcessBridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+struct InputProcessSpec {
+    name: &'static str,
+    arg: &'static str,
+    enabled: fn(&SetupConfig) -> bool,
+}
+
+impl InputProcessSpec {
+    fn process_name(&self) -> String {
+        format!("{}{}", self.name, runtime_suffix())
+    }
+}
+
+fn input_process_specs() -> [InputProcessSpec; 2] {
+    [
+        InputProcessSpec {
+            name: "Botty-input-telegram",
+            arg: "--input-telegram",
+            enabled: |config| config.telegram_enabled && !config.telegram_apikey.is_empty(),
+        },
+        InputProcessSpec {
+            name: "Botty-input-feishu",
+            arg: "--input-feishu",
+            enabled: |config| {
+                config.feishu_enabled
+                    && !config.feishu_apikey.is_empty()
+                    && !config.feishu_chat_id.is_empty()
+            },
+        },
+    ]
+}
+
+fn spawn_enabled_input_processes(config: &SetupConfig) -> Vec<InputProcessBridge> {
+    let mut bridges = Vec::new();
+    let exe = match env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!("Botty-Boss failed to get current executable path: {err}");
+            return bridges;
+        }
+    };
+
+    for spec in input_process_specs() {
+        if !(spec.enabled)(config) {
+            continue;
+        }
+
+        let process_name = spec.process_name();
+        let child = Command::new(&exe)
+            .arg0(&process_name)
+            .arg(spec.arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn();
+
+        match child {
+            Ok(child) => bridges.push(InputProcessBridge { child }),
+            Err(err) => eprintln!("Botty-Boss failed to run {process_name}: {err}"),
+        }
+    }
+
+    bridges
+}
+
 fn guy_role_config_file() -> PathBuf {
     botty_root_dir()
         .join("config")
@@ -686,22 +778,116 @@ fn handle_chat_client(stream: UnixStream, guy_bridge: &mut GuyBridge) -> io::Res
             return Ok(());
         }
 
-        let message = input.trim_end();
-        if message.is_empty() {
+        let raw = input.trim_end();
+        if raw.is_empty() {
+            continue;
+        }
+        let incoming = parse_chat_meta_message(raw);
+        if incoming.message.is_empty() {
             continue;
         }
 
-        let response = match guy_bridge.ask(message) {
+        let _ = persist_chat_message("user", &incoming.source, &incoming.user_id, &incoming.message);
+
+        let response = match guy_bridge.ask(&incoming.message) {
             Ok(response) => response,
             Err(_) => {
                 *guy_bridge = GuyBridge::spawn()?;
-                guy_bridge.ask(message)?
+                guy_bridge.ask(&incoming.message)?
             }
         };
+
+        let _ = persist_chat_message("assistant", &incoming.source, &incoming.user_id, &response);
 
         writeln!(writer, "{response}")?;
         writer.flush()?;
     }
+}
+
+const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
+
+struct IncomingChatMessage {
+    source: String,
+    user_id: String,
+    message: String,
+}
+
+fn parse_chat_meta_message(raw: &str) -> IncomingChatMessage {
+    let mut incoming = IncomingChatMessage {
+        source: "unknown".to_string(),
+        user_id: "unknown".to_string(),
+        message: raw.to_string(),
+    };
+
+    if !raw.starts_with(CHAT_META_PREFIX) {
+        return incoming;
+    }
+
+    let mut parts = raw.splitn(4, '|');
+    let prefix = parts.next();
+    let source = parts.next();
+    let user_id = parts.next();
+    let message = parts.next();
+
+    if prefix != Some(CHAT_META_PREFIX) || message.is_none() {
+        return incoming;
+    }
+
+    if let Some(source) = source.and_then(|s| s.strip_prefix("source=")) {
+        incoming.source = source.to_string();
+    }
+    if let Some(user_id) = user_id.and_then(|s| s.strip_prefix("user_id=")) {
+        incoming.user_id = user_id.to_string();
+    }
+    incoming.message = message.unwrap_or_default().to_string();
+    incoming
+}
+
+fn persist_chat_message(role: &str, source: &str, user_id: &str, message: &str) -> io::Result<()> {
+    let year = local_time_format("%Y")?;
+    let month_day = local_time_format("%m%d")?;
+    let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")?;
+    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
+    let line = format!(
+        "[{timestamp}] source={source} user_id={user_id} {role}: {sanitized}\n"
+    );
+
+    let dir = botty_root_dir().join("memory").join("deep").join(year);
+    fs::create_dir_all(&dir)?;
+
+    let target = select_chat_memory_file(&dir, &month_day, line.len() as u64)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(target)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+fn select_chat_memory_file(
+    dir: &PathBuf,
+    month_day: &str,
+    incoming_bytes: u64,
+) -> io::Result<PathBuf> {
+    for index in 1..=9_999u32 {
+        let candidate = dir.join(format!("{month_day}-{index}.log"));
+        let size = match fs::metadata(&candidate) {
+            Ok(meta) => meta.len(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err),
+        };
+
+        if size.saturating_add(incoming_bytes) <= CHAT_MEMORY_MAX_BYTES {
+            return Ok(candidate);
+        }
+    }
+
+    Err(io::Error::other("too many chat memory files for current day"))
+}
+
+fn local_time_format(format: &str) -> io::Result<String> {
+    let output = Command::new("date").arg(format!("+{format}")).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("failed to get local time by date command"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn wait_for_chat_socket(timeout: Duration) -> io::Result<()> {
@@ -727,6 +913,84 @@ fn runtime_suffix() -> &'static str {
     } else {
         ""
     }
+}
+
+fn setup_config_file() -> PathBuf {
+    botty_root_dir()
+        .join("config")
+        .join(format!("setup{}.conf", runtime_suffix()))
+}
+
+struct SetupConfig {
+    telegram_enabled: bool,
+    telegram_apikey: String,
+    feishu_enabled: bool,
+    feishu_apikey: String,
+    feishu_chat_id: String,
+}
+
+impl Default for SetupConfig {
+    fn default() -> Self {
+        Self {
+            telegram_enabled: true,
+            telegram_apikey: String::new(),
+            feishu_enabled: false,
+            feishu_apikey: String::new(),
+            feishu_chat_id: String::new(),
+        }
+    }
+}
+
+fn load_setup_config() -> io::Result<SetupConfig> {
+    let path = setup_config_file();
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SetupConfig::default()),
+        Err(err) => return Err(err),
+    };
+
+    let mut config = SetupConfig::default();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "chatbot.provider" => {
+                config.telegram_enabled = value
+                    .split(',')
+                    .map(|s| s.trim())
+                    .any(|provider| provider == "telegram");
+                config.feishu_enabled = value
+                    .split(',')
+                    .map(|s| s.trim())
+                    .any(|provider| provider == "feishu");
+            }
+            "chatbot.telegram.enabled" => config.telegram_enabled = parse_bool(value),
+            "chatbot.telegram.apikey" => config.telegram_apikey = value.to_string(),
+            "chatbot.feishu.enabled" => config.feishu_enabled = parse_bool(value),
+            "chatbot.feishu.apikey" => config.feishu_apikey = value.to_string(),
+            "chatbot.feishu.chat_id" => config.feishu_chat_id = value.to_string(),
+            "chatbot.apikey" => {
+                if config.telegram_apikey.is_empty() {
+                    config.telegram_apikey = value.to_string();
+                }
+                if config.feishu_apikey.is_empty() {
+                    config.feishu_apikey = value.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(config)
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(value.trim(), "1" | "true" | "yes" | "on")
 }
 
 fn boss_process_name() -> &'static str {

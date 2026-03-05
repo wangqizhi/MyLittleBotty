@@ -1,5 +1,6 @@
 use std::io;
 
+#[allow(dead_code)]
 pub trait OutputPlugin {
     fn show_user_message(&mut self, message: &str) -> io::Result<()>;
     fn show_bot_message(&mut self, message: &str) -> io::Result<()>;

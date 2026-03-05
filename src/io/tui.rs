@@ -324,6 +324,10 @@ impl TuiApp {
                 self.mode = Mode::Chat;
                 self.input.clear();
                 self.push_system(&format!("Setup saved to {}", setup_config_file().display()));
+                match botty_boss::restart_all() {
+                    Ok(()) => self.push_system("Botty input processes restarted."),
+                    Err(err) => self.push_system(&format!("Auto restart failed: {err}")),
+                }
             }
             KeyCode::Up => {
                 if *selected_field == 0 {
@@ -542,6 +546,7 @@ impl TuiApp {
             Line::raw(format!("- {}", options.join(", "))),
             Line::raw(format!("- current: {selected}")),
             Line::raw("- Enter on chatbot provider to edit apikey"),
+            Line::raw("- telegram whitelist user_ids supports comma-separated IDs"),
             Line::raw(""),
             Line::raw(format!("Config file: {}", setup_config_file().display())),
         ]))
@@ -612,7 +617,7 @@ fn place_cursor(frame: &mut Frame, input_rect: Rect, desired_col: u16) {
     frame.set_cursor_position((x, y));
 }
 
-fn setup_fields(config: &SetupConfig) -> [(&'static str, String, bool); 5] {
+fn setup_fields(config: &SetupConfig) -> [(&'static str, String, bool); 8] {
     [
         ("AI provider endpoint", config.ai_provider_endpoint.clone(), false),
         ("AI provider apikey", config.ai_provider_apikey.clone(), true),
@@ -635,11 +640,22 @@ fn setup_fields(config: &SetupConfig) -> [(&'static str, String, bool); 5] {
             },
             false,
         ),
+        (
+            "telegram poll seconds",
+            config.chatbot_telegram_poll_interval_seconds.to_string(),
+            false,
+        ),
+        (
+            "telegram whitelist user_ids",
+            config.chatbot_telegram_whitelist_user_ids.clone(),
+            false,
+        ),
+        ("feishu chat id", config.chatbot_feishu_chat_id.clone(), false),
     ]
 }
 
 fn setup_field_count() -> usize {
-    5
+    8
 }
 
 fn is_toggle_field(index: usize) -> bool {
@@ -651,6 +667,13 @@ fn set_setup_field(config: &mut SetupConfig, index: usize, value: &str) {
         0 => config.ai_provider_endpoint = value.to_string(),
         1 => config.ai_provider_apikey = value.to_string(),
         2 => config.chatbot_provider = value.to_string(),
+        5 => {
+            if let Ok(seconds) = value.trim().parse::<u64>() {
+                config.chatbot_telegram_poll_interval_seconds = seconds.max(1);
+            }
+        }
+        6 => config.chatbot_telegram_whitelist_user_ids = value.to_string(),
+        7 => config.chatbot_feishu_chat_id = value.to_string(),
         _ => {}
     }
 }
@@ -740,10 +763,16 @@ struct SetupConfig {
     ai_provider_endpoint: String,
     ai_provider_apikey: String,
     chatbot_provider: String,
+    chatbot_telegram_api_base: String,
     chatbot_telegram_apikey: String,
+    chatbot_feishu_api_base: String,
     chatbot_feishu_apikey: String,
     chatbot_telegram_enabled: bool,
     chatbot_feishu_enabled: bool,
+    chatbot_telegram_whitelist_user_ids: String,
+    chatbot_telegram_poll_interval_seconds: u64,
+    chatbot_feishu_poll_interval_seconds: u64,
+    chatbot_feishu_chat_id: String,
 }
 
 impl Default for SetupConfig {
@@ -752,10 +781,16 @@ impl Default for SetupConfig {
             ai_provider_endpoint: String::new(),
             ai_provider_apikey: String::new(),
             chatbot_provider: "telegram".to_string(),
+            chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
             chatbot_telegram_apikey: String::new(),
+            chatbot_feishu_api_base: "https://open.feishu.cn/open-apis".to_string(),
             chatbot_feishu_apikey: String::new(),
             chatbot_telegram_enabled: true,
             chatbot_feishu_enabled: false,
+            chatbot_telegram_whitelist_user_ids: String::new(),
+            chatbot_telegram_poll_interval_seconds: 1,
+            chatbot_feishu_poll_interval_seconds: 1,
+            chatbot_feishu_chat_id: String::new(),
         }
     }
 }
@@ -784,7 +819,9 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
             "provider.apikey" => config.ai_provider_apikey = value.to_string(),
             "chatbot.provider" => apply_chatbot_provider_list(&mut config, value),
+            "chatbot.telegram.api_base" => config.chatbot_telegram_api_base = value.to_string(),
             "chatbot.telegram.apikey" => config.chatbot_telegram_apikey = value.to_string(),
+            "chatbot.feishu.api_base" => config.chatbot_feishu_api_base = value.to_string(),
             "chatbot.feishu.apikey" => config.chatbot_feishu_apikey = value.to_string(),
             "chatbot.apikey" => {
                 if config.chatbot_provider == "feishu" {
@@ -795,6 +832,20 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             }
             "chatbot.telegram.enabled" => config.chatbot_telegram_enabled = parse_bool(value),
             "chatbot.feishu.enabled" => config.chatbot_feishu_enabled = parse_bool(value),
+            "chatbot.telegram.whitelist_user_ids" => {
+                config.chatbot_telegram_whitelist_user_ids = value.to_string()
+            }
+            "chatbot.feishu.chat_id" => config.chatbot_feishu_chat_id = value.to_string(),
+            "chatbot.telegram.poll_interval_seconds" => {
+                if let Ok(seconds) = value.parse::<u64>() {
+                    config.chatbot_telegram_poll_interval_seconds = seconds.max(1);
+                }
+            }
+            "chatbot.feishu.poll_interval_seconds" => {
+                if let Ok(seconds) = value.parse::<u64>() {
+                    config.chatbot_feishu_poll_interval_seconds = seconds.max(1);
+                }
+            }
             _ => {}
         }
     }
@@ -809,14 +860,20 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.endpoint={}\nai.provider.apikey={}\nchatbot.provider={}\nchatbot.telegram.apikey={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\n",
+        "ai.provider.endpoint={}\nai.provider.apikey={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_endpoint,
         config.ai_provider_apikey,
         enabled_provider_list(config),
+        config.chatbot_telegram_api_base,
         config.chatbot_telegram_apikey,
+        config.chatbot_feishu_api_base,
         config.chatbot_feishu_apikey,
         config.chatbot_telegram_enabled,
-        config.chatbot_feishu_enabled
+        config.chatbot_feishu_enabled,
+        config.chatbot_telegram_whitelist_user_ids,
+        config.chatbot_telegram_poll_interval_seconds,
+        config.chatbot_feishu_poll_interval_seconds,
+        config.chatbot_feishu_chat_id
     );
 
     fs::write(path, content)
@@ -909,6 +966,8 @@ struct BossSocketTransport {
     writer: BufWriter<UnixStream>,
 }
 
+const CHAT_META_PREFIX: &str = "__botty_meta__";
+
 impl BossSocketTransport {
     fn connect(path: &PathBuf) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
@@ -920,7 +979,8 @@ impl BossSocketTransport {
 
 impl TransportPlugin for BossSocketTransport {
     fn request(&mut self, message: &str) -> io::Result<String> {
-        writeln!(self.writer, "{message}")?;
+        let payload = encode_meta_message("tui", "tui", message);
+        writeln!(self.writer, "{payload}")?;
         self.writer.flush()?;
 
         let mut reply = String::new();
@@ -933,4 +993,8 @@ impl TransportPlugin for BossSocketTransport {
         }
         Ok(reply.trim_end().to_string())
     }
+}
+
+fn encode_meta_message(source: &str, user_id: &str, message: &str) -> String {
+    format!("{CHAT_META_PREFIX}|source={source}|user_id={user_id}|{message}")
 }
