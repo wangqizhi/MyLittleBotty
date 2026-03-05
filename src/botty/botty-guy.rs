@@ -1,11 +1,19 @@
 use std::ffi::CString;
 
 pub fn run() {
-    set_process_name("Botty-Guy");
+    set_process_name(guy_process_name());
     println!("helloworld");
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+fn guy_process_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "Botty-Guy-dev"
+    } else {
+        "Botty-Guy"
     }
 }
 

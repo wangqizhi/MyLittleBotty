@@ -8,6 +8,7 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.mylittlebotty/bin}"
 OUTPUT_PATH="${OUTPUT_PATH:-$INSTALL_DIR/$ASSET_NAME}"
 PATH_EXPORT_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
 PATH_MARKER="# mylittlebotty-path"
+BOSS_PID_FILE="${HOME}/.mylittlebotty/run/boss.pid"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "Error: only macOS is supported for now."
@@ -15,7 +16,39 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 find_botty_pids() {
-  pgrep -f 'Botty-Boss|Botty-Guy|mylittlebotty.*--boss-daemon|mylittlebotty.*--guy' || true
+  local boss_pid=""
+  if [[ -f "$BOSS_PID_FILE" ]]; then
+    boss_pid="$(tr -d '[:space:]' < "$BOSS_PID_FILE" || true)"
+  fi
+
+  if [[ -z "$boss_pid" || ! "$boss_pid" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+
+  if ! kill -0 "$boss_pid" 2>/dev/null; then
+    rm -f "$BOSS_PID_FILE"
+    return 0
+  fi
+
+  local -a queue=("$boss_pid")
+  local -a all=("$boss_pid")
+  local current children child
+
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    current="${queue[0]}"
+    queue=("${queue[@]:1}")
+    children="$(pgrep -P "$current" || true)"
+    if [[ -z "$children" ]]; then
+      continue
+    fi
+    while IFS= read -r child; do
+      [[ -z "$child" ]] && continue
+      all+=("$child")
+      queue+=("$child")
+    done <<< "$children"
+  done
+
+  printf "%s\n" "${all[@]}" | awk '!seen[$0]++'
 }
 
 stop_running_botty_if_needed() {
@@ -52,6 +85,7 @@ stop_running_botty_if_needed() {
         echo "Error: failed to stop all Botty processes."
         exit 1
       fi
+      rm -f "$BOSS_PID_FILE"
       ;;
     *)
       echo "Installation aborted."

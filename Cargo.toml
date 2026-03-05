@@ -1,7 +1,11 @@
 [package]
 name = "mylittlebotty"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
+
+[package.metadata.botty]
+download_url = "https://github.com/wangqizhi/MyLittleBotty/releases/latest/download/mylittlebotty"
+latest_release_api_url = "https://api.github.com/repos/wangqizhi/MyLittleBotty/releases/latest"
 
 [dependencies]
 libc = "0.2"
