@@ -264,18 +264,23 @@ impl StatusSnapshot {
 }
 
 fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
-    let mut boss_pids = find_pids_by_pattern(boss_process_name())?;
-    if let Some(pid) = read_pid_file(&boss_pid_file())? {
-        boss_pids.push(pid);
+    let mut boss_pids = Vec::new();
+    let mut guy_pids = Vec::new();
+
+    if let Some(boss_pid) = read_pid_file(&boss_pid_file())? {
+        if is_process_alive(boss_pid) {
+            boss_pids.push(boss_pid);
+            guy_pids = find_descendant_pids(boss_pid)?;
+            guy_pids.retain(|pid| is_process_alive(*pid));
+        } else {
+            let _ = fs::remove_file(boss_pid_file());
+        }
     }
+
     boss_pids.sort_unstable();
     boss_pids.dedup();
-    boss_pids.retain(|pid| is_process_alive(*pid));
-
-    let mut guy_pids = find_pids_by_pattern(guy_process_name())?;
     guy_pids.sort_unstable();
     guy_pids.dedup();
-    guy_pids.retain(|pid| is_process_alive(*pid));
 
     Ok(StatusSnapshot { boss_pids, guy_pids })
 }
@@ -392,6 +397,40 @@ fn format_pid_list(pids: &[i32]) -> String {
         .map(|pid| pid.to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn find_descendant_pids(root_pid: i32) -> io::Result<Vec<i32>> {
+    let mut all = Vec::new();
+    let mut queue = vec![root_pid];
+
+    while let Some(parent) = queue.pop() {
+        let children = find_child_pids(parent)?;
+        for child in children {
+            all.push(child);
+            queue.push(child);
+        }
+    }
+
+    Ok(all)
+}
+
+fn find_child_pids(parent_pid: i32) -> io::Result<Vec<i32>> {
+    let output = Command::new("pgrep")
+        .arg("-P")
+        .arg(parent_pid.to_string())
+        .output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let mut pids = Vec::new();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Ok(pid) = line.trim().parse::<i32>() {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
 }
 
 pub fn run_supervisor() {
