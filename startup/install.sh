@@ -28,7 +28,16 @@ stop_running_botty_if_needed() {
   echo "Detected running Botty process(es):"
   ps -p "$(echo "$pids" | paste -sd, -)" -o pid=,command= || true
   echo ""
-  read -r -p "Stop these processes and continue install? [y/N]: " answer
+  local answer=""
+  if [[ "${BOTTY_INSTALL_FORCE:-}" == "1" ]]; then
+    answer="y"
+  elif [[ -r /dev/tty ]]; then
+    read -r -p "Stop these processes and continue install? [y/N]: " answer < /dev/tty
+  else
+    echo "Installation aborted: no interactive terminal for confirmation."
+    echo "Set BOTTY_INSTALL_FORCE=1 to force stop and continue."
+    exit 1
+  fi
   case "${answer:-}" in
     y|Y|yes|YES)
       kill $pids || true
