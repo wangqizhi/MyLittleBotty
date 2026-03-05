@@ -12,8 +12,11 @@ fn main() {
         .expect("missing [package.metadata.botty] download_url in Cargo.toml");
     let latest_release_api_url = find_metadata_value(&content, "latest_release_api_url")
         .expect("missing [package.metadata.botty] latest_release_api_url in Cargo.toml");
+    let install_script_url = find_metadata_value(&content, "install_script_url")
+        .expect("missing [package.metadata.botty] install_script_url in Cargo.toml");
     println!("cargo:rustc-env=BOTTY_DOWNLOAD_URL={download_url}");
     println!("cargo:rustc-env=BOTTY_LATEST_RELEASE_API_URL={latest_release_api_url}");
+    println!("cargo:rustc-env=BOTTY_INSTALL_SCRIPT_URL={install_script_url}");
 }
 
 fn find_metadata_value(content: &str, key: &str) -> Option<String> {

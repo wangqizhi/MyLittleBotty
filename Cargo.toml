@@ -1,6 +1,6 @@
 [package]
 name = "mylittlebotty"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 
 authors = ["Kizi Wang <wangqizhi1987@gmail.com>"]
@@ -14,6 +14,7 @@ default-run = "mylittlebotty"
 [package.metadata.botty]
 download_url = "https://github.com/wangqizhi/MyLittleBotty/releases/latest/download/mylittlebotty"
 latest_release_api_url = "https://api.github.com/repos/wangqizhi/MyLittleBotty/releases/latest"
+install_script_url = "https://raw.githubusercontent.com/wangqizhi/MyLittleBotty/main/startup/install.sh"
 
 [dependencies]
 libc = "0.2"

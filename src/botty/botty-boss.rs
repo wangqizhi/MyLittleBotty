@@ -11,6 +11,8 @@ use std::process::{Command, ExitStatus, Stdio};
 
 const DOWNLOAD_URL: &str = env!("BOTTY_DOWNLOAD_URL");
 const LATEST_RELEASE_API_URL: &str = env!("BOTTY_LATEST_RELEASE_API_URL");
+const INSTALL_SCRIPT_URL: &str = env!("BOTTY_INSTALL_SCRIPT_URL");
+const CURL_MAX_TIME_SECONDS: &str = "60";
 
 pub fn start_daemon() -> io::Result<()> {
     if is_boss_running()? {
@@ -288,6 +290,8 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
 fn fetch_latest_release_tag() -> io::Result<String> {
     let output = Command::new("curl")
         .arg("-fsSL")
+        .arg("--max-time")
+        .arg(CURL_MAX_TIME_SECONDS)
         .arg("-H")
         .arg("Accept: application/vnd.github+json")
         .arg("-H")
@@ -296,7 +300,7 @@ fn fetch_latest_release_tag() -> io::Result<String> {
         .output()?;
 
     if !output.status.success() {
-        return Err(io::Error::other("failed to request latest release"));
+        return Err(curl_failure_error("failed to request latest release", &output));
     }
 
     let body = String::from_utf8_lossy(&output.stdout);
@@ -310,6 +314,8 @@ fn download_and_replace_binary() -> io::Result<()> {
 
     let output = Command::new("curl")
         .arg("-fsSL")
+        .arg("--max-time")
+        .arg(CURL_MAX_TIME_SECONDS)
         .arg("--retry")
         .arg("3")
         .arg("--retry-delay")
@@ -321,7 +327,7 @@ fn download_and_replace_binary() -> io::Result<()> {
 
     if !output.status.success() {
         let _ = fs::remove_file(&tmp_path);
-        return Err(io::Error::other("failed to download release asset"));
+        return Err(curl_failure_error("failed to download release asset", &output));
     }
 
     #[cfg(unix)]
@@ -333,6 +339,26 @@ fn download_and_replace_binary() -> io::Result<()> {
 
     fs::rename(&tmp_path, &exe)?;
     Ok(())
+}
+
+fn curl_failure_error(context: &str, output: &std::process::Output) -> io::Error {
+    let timeout = output.status.code() == Some(28);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+
+    let reason = if timeout {
+        format!(
+            "{context}: timeout after {CURL_MAX_TIME_SECONDS}s, unable to connect"
+        )
+    } else if detail.is_empty() {
+        context.to_string()
+    } else {
+        format!("{context}: {detail}")
+    };
+
+    io::Error::other(format!(
+        "{reason}\nPlease run installer:\ncurl -LsSf {INSTALL_SCRIPT_URL} | bash && source ~/.zshrc"
+    ))
 }
 
 fn extract_json_string(body: &str, key: &str) -> Option<String> {
