@@ -1,0 +1,22 @@
+# Build outputs
+/target/
+/release/
+/log/
+
+# macOS / system
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# AI tooling
+.codex/
+.cursor/
+
+# Env / local files
+.env
+.env.*
