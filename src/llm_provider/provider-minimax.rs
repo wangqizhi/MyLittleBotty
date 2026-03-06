@@ -28,9 +28,8 @@ impl LlmProvider for MinimaxProvider {
         tools: &[ProviderToolDefinition],
     ) -> io::Result<ProviderRequest> {
         let mut request = self.inner.build_request(system_prompt, messages, tools)?;
-        let mut payload: Value = serde_json::from_str(&request.payload).map_err(|err| {
-            io::Error::other(format!("parse minimax payload failed: {err}"))
-        })?;
+        let mut payload: Value = serde_json::from_str(&request.payload)
+            .map_err(|err| io::Error::other(format!("parse minimax payload failed: {err}")))?;
         payload["max_tokens"] = json!(MINIMAX_REQUEST_MAX_TOKENS);
         request.payload = serde_json::to_string(&payload)
             .map_err(|err| io::Error::other(format!("serialize minimax payload failed: {err}")))?;

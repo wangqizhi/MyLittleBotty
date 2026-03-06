@@ -116,8 +116,12 @@ fn create_reminder(input: &Value) -> io::Result<String> {
         id: format!("r{next_id:04}"),
         schedule_at: required_string(input, "schedule_at")?.to_string(),
         task_type: required_string(input, "task_type")?.to_string(),
-        task_text: optional_string(input, "task_text").unwrap_or_default().to_string(),
-        script_path: optional_string(input, "script_path").unwrap_or_default().to_string(),
+        task_text: optional_string(input, "task_text")
+            .unwrap_or_default()
+            .to_string(),
+        script_path: optional_string(input, "script_path")
+            .unwrap_or_default()
+            .to_string(),
         script_args: optional_string_array(input, "script_args"),
         enabled: input
             .get("enabled")
@@ -146,7 +150,9 @@ fn edit_reminder(input: &Value) -> io::Result<String> {
     let reminder = reminders
         .iter_mut()
         .find(|item| item.id == id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("reminder not found: {id}")))?;
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("reminder not found: {id}"))
+        })?;
 
     if let Some(schedule_at) = optional_string(input, "schedule_at") {
         reminder.schedule_at = schedule_at.to_string();
@@ -258,7 +264,10 @@ impl ReminderRecord {
                         .collect()
                 })
                 .unwrap_or_default(),
-            enabled: value.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+            enabled: value
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             status: value
                 .get("status")
                 .and_then(Value::as_str)

@@ -59,20 +59,17 @@ pub fn run() -> io::Result<()> {
 
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+            && pending_reply.is_some()
         {
-            if pending_reply.is_some() {
-                match crate::botty_boss::interrupt_active_request() {
-                    Ok(()) => app.push_system("Interrupt signal sent."),
-                    Err(err) => app.push_system(&format!("interrupt failed: {err}")),
-                }
-                app.finish_chat_request(Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "Request interrupted.",
-                )));
-                pending_reply = None;
-            } else {
-                app.push_system("Use /quit to exit TUI.");
+            match crate::botty_boss::interrupt_active_request() {
+                Ok(()) => app.push_system("Interrupt signal sent."),
+                Err(err) => app.push_system(&format!("interrupt failed: {err}")),
             }
+            app.finish_chat_request(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Request interrupted.",
+            )));
+            pending_reply = None;
             continue;
         }
 
@@ -93,11 +90,27 @@ fn handle_chat_key<R: FrontendRpc>(
     rpc: &mut R,
     key: KeyEvent,
 ) -> io::Result<SubmitOutcome> {
+    let suggestion_open = !app.command_suggestions().is_empty();
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => app.chat_move_home(),
+            KeyCode::Char('b') | KeyCode::Char('B') => app.chat_move_left(),
+            KeyCode::Char('c') | KeyCode::Char('C') => app.chat_clear(),
+            KeyCode::Char('d') | KeyCode::Char('D') => app.chat_delete(),
+            KeyCode::Char('e') | KeyCode::Char('E') => app.chat_move_end(),
+            KeyCode::Char('f') | KeyCode::Char('F') => app.chat_move_right(),
+            KeyCode::Char('h') | KeyCode::Char('H') => app.chat_backspace(),
+            KeyCode::Char('n') | KeyCode::Char('N') => app.chat_select_next(),
+            KeyCode::Char('p') | KeyCode::Char('P') => app.chat_select_prev(),
+            KeyCode::Char('u') | KeyCode::Char('U') => app.chat_clear(),
+            _ => {}
+        }
+        return Ok(SubmitOutcome::None);
+    }
+
     match key.code {
         KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                return Ok(SubmitOutcome::None);
-            }
             app.chat_insert(c);
             Ok(SubmitOutcome::None)
         }
@@ -105,16 +118,52 @@ fn handle_chat_key<R: FrontendRpc>(
             app.chat_backspace();
             Ok(SubmitOutcome::None)
         }
+        KeyCode::Delete => {
+            app.chat_delete();
+            Ok(SubmitOutcome::None)
+        }
+        KeyCode::Left => {
+            app.chat_move_left();
+            Ok(SubmitOutcome::None)
+        }
+        KeyCode::Right => {
+            app.chat_move_right();
+            Ok(SubmitOutcome::None)
+        }
+        KeyCode::Home => {
+            app.chat_move_home();
+            Ok(SubmitOutcome::None)
+        }
+        KeyCode::End => {
+            app.chat_move_end();
+            Ok(SubmitOutcome::None)
+        }
         KeyCode::Up => {
-            app.chat_select_prev();
+            if suggestion_open {
+                app.chat_select_prev_command();
+            } else {
+                app.chat_select_prev();
+            }
             Ok(SubmitOutcome::None)
         }
         KeyCode::Down => {
-            app.chat_select_next();
+            if suggestion_open {
+                app.chat_select_next_command();
+            } else {
+                app.chat_select_next();
+            }
             Ok(SubmitOutcome::None)
         }
         KeyCode::Esc => {
             app.chat_clear();
+            Ok(SubmitOutcome::None)
+        }
+        KeyCode::Tab => {
+            app.chat_select_next_command();
+            Ok(SubmitOutcome::None)
+        }
+        KeyCode::BackTab => {
+            app.chat_select_prev_command();
             Ok(SubmitOutcome::None)
         }
         KeyCode::Enter => app.submit_chat(rpc),
@@ -271,7 +320,7 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
     frame.render_widget(chat, chat_rect);
 
     let status = Paragraph::new(Line::raw(
-        "chat mode | Enter send | / for command | Ctrl+C exit",
+        "chat mode | Enter send | Up/Down history | Tab command | Ctrl+A/E home/end | Ctrl+C clear",
     ))
     .style(Style::default().fg(Color::Black).bg(Color::Cyan));
     frame.render_widget(status, status_rect);
@@ -286,7 +335,12 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
             .saturating_add(1)
             .saturating_sub(visible_count);
         let mut items = Vec::new();
-        for (offset, cmd) in suggestions.iter().skip(start).take(visible_count).enumerate() {
+        for (offset, cmd) in suggestions
+            .iter()
+            .skip(start)
+            .take(visible_count)
+            .enumerate()
+        {
             let idx = start + offset;
             let style = if idx == selected_command {
                 Style::default()
@@ -302,7 +356,7 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
         frame.render_widget(list, rect);
     }
 
-    place_cursor(frame, input_rect, text_display_width(app.input()));
+    place_cursor(frame, input_rect, text_display_width(&app.input()[..app.input_cursor()]));
 }
 
 fn spawn_chat_request(message: String) -> Receiver<io::Result<String>> {
@@ -435,7 +489,11 @@ fn render_provider_editor(frame: &mut Frame, editor: &ProviderEdit) {
             .title("Provider API Key | Ctrl+A Home | <- -> Move | Ctrl+C Clear"),
     );
     frame.render_widget(input, parts[1]);
-    place_cursor(frame, parts[1], text_display_width_at(editor.input.as_str(), editor.cursor));
+    place_cursor(
+        frame,
+        parts[1],
+        text_display_width_at(editor.input.as_str(), editor.cursor),
+    );
 }
 
 fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {
@@ -471,7 +529,11 @@ fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {
     let input = Paragraph::new(editor.input.as_str())
         .block(Block::default().borders(Borders::ALL).title(label));
     frame.render_widget(input, parts[1]);
-    place_cursor(frame, parts[1], text_display_width_at(editor.input.as_str(), editor.cursor));
+    place_cursor(
+        frame,
+        parts[1],
+        text_display_width_at(editor.input.as_str(), editor.cursor),
+    );
 }
 
 fn text_display_width(text: &str) -> u16 {

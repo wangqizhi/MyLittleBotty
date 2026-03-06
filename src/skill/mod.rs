@@ -1,7 +1,7 @@
-#[path = "buildin-watch.rs"]
-pub mod buildin_watch;
 #[path = "buildin-crond.rs"]
 pub mod buildin_crond;
+#[path = "buildin-watch.rs"]
+pub mod buildin_watch;
 
 use std::io;
 

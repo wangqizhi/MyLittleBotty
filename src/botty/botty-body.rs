@@ -63,11 +63,7 @@ impl BottyBody {
         let tools = self.tool_definitions();
         let system_prompt = build_system_prompt_with_deep_memory(DEEP_MEMORY_CONTEXT_ROUNDS)?;
         let conversation = [ProviderMessage::UserText(input.to_string())];
-        let first_response = self.brain.think(
-            &system_prompt,
-            &conversation,
-            &tools,
-        )?;
+        let first_response = self.brain.think(&system_prompt, &conversation, &tools)?;
 
         match first_response {
             ProviderResponse::Text(reply) => Ok(AssistantReply {
@@ -84,7 +80,8 @@ impl BottyBody {
         tools: &[ProviderToolDefinition],
         tool_use: ProviderToolUse,
     ) -> io::Result<AssistantReply> {
-        let tool_result = self.execute_tool(tool_use.name.as_str(), tool_use.input_json.as_str())?;
+        let tool_result =
+            self.execute_tool(tool_use.name.as_str(), tool_use.input_json.as_str())?;
         let system_prompt = build_system_prompt_with_deep_memory(DEEP_MEMORY_CONTEXT_ROUNDS)?;
         let conversation = [
             ProviderMessage::UserText(input.to_string()),
@@ -96,11 +93,7 @@ impl BottyBody {
                 content: tool_result,
             },
         ];
-        let final_response = self.brain.think(
-            &system_prompt,
-            &conversation,
-            tools,
-        )?;
+        let final_response = self.brain.think(&system_prompt, &conversation, tools)?;
 
         match final_response {
             ProviderResponse::Text(reply) => Ok(AssistantReply {
@@ -200,18 +193,16 @@ impl BottyBody {
     }
 
     fn run_summary_prompt(&self, user_prompt: &str) -> io::Result<String> {
-        let response = self
-            .brain
-            .think(
-                REMEMBER_SYSTEM_PROMPT,
-                &[ProviderMessage::UserText(user_prompt.to_string())],
-                &[],
-            )?;
+        let response = self.brain.think(
+            REMEMBER_SYSTEM_PROMPT,
+            &[ProviderMessage::UserText(user_prompt.to_string())],
+            &[],
+        )?;
         match response {
             ProviderResponse::Text(reply) => Ok(reply.text.trim().to_string()),
-            ProviderResponse::ToolUse(_) => {
-                Err(io::Error::other("remember summary unexpectedly returned a tool call"))
-            }
+            ProviderResponse::ToolUse(_) => Err(io::Error::other(
+                "remember summary unexpectedly returned a tool call",
+            )),
         }
     }
 
@@ -462,7 +453,10 @@ fn parse_deep_memory_timestamp(line: &str) -> Option<(String, &str)> {
 }
 
 fn new_session_marker_path() -> PathBuf {
-    botty_root_dir().join("memory").join("summary").join("new.time")
+    botty_root_dir()
+        .join("memory")
+        .join("summary")
+        .join("new.time")
 }
 
 fn remember_summary_path() -> PathBuf {

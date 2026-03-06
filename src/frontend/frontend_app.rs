@@ -55,7 +55,11 @@ pub enum SubmitOutcome {
 pub struct FrontendApp {
     history: Vec<ChatLine>,
     input: String,
+    input_cursor: usize,
     selected_command: usize,
+    command_history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_draft: String,
     mode: Mode,
     pending_chat: bool,
     thinking_frame: usize,
@@ -66,7 +70,11 @@ impl FrontendApp {
         let mut app = Self {
             history: Vec::new(),
             input: String::new(),
+            input_cursor: 0,
             selected_command: 0,
+            command_history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
             mode: Mode::Chat,
             pending_chat: false,
             thinking_frame: 0,
@@ -85,6 +93,10 @@ impl FrontendApp {
 
     pub fn selected_command(&self) -> usize {
         self.selected_command
+    }
+
+    pub fn input_cursor(&self) -> usize {
+        self.input_cursor
     }
 
     pub fn mode(&self) -> &Mode {
@@ -114,16 +126,83 @@ impl FrontendApp {
     }
 
     pub fn chat_insert(&mut self, c: char) {
-        self.input.push(c);
+        self.exit_history_navigation();
+        self.input.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
         self.selected_command = 0;
     }
 
     pub fn chat_backspace(&mut self) {
-        self.input.pop();
+        self.exit_history_navigation();
+        delete_previous_char(&mut self.input, &mut self.input_cursor);
         self.selected_command = 0;
     }
 
+    pub fn chat_delete(&mut self) {
+        self.exit_history_navigation();
+        delete_current_char(&mut self.input, self.input_cursor);
+        self.selected_command = 0;
+    }
+
+    pub fn chat_move_left(&mut self) {
+        self.input_cursor = previous_char_boundary(&self.input, self.input_cursor);
+    }
+
+    pub fn chat_move_right(&mut self) {
+        self.input_cursor = next_char_boundary(&self.input, self.input_cursor);
+    }
+
+    pub fn chat_move_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub fn chat_move_end(&mut self) {
+        self.input_cursor = self.input.len();
+    }
+
     pub fn chat_select_prev(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+
+        let next_index = match self.history_cursor {
+            Some(index) if index > 0 => index - 1,
+            Some(_) => 0,
+            None => {
+                self.history_draft = self.input.clone();
+                self.command_history.len() - 1
+            }
+        };
+
+        self.history_cursor = Some(next_index);
+        if let Some(entry) = self.command_history.get(next_index) {
+            self.input = entry.clone();
+            self.input_cursor = self.input.len();
+        }
+        self.selected_command = 0;
+    }
+
+    pub fn chat_select_next(&mut self) {
+        let Some(index) = self.history_cursor else {
+            return;
+        };
+
+        if index + 1 < self.command_history.len() {
+            let next_index = index + 1;
+            self.history_cursor = Some(next_index);
+            if let Some(entry) = self.command_history.get(next_index) {
+                self.input = entry.clone();
+                self.input_cursor = self.input.len();
+            }
+        } else {
+            self.history_cursor = None;
+            self.input = self.history_draft.clone();
+            self.input_cursor = self.input.len();
+        }
+        self.selected_command = 0;
+    }
+
+    pub fn chat_select_prev_command(&mut self) {
         let suggestions = self.command_suggestions();
         if suggestions.is_empty() {
             return;
@@ -136,7 +215,7 @@ impl FrontendApp {
         }
     }
 
-    pub fn chat_select_next(&mut self) {
+    pub fn chat_select_next_command(&mut self) {
         let suggestions = self.command_suggestions();
         if suggestions.is_empty() {
             return;
@@ -146,7 +225,9 @@ impl FrontendApp {
     }
 
     pub fn chat_clear(&mut self) {
+        self.exit_history_navigation();
         self.input.clear();
+        self.input_cursor = 0;
         self.selected_command = 0;
     }
 
@@ -163,11 +244,15 @@ impl FrontendApp {
         }
 
         self.input.clear();
+        self.input_cursor = 0;
         self.selected_command = 0;
+        self.history_cursor = None;
+        self.history_draft.clear();
 
         if message.is_empty() {
             return Ok(SubmitOutcome::None);
         }
+        self.push_command_history(&message);
         if matches!(message.as_str(), "/exit" | "/quit") {
             return Ok(SubmitOutcome::Quit);
         }
@@ -204,12 +289,14 @@ impl FrontendApp {
             config,
         };
         self.input.clear();
+        self.input_cursor = 0;
         Ok(())
     }
 
     pub fn cancel_setup(&mut self) {
         self.mode = Mode::Chat;
         self.input.clear();
+        self.input_cursor = 0;
         self.push_system("Setup canceled.");
     }
 
@@ -222,6 +309,7 @@ impl FrontendApp {
         let result = rpc.save_setup(&config)?;
         self.mode = Mode::Chat;
         self.input.clear();
+        self.input_cursor = 0;
         self.push_system(&format!("Setup saved to {}", result.config_path.display()));
         self.push_restart_status(result);
         Ok(())
@@ -525,10 +613,31 @@ impl FrontendApp {
     fn start_new_chat_session(&mut self) -> io::Result<()> {
         write_new_session_marker()?;
         self.history.clear();
+        self.input.clear();
+        self.input_cursor = 0;
+        self.selected_command = 0;
+        self.history_cursor = None;
+        self.history_draft.clear();
         self.pending_chat = false;
         self.thinking_frame = 0;
         self.push_system("Started a new chat session. Older history will not be sent.");
         Ok(())
+    }
+
+    fn exit_history_navigation(&mut self) {
+        self.history_cursor = None;
+        self.history_draft.clear();
+    }
+
+    fn push_command_history(&mut self, message: &str) {
+        if self.command_history.last().is_some_and(|last| last == message) {
+            return;
+        }
+
+        if self.command_history.len() == 100 {
+            self.command_history.remove(0);
+        }
+        self.command_history.push(message.to_string());
     }
 
     fn push_restart_status(&mut self, result: SaveSetupResult) {
@@ -586,7 +695,10 @@ fn delete_current_char(text: &mut String, cursor: usize) {
 }
 
 fn write_new_session_marker() -> io::Result<()> {
-    let path = botty_root_dir().join("memory").join("summary").join("new.time");
+    let path = botty_root_dir()
+        .join("memory")
+        .join("summary")
+        .join("new.time");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

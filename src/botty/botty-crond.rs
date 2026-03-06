@@ -83,11 +83,7 @@ fn execute_reminder(reminder: &ReminderRecord, now: &str) -> io::Result<String> 
                 "current_time": now,
             })
             .to_string();
-            let reply = ask_leader_guy(
-                "crond",
-                "scheduler",
-                &format!("/reminder-now {payload}"),
-            )?;
+            let reply = ask_leader_guy("crond", "scheduler", &format!("/reminder-now {payload}"))?;
             Ok(format!("executed at {now}: {reply}"))
         }
         "run_script" => Ok(format!(
@@ -192,7 +188,10 @@ impl ReminderRecord {
                         .collect()
                 })
                 .unwrap_or_default(),
-            enabled: value.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+            enabled: value
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             status: value
                 .get("status")
                 .and_then(Value::as_str)
