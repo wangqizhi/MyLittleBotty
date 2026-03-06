@@ -1,7 +1,11 @@
 use crate::frontend::frontend_service::{
     command_suggestions, FrontendRpc, RestartStatus, SaveSetupResult, SetupConfig, SetupFieldId,
 };
+use std::env;
+use std::fs;
 use std::io;
+use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Clone, Copy)]
 pub enum Role {
@@ -43,6 +47,7 @@ pub struct FieldEdit {
 pub enum SubmitOutcome {
     None,
     Quit,
+    SendChat(String),
 }
 
 pub struct FrontendApp {
@@ -50,6 +55,8 @@ pub struct FrontendApp {
     input: String,
     selected_command: usize,
     mode: Mode,
+    pending_chat: bool,
+    thinking_frame: usize,
 }
 
 impl FrontendApp {
@@ -59,6 +66,8 @@ impl FrontendApp {
             input: String::new(),
             selected_command: 0,
             mode: Mode::Chat,
+            pending_chat: false,
+            thinking_frame: 0,
         };
         app.push_system("TUI chat started. Type / for command suggestions.");
         app
@@ -82,6 +91,20 @@ impl FrontendApp {
 
     pub fn is_setup_mode(&self) -> bool {
         matches!(self.mode, Mode::Setup { .. })
+    }
+
+    pub fn pending_chat_text(&self) -> Option<String> {
+        if !self.pending_chat {
+            return None;
+        }
+
+        let dots = match self.thinking_frame % 4 {
+            0 => ".",
+            1 => "..",
+            2 => "...",
+            _ => "",
+        };
+        Some(format!("thinking{dots}"))
     }
 
     pub fn command_suggestions(&self) -> Vec<&'static str> {
@@ -126,6 +149,10 @@ impl FrontendApp {
     }
 
     pub fn submit_chat<R: FrontendRpc>(&mut self, rpc: &mut R) -> io::Result<SubmitOutcome> {
+        if self.pending_chat {
+            return Ok(SubmitOutcome::None);
+        }
+
         let mut message = self.input.trim().to_string();
         let suggestions = self.command_suggestions();
         if message.starts_with('/') && !suggestions.is_empty() {
@@ -146,13 +173,23 @@ impl FrontendApp {
             self.enter_setup(rpc)?;
             return Ok(SubmitOutcome::None);
         }
+        if message == "/restart-server" {
+            self.push_user(&message);
+            match rpc.restart_server() {
+                Ok(status) => self.push_restart_status_lines(status),
+                Err(err) => self.push_system(&format!("restart failed: {err}")),
+            }
+            return Ok(SubmitOutcome::None);
+        }
+        if message == "/new" {
+            self.start_new_chat_session()?;
+            return Ok(SubmitOutcome::None);
+        }
 
         self.push_user(&message);
-        match rpc.send_chat(&message) {
-            Ok(reply) => self.push_bot(&reply),
-            Err(err) => self.push_system(&format!("request failed: {err}")),
-        }
-        Ok(SubmitOutcome::None)
+        self.pending_chat = true;
+        self.thinking_frame = 0;
+        Ok(SubmitOutcome::SendChat(message))
     }
 
     pub fn enter_setup<R: FrontendRpc>(&mut self, rpc: &mut R) -> io::Result<()> {
@@ -316,7 +353,9 @@ impl FrontendApp {
         } else {
             provider.selected_provider -= 1;
         }
-        provider.input = config.provider_apikey(provider.selected_provider).to_string();
+        provider.input = config
+            .provider_apikey(provider.selected_provider)
+            .to_string();
     }
 
     pub fn editor_provider_next(&mut self) {
@@ -327,10 +366,11 @@ impl FrontendApp {
             return;
         };
 
-        provider.selected_provider =
-            (provider.selected_provider + 1)
-                % crate::frontend::frontend_service::CHATBOT_PROVIDERS.len();
-        provider.input = config.provider_apikey(provider.selected_provider).to_string();
+        provider.selected_provider = (provider.selected_provider + 1)
+            % crate::frontend::frontend_service::CHATBOT_PROVIDERS.len();
+        provider.input = config
+            .provider_apikey(provider.selected_provider)
+            .to_string();
     }
 
     pub fn editor_submit(&mut self) {
@@ -352,9 +392,9 @@ impl FrontendApp {
                     config.set_provider_apikey(provider.selected_provider, &value);
                 }
                 *selected_provider = provider.selected_provider;
-                config.chatbot_provider =
-                    crate::frontend::frontend_service::CHATBOT_PROVIDERS[*selected_provider]
-                        .to_string();
+                config.chatbot_provider = crate::frontend::frontend_service::CHATBOT_PROVIDERS
+                    [*selected_provider]
+                    .to_string();
                 close_editor = true;
             }
             Some(SetupEditor::Field(field)) => {
@@ -393,6 +433,24 @@ impl FrontendApp {
         });
     }
 
+    pub fn tick(&mut self) {
+        if self.pending_chat {
+            self.thinking_frame = self.thinking_frame.wrapping_add(1);
+        }
+    }
+
+    pub fn finish_chat_request(&mut self, result: io::Result<String>) {
+        self.pending_chat = false;
+        self.thinking_frame = 0;
+        match result {
+            Ok(reply) => self.push_bot(&reply),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                self.push_system("request interrupted.")
+            }
+            Err(err) => self.push_system(&format!("request failed: {err}")),
+        }
+    }
+
     fn clamp_selected_command(&mut self) {
         let len = self.command_suggestions().len();
         if len == 0 {
@@ -402,8 +460,21 @@ impl FrontendApp {
         }
     }
 
+    fn start_new_chat_session(&mut self) -> io::Result<()> {
+        write_new_session_marker()?;
+        self.history.clear();
+        self.pending_chat = false;
+        self.thinking_frame = 0;
+        self.push_system("Started a new chat session. Older history will not be sent.");
+        Ok(())
+    }
+
     fn push_restart_status(&mut self, result: SaveSetupResult) {
-        match result.restart_status {
+        self.push_restart_status_lines(result.restart_status);
+    }
+
+    fn push_restart_status_lines(&mut self, status: RestartStatus) {
+        match status {
             RestartStatus::Success(message) | RestartStatus::Failed(message) => {
                 for line in message.lines().filter(|line| !line.trim().is_empty()) {
                     self.push_system(line);
@@ -411,4 +482,28 @@ impl FrontendApp {
             }
         }
     }
+}
+
+fn write_new_session_marker() -> io::Result<()> {
+    let path = botty_root_dir().join("memory").join("summary").join("new.time");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, local_time_format("%Y-%m-%d %H:%M:%S")?)?;
+    Ok(())
+}
+
+fn botty_root_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mylittlebotty")
+}
+
+fn local_time_format(format: &str) -> io::Result<String> {
+    let output = Command::new("date").arg(format!("+{format}")).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("failed to get local time by date command"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

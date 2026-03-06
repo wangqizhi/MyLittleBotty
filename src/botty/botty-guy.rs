@@ -1,9 +1,10 @@
-use crate::botty_brain::BottyBrain;
+use crate::botty_body::{AssistantReply, BottyBody};
+use serde_json::{self, json};
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
-use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -25,10 +26,10 @@ const CHAT_META_PREFIX: &str = "__botty_meta__";
 
 pub fn run() {
     set_process_name(guy_process_name());
-    let brain = match BottyBrain::from_setup() {
-        Ok(brain) => brain,
+    let body = match BottyBody::from_setup() {
+        Ok(body) => body,
         Err(err) => {
-            eprintln!("Botty-Guy failed to load brain config: {err}");
+            eprintln!("Botty-Guy failed to load body config: {err}");
             return;
         }
     };
@@ -44,19 +45,36 @@ pub fn run() {
                 break;
             }
         };
-        let message = line.trim();
+        let message = match decode_ipc_line(line.trim_end()) {
+            Ok(message) => message,
+            Err(err) => {
+                eprintln!("Botty-Guy failed to decode input: {err}");
+                continue;
+            }
+        };
+        let message = message.trim();
         if message.is_empty() {
             continue;
         }
 
-        let reply = match brain.think(message) {
+        let reply = match body.think(message) {
             Ok(reply) => reply,
             Err(err) => {
-                eprintln!("Botty-Guy failed to ask llm: {err}");
-                "大模型请求失败".to_string()
+                eprintln!("Botty-Guy failed to process input: {err}");
+                AssistantReply {
+                    text: err.to_string(),
+                    thinking: None,
+                }
             }
         };
-        if let Err(err) = writeln!(stdout, "{reply}") {
+        let encoded_reply = match encode_ipc_line(&encode_assistant_reply(&reply)) {
+            Ok(reply) => reply,
+            Err(err) => {
+                eprintln!("Botty-Guy failed to encode output: {err}");
+                break;
+            }
+        };
+        if let Err(err) = writeln!(stdout, "{encoded_reply}") {
             eprintln!("Botty-Guy failed to write output: {err}");
             break;
         }
@@ -178,8 +196,14 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
 
             let user_id = plugin.user_id(&message);
             if !plugin.is_user_allowed(user_id) {
-                let _ = persist_chat_message("user", plugin.provider_name(), user_id, &message.text);
-                let _ = persist_chat_message("assistant", plugin.provider_name(), user_id, "Sorry, I'm just a little Botty.");
+                let _ =
+                    persist_chat_message("user", plugin.provider_name(), user_id, &message.text);
+                let _ = persist_chat_message(
+                    "assistant",
+                    plugin.provider_name(),
+                    user_id,
+                    "Sorry, I'm just a little Botty.",
+                );
                 match plugin.send_reply(&message.target, "Sorry, I'm just a little Botty.") {
                     Ok(Some(sent_id)) => {
                         let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
@@ -200,11 +224,16 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
                 Ok(reply) => reply,
                 Err(err) => {
                     eprintln!("{} ask leader failed: {err}", plugin.provider_name());
-                    continue;
+                    err.to_string()
                 }
             };
+            let outbound_reply = if plugin.provider_name() == "telegram" {
+                "Get ur order!".to_string()
+            } else {
+                reply.clone()
+            };
 
-            match plugin.send_reply(&message.target, &reply) {
+            match plugin.send_reply(&message.target, &outbound_reply) {
                 Ok(Some(sent_id)) => {
                     let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
                 }
@@ -515,7 +544,9 @@ fn select_chat_memory_file(
         }
     }
 
-    Err(io::Error::other("too many chat memory files for current day"))
+    Err(io::Error::other(
+        "too many chat memory files for current day",
+    ))
 }
 
 fn local_time_format(format: &str) -> io::Result<String> {
@@ -526,7 +557,11 @@ fn local_time_format(format: &str) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn fetch_telegram_updates(api_base: &str, apikey: &str, offset: i64) -> io::Result<Vec<TelegramUpdate>> {
+fn fetch_telegram_updates(
+    api_base: &str,
+    apikey: &str,
+    offset: i64,
+) -> io::Result<Vec<TelegramUpdate>> {
     let url = format!(
         "{api_base}/bot{apikey}/getUpdates?timeout=0&offset={offset}&allowed_updates=%5B%22message%22%5D"
     );
@@ -571,7 +606,11 @@ struct FeishuMessage {
     text: String,
 }
 
-fn fetch_feishu_messages(api_base: &str, apikey: &str, chat_id: &str) -> io::Result<Vec<FeishuMessage>> {
+fn fetch_feishu_messages(
+    api_base: &str,
+    apikey: &str,
+    chat_id: &str,
+) -> io::Result<Vec<FeishuMessage>> {
     let url = format!(
         "{api_base}/im/v1/messages?container_id_type=chat&container_id={chat_id}&sort_type=ByCreateTimeAsc&page_size=20"
     );
@@ -592,7 +631,12 @@ fn fetch_feishu_messages(api_base: &str, apikey: &str, chat_id: &str) -> io::Res
     Ok(parse_feishu_messages(&body))
 }
 
-fn send_feishu_message(api_base: &str, apikey: &str, chat_id: &str, text: &str) -> io::Result<Option<String>> {
+fn send_feishu_message(
+    api_base: &str,
+    apikey: &str,
+    chat_id: &str,
+    text: &str,
+) -> io::Result<Option<String>> {
     let url = format!("{api_base}/im/v1/messages?receive_id_type=chat_id");
     let escaped = escape_json_string(text);
     let payload = format!(
@@ -627,7 +671,11 @@ fn ask_leader_guy(source: &str, user_id: &str, message: &str) -> io::Result<Stri
     let stream = UnixStream::connect(crate::botty_boss::chat_socket_path())?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = BufWriter::new(stream);
-    writeln!(writer, "{}", encode_meta_message(source, user_id, message))?;
+    writeln!(
+        writer,
+        "{}",
+        encode_ipc_line(&encode_meta_message(source, user_id, message))?
+    )?;
     writer.flush()?;
 
     let mut reply = String::new();
@@ -638,11 +686,34 @@ fn ask_leader_guy(source: &str, user_id: &str, message: &str) -> io::Result<Stri
             "Botty-Boss closed socket",
         ));
     }
-    Ok(reply.trim_end().to_string())
+    let decoded = decode_ipc_line(reply.trim_end())?;
+    Ok(decoded)
+}
+
+fn encode_assistant_reply(reply: &AssistantReply) -> String {
+    json!({
+        "text": reply.text,
+        "thinking": reply.thinking,
+    })
+    .to_string()
 }
 
 fn encode_meta_message(source: &str, user_id: &str, message: &str) -> String {
     format!("{CHAT_META_PREFIX}|source={source}|user_id={user_id}|{message}")
+}
+
+fn encode_ipc_line(value: &str) -> io::Result<String> {
+    serde_json::to_string(value)
+        .map_err(|err| io::Error::other(format!("encode ipc line failed: {err}")))
+}
+
+fn decode_ipc_line(value: &str) -> io::Result<String> {
+    serde_json::from_str(value).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decode ipc line failed: {err}"),
+        )
+    })
 }
 
 fn parse_telegram_updates(body: &str) -> Vec<TelegramUpdate> {
@@ -808,9 +879,7 @@ fn parse_string_field(chunk: &str, field_name: &str) -> Option<String> {
     None
 }
 
-fn parse_u16_hex_from_chars(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) -> Option<u16> {
+fn parse_u16_hex_from_chars(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u16> {
     let mut hex = String::with_capacity(4);
     for _ in 0..4 {
         let ch = chars.next()?;

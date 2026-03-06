@@ -1,12 +1,17 @@
+#[path = "botty/botty-body.rs"]
+mod botty_body;
 #[path = "botty/botty-boss.rs"]
 mod botty_boss;
 #[path = "botty/botty-brain.rs"]
 mod botty_brain;
+#[path = "botty/botty-crond.rs"]
+mod botty_crond;
 #[path = "botty/botty-guy.rs"]
 mod botty_guy;
 mod frontend;
 mod io;
 mod llm_provider;
+mod skill;
 
 use std::env;
 
@@ -86,6 +91,11 @@ fn main() {
 
     if args.iter().any(|a| a == "--input-feishu") {
         botty_guy::run_feishu_input();
+        return;
+    }
+
+    if args.iter().any(|a| a == "--crond") {
+        botty_crond::run();
         return;
     }
 

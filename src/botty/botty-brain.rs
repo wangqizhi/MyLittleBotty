@@ -6,10 +6,13 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::llm_provider::provider_anthropic::AnthropicProvider;
 use crate::llm_provider::provider_minimax::MinimaxProvider;
-use crate::llm_provider::LlmProvider;
-
-const LLM_PLACEHOLDER_REPLY: &str = "大模型已经回应";
+use crate::llm_provider::provider_openai::OpenAiProvider;
+use crate::llm_provider::{
+    detect_provider, LlmProvider, ProviderKind, ProviderMessage, ProviderResponse,
+    ProviderToolDefinition,
+};
 
 pub struct BrainConfig {
     pub endpoint: String,
@@ -46,16 +49,31 @@ impl BottyBrain {
         })
     }
 
-    pub fn think(&self, input: &str) -> io::Result<String> {
+    pub fn think(
+        &self,
+        system_prompt: &str,
+        messages: &[ProviderMessage],
+        tools: &[ProviderToolDefinition],
+    ) -> io::Result<ProviderResponse> {
         if self.config.endpoint.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "ai.provider.endpoint is empty",
+                "AI provider endpoint is not configured. Please update your setup.",
+            ));
+        }
+        if self.config.apikey.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "AI provider API key is not configured. Please update your setup.",
             ));
         }
 
-        let provider = MinimaxProvider::from_config(&self.config);
-        let request = provider.build_request(input)?;
+        let provider: Box<dyn LlmProvider> = match detect_provider(&self.config) {
+            ProviderKind::Anthropic => Box::new(AnthropicProvider::from_config(&self.config)),
+            ProviderKind::Minimax => Box::new(MinimaxProvider::from_config(&self.config)),
+            ProviderKind::OpenAi => Box::new(OpenAiProvider::from_config(&self.config)),
+        };
+        let request = provider.build_request(system_prompt, messages, tools)?;
         self.log_debug("request-url", &request.url)?;
         self.log_debug("request", &request.payload)?;
 
@@ -84,13 +102,12 @@ impl BottyBrain {
         }
 
         if !output.status.success() {
-            return Err(io::Error::other(format!(
-                "llm request failed: {}",
-                response_error
+            return Err(io::Error::other(classify_provider_error(
+                response_error.as_str(),
             )));
         }
 
-        Ok(LLM_PLACEHOLDER_REPLY.to_string())
+        provider.parse_response(&response_body)
     }
 
     fn log_debug(&self, direction: &str, content: &str) -> io::Result<()> {
@@ -180,4 +197,50 @@ fn local_time_format(format: &str) -> io::Result<String> {
         return Err(io::Error::other("failed to get local time by date command"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn classify_provider_error(detail: &str) -> String {
+    let trimmed = detail.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if lower.contains(" 401") || lower.contains("error: 401") || lower.contains("unauthorized") {
+        return "AI provider request was rejected with 401 Unauthorized. Please check your API key."
+            .to_string();
+    }
+    if lower.contains(" 403") || lower.contains("error: 403") || lower.contains("forbidden") {
+        return "AI provider request was rejected with 403 Forbidden. Please check your API key and provider permissions."
+            .to_string();
+    }
+    if lower.contains(" 404") || lower.contains("error: 404") {
+        return "AI provider endpoint returned 404 Not Found. Please check the endpoint URL."
+            .to_string();
+    }
+    if lower.contains("could not resolve host")
+        || lower.contains("name or service not known")
+        || lower.contains("nodename nor servname provided")
+    {
+        return "AI provider endpoint could not be resolved. Please check the endpoint URL and your network."
+            .to_string();
+    }
+    if lower.contains("failed to connect")
+        || lower.contains("connection refused")
+        || lower.contains("couldn't connect")
+    {
+        return "Could not connect to the AI provider endpoint. Please check the endpoint URL and network access."
+            .to_string();
+    }
+    if lower.contains("operation timed out") || lower.contains("timed out") {
+        return "The AI provider request timed out. Please try again or check the endpoint availability."
+            .to_string();
+    }
+    if lower.contains("ssl") || lower.contains("certificate") {
+        return "The AI provider connection failed during TLS/SSL negotiation. Please check the endpoint configuration."
+            .to_string();
+    }
+    if trimmed.is_empty() {
+        return "AI provider request failed. Please check your endpoint and API key configuration."
+            .to_string();
+    }
+
+    format!("AI provider request failed. Please check your configuration. Details: {trimmed}")
 }

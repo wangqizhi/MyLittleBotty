@@ -4,9 +4,11 @@ use crate::frontend::frontend_app::{
 use crate::frontend::frontend_service::{
     mask_secret, FrontendRpc, LocalFrontendRpc, SetupConfig, CHATBOT_PROVIDERS,
 };
-use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,17 +16,33 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 pub fn run() -> io::Result<()> {
     let mut rpc = LocalFrontendRpc::connect()?;
     let mut app = FrontendApp::new();
+    let mut pending_reply: Option<Receiver<io::Result<String>>> = None;
 
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     loop {
+        if let Some(receiver) = pending_reply.as_ref() {
+            if let Ok(result) = receiver.try_recv() {
+                app.finish_chat_request(result);
+                pending_reply = None;
+            }
+        }
+
         terminal.draw(|f| render(&app, f))?;
+
+        if !poll(Duration::from_millis(120))? {
+            app.tick();
+            continue;
+        }
 
         let event = read()?;
         let Event::Key(key) = event else {
@@ -34,13 +52,36 @@ pub fn run() -> io::Result<()> {
             continue;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        {
+            if pending_reply.is_some() {
+                match crate::botty_boss::interrupt_active_request() {
+                    Ok(()) => app.push_system("Interrupt signal sent."),
+                    Err(err) => app.push_system(&format!("interrupt failed: {err}")),
+                }
+                app.finish_chat_request(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Request interrupted.",
+                )));
+                pending_reply = None;
+            } else {
+                app.push_system("Use /quit to exit TUI.");
+            }
+            continue;
+        }
+
         if app.is_setup_mode() {
             handle_setup_key(&mut app, &mut rpc, key)?;
             continue;
         }
 
-        if matches!(handle_chat_key(&mut app, &mut rpc, key)?, SubmitOutcome::Quit) {
-            break;
+        match handle_chat_key(&mut app, &mut rpc, key)? {
+            SubmitOutcome::Quit => break,
+            SubmitOutcome::SendChat(message) => {
+                pending_reply = Some(spawn_chat_request(message));
+            }
+            SubmitOutcome::None => {}
         }
     }
 
@@ -55,9 +96,6 @@ fn handle_chat_key<R: FrontendRpc>(
     match key.code {
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                if c == 'c' || c == 'C' {
-                    return Ok(SubmitOutcome::Quit);
-                }
                 return Ok(SubmitOutcome::None);
             }
             app.chat_insert(c);
@@ -104,7 +142,9 @@ fn handle_setup_key<R: FrontendRpc>(
             KeyCode::Right => app.editor_provider_next(),
             KeyCode::Backspace => app.editor_backspace(),
             KeyCode::Enter => app.editor_submit(),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.editor_insert(c),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.editor_insert(c)
+            }
             _ => {}
         }
         return Ok(());
@@ -112,7 +152,9 @@ fn handle_setup_key<R: FrontendRpc>(
 
     match key.code {
         KeyCode::Esc => app.cancel_setup(),
-        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') => {
+        KeyCode::Char(c)
+            if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') =>
+        {
             app.save_setup(rpc)?;
         }
         KeyCode::Up => app.setup_prev_field(),
@@ -136,7 +178,13 @@ fn render(app: &FrontendApp, frame: &mut Frame) {
             selected_provider,
             editor,
             config,
-        } => render_setup_page(frame, *selected_field, *selected_provider, editor.as_ref(), config),
+        } => render_setup_page(
+            frame,
+            *selected_field,
+            *selected_provider,
+            editor.as_ref(),
+            config,
+        ),
     }
 }
 
@@ -147,17 +195,22 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
     } else {
         app.selected_command().min(suggestions.len() - 1)
     };
+    let visible_suggestion_count = 4usize;
 
     let suggestion_height = if suggestions.is_empty() {
         0
     } else {
-        suggestions.len().min(4) as u16 + 2
+        suggestions.len().min(visible_suggestion_count) as u16 + 2
     };
 
     let layout = if suggestion_height == 0 {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(3)])
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ])
             .split(frame.area())
     } else {
         Layout::default()
@@ -174,7 +227,11 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
     let chat_rect = layout[0];
     let status_rect = layout[1];
     let input_rect = layout[2];
-    let suggestion_rect = if suggestion_height > 0 { Some(layout[3]) } else { None };
+    let suggestion_rect = if suggestion_height > 0 {
+        Some(layout[3])
+    } else {
+        None
+    };
 
     let chat_lines: Vec<Line> = app
         .history()
@@ -188,6 +245,10 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
             Line::raw(format!("{prefix}: {}", item.text))
         })
         .collect();
+    let mut chat_lines = chat_lines;
+    if let Some(thinking) = app.pending_chat_text() {
+        chat_lines.push(Line::raw(format!("system: {thinking}")));
+    }
     let max_visible = chat_rect.height.saturating_sub(2) as usize;
     let scroll = chat_lines.len().saturating_sub(max_visible) as u16;
 
@@ -197,17 +258,24 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
         .scroll((scroll, 0));
     frame.render_widget(chat, chat_rect);
 
-    let status = Paragraph::new(Line::raw("chat mode | Enter send | / for command | Ctrl+C exit"))
-        .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let status = Paragraph::new(Line::raw(
+        "chat mode | Enter send | / for command | Ctrl+C exit",
+    ))
+    .style(Style::default().fg(Color::Black).bg(Color::Cyan));
     frame.render_widget(status, status_rect);
 
-    let input = Paragraph::new(app.input())
-        .block(Block::default().borders(Borders::ALL).title("Input"));
+    let input =
+        Paragraph::new(app.input()).block(Block::default().borders(Borders::ALL).title("Input"));
     frame.render_widget(input, input_rect);
 
     if let Some(rect) = suggestion_rect {
+        let visible_count = suggestions.len().min(visible_suggestion_count);
+        let start = selected_command
+            .saturating_add(1)
+            .saturating_sub(visible_count);
         let mut items = Vec::new();
-        for (idx, cmd) in suggestions.iter().take(4).enumerate() {
+        for (offset, cmd) in suggestions.iter().skip(start).take(visible_count).enumerate() {
+            let idx = start + offset;
             let style = if idx == selected_command {
                 Style::default()
                     .fg(Color::Black)
@@ -223,6 +291,15 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
     }
 
     place_cursor(frame, input_rect, text_display_width(app.input()));
+}
+
+fn spawn_chat_request(message: String) -> Receiver<io::Result<String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = LocalFrontendRpc::connect().and_then(|mut rpc| rpc.send_chat(&message));
+        let _ = sender.send(result);
+    });
+    receiver
 }
 
 fn render_setup_page(
@@ -272,7 +349,8 @@ fn render_setup_page(
     );
     frame.render_widget(field_list, top[0]);
 
-    let selected = CHATBOT_PROVIDERS[selected_provider.min(CHATBOT_PROVIDERS.len().saturating_sub(1))];
+    let selected =
+        CHATBOT_PROVIDERS[selected_provider.min(CHATBOT_PROVIDERS.len().saturating_sub(1))];
     let side = Paragraph::new(Text::from(vec![
         Line::raw("Actions:"),
         Line::raw("- Ctrl+S: Save and return"),
@@ -338,8 +416,11 @@ fn render_provider_editor(frame: &mut Frame, editor: &ProviderEdit) {
     .wrap(Wrap { trim: false });
     frame.render_widget(hint, parts[0]);
 
-    let input = Paragraph::new(editor.input.as_str())
-        .block(Block::default().borders(Borders::ALL).title("Provider API Key"));
+    let input = Paragraph::new(editor.input.as_str()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Provider API Key"),
+    );
     frame.render_widget(input, parts[1]);
     place_cursor(frame, parts[1], text_display_width(editor.input.as_str()));
 }

@@ -1,5 +1,6 @@
-use std::env;
+use serde_json::{self, json, Value};
 use std::cmp::Ordering;
+use std::env;
 use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
@@ -14,6 +15,8 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -86,6 +89,12 @@ pub fn chat_socket_path() -> PathBuf {
         .join(format!("chat{}.sock", runtime_suffix()))
 }
 
+fn interrupt_flag_file() -> PathBuf {
+    botty_root_dir()
+        .join("run")
+        .join(format!("interrupt-current{}.flag", runtime_suffix()))
+}
+
 pub fn ensure_chat_ready() -> io::Result<()> {
     if !is_boss_running()? {
         start_daemon()?;
@@ -128,6 +137,7 @@ pub fn stop_all_report() -> io::Result<String> {
 
     targets.extend(find_pids_by_process_name(boss_process_name())?);
     targets.extend(find_pids_by_process_name(guy_process_name())?);
+    targets.extend(find_pids_by_process_name(crond_process_name())?);
     for spec in input_process_specs() {
         let name = spec.process_name();
         targets.extend(find_pids_by_process_name(&name)?);
@@ -156,11 +166,12 @@ pub fn stop_all_report() -> io::Result<String> {
     let _ = fs::remove_file(pid_path);
     let _ = fs::remove_file(chat_socket_path());
     let _ = fs::remove_file(guy_role_config_file());
+    let _ = fs::remove_file(crond_pid_file());
     if forced == 0 {
-        Ok("Stopped Botty-Boss and Botty-Guy".to_string())
+        Ok("Stopped Botty-Boss, Botty-Guy, and Botty-crond".to_string())
     } else {
         Ok(format!(
-            "Stopped Botty-Boss and Botty-Guy (force killed {forced})"
+            "Stopped Botty-Boss, Botty-Guy, and Botty-crond (force killed {forced})"
         ))
     }
 }
@@ -179,6 +190,21 @@ pub fn print_status() -> io::Result<()> {
     println!("Boss pids: {}", format_pid_list(&snapshot.boss_pids));
     println!("Guy process count: {}", snapshot.guy_pids.len());
     println!("Guy pids: {}", format_pid_list(&snapshot.guy_pids));
+    println!("Crond process count: {}", snapshot.crond_pids.len());
+    println!("Crond pids: {}", format_pid_list(&snapshot.crond_pids));
+    Ok(())
+}
+
+pub fn interrupt_active_request() -> io::Result<()> {
+    let flag = interrupt_flag_file();
+    if let Some(parent) = flag.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&flag, b"1")?;
+
+    if let Some(pid) = active_guy_pid()? {
+        send_signal(pid, libc::SIGINT)?;
+    }
     Ok(())
 }
 
@@ -264,6 +290,16 @@ fn read_pid_file(path: &PathBuf) -> io::Result<Option<i32>> {
     Ok(pid)
 }
 
+fn active_guy_pid() -> io::Result<Option<i32>> {
+    let entries = read_guy_role_entries(&guy_role_config_file())?;
+    for (pid, role) in entries {
+        if role == GUY_DEFAULT_ROLE && is_process_alive(pid) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
+}
+
 fn is_process_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -329,6 +365,7 @@ fn regex_escape(value: &str) -> String {
 struct StatusSnapshot {
     boss_pids: Vec<i32>,
     guy_pids: Vec<i32>,
+    crond_pids: Vec<i32>,
 }
 
 impl StatusSnapshot {
@@ -340,6 +377,7 @@ impl StatusSnapshot {
 fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
     let mut boss_pids = Vec::new();
     let mut guy_pids = Vec::new();
+    let mut crond_pids = find_pids_by_process_name(crond_process_name())?;
 
     if let Some(boss_pid) = read_pid_file(&boss_pid_file())? {
         if is_process_alive(boss_pid) {
@@ -348,6 +386,7 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
             let mut candidates = find_pids_by_process_name(guy_process_name())?;
             candidates.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
             guy_pids = candidates;
+            crond_pids.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
         } else {
             let _ = fs::remove_file(boss_pid_file());
         }
@@ -357,8 +396,14 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
     boss_pids.dedup();
     guy_pids.sort_unstable();
     guy_pids.dedup();
+    crond_pids.sort_unstable();
+    crond_pids.dedup();
 
-    Ok(StatusSnapshot { boss_pids, guy_pids })
+    Ok(StatusSnapshot {
+        boss_pids,
+        guy_pids,
+        crond_pids,
+    })
 }
 
 fn fetch_latest_release_tag() -> io::Result<String> {
@@ -374,7 +419,10 @@ fn fetch_latest_release_tag() -> io::Result<String> {
         .output()?;
 
     if !output.status.success() {
-        return Err(curl_failure_error("failed to request latest release", &output));
+        return Err(curl_failure_error(
+            "failed to request latest release",
+            &output,
+        ));
     }
 
     let body = String::from_utf8_lossy(&output.stdout);
@@ -401,7 +449,10 @@ fn download_and_replace_binary() -> io::Result<()> {
 
     if !output.status.success() {
         let _ = fs::remove_file(&tmp_path);
-        return Err(curl_failure_error("failed to download release asset", &output));
+        return Err(curl_failure_error(
+            "failed to download release asset",
+            &output,
+        ));
     }
 
     #[cfg(unix)]
@@ -421,9 +472,7 @@ fn curl_failure_error(context: &str, output: &std::process::Output) -> io::Error
     let detail = stderr.trim();
 
     let reason = if timeout {
-        format!(
-            "{context}: timeout after {CURL_MAX_TIME_SECONDS}s, unable to connect"
-        )
+        format!("{context}: timeout after {CURL_MAX_TIME_SECONDS}s, unable to connect")
     } else if detail.is_empty() {
         context.to_string()
     } else {
@@ -557,22 +606,21 @@ pub fn run_supervisor() {
         }
     };
 
-    let mut guy_bridge = match GuyBridge::spawn() {
-        Ok(bridge) => bridge,
-        Err(err) => {
-            eprintln!("Botty-Boss failed to run Botty-Guy: {err}");
-            return;
-        }
-    };
+    let (chat_tx, chat_rx) = mpsc::channel::<QueuedChatRequest>();
+    let _chat_worker = thread::spawn(move || run_chat_worker(chat_rx));
     let config = load_setup_config().unwrap_or_default();
     let _input_bridges = spawn_enabled_input_processes(&config);
+    let _crond_bridge = spawn_crond_process();
 
     loop {
         match _socket_guard.listener.accept() {
             Ok((stream, _)) => {
-                if let Err(err) = handle_chat_client(stream, &mut guy_bridge) {
-                    eprintln!("Botty-Boss failed to handle chat session: {err}");
-                }
+                let chat_tx = chat_tx.clone();
+                thread::spawn(move || {
+                    if let Err(err) = handle_chat_client(stream, chat_tx) {
+                        eprintln!("Botty-Boss failed to handle chat session: {err}");
+                    }
+                });
             }
             Err(err) => eprintln!("Botty-Boss accept error: {err}"),
         }
@@ -639,7 +687,7 @@ impl GuyBridge {
         })
     }
 
-    fn ask(&mut self, message: &str) -> io::Result<String> {
+    fn ask(&mut self, message: &str) -> io::Result<AssistantReply> {
         if self.child.try_wait()?.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -647,7 +695,7 @@ impl GuyBridge {
             ));
         }
 
-        writeln!(self.stdin, "{message}")?;
+        writeln!(self.stdin, "{}", encode_ipc_line(message)?)?;
         self.stdin.flush()?;
 
         let mut response = String::new();
@@ -659,7 +707,8 @@ impl GuyBridge {
             ));
         }
 
-        Ok(response.trim_end().to_string())
+        let decoded = decode_ipc_line(response.trim_end())?;
+        decode_assistant_reply(&decoded)
     }
 }
 
@@ -671,6 +720,37 @@ impl Drop for InputProcessBridge {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+fn spawn_crond_process() -> Option<InputProcessBridge> {
+    let exe = match env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!("Botty-Boss failed to get current executable path for Botty-crond: {err}");
+            return None;
+        }
+    };
+
+    let process_name = if cfg!(debug_assertions) {
+        "Botty-crond-dev"
+    } else {
+        "Botty-crond"
+    };
+
+    match Command::new(&exe)
+        .arg0(process_name)
+        .arg("--crond")
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => Some(InputProcessBridge { child }),
+        Err(err) => {
+            eprintln!("Botty-Boss failed to run {process_name}: {err}");
+            None
+        }
     }
 }
 
@@ -799,7 +879,7 @@ impl Drop for GuyBridge {
     }
 }
 
-fn handle_chat_client(stream: UnixStream, guy_bridge: &mut GuyBridge) -> io::Result<()> {
+fn handle_chat_client(stream: UnixStream, chat_tx: Sender<QueuedChatRequest>) -> io::Result<()> {
     let read_stream = stream.try_clone()?;
     let mut reader = BufReader::new(read_stream);
     let mut writer = BufWriter::new(stream);
@@ -816,25 +896,91 @@ fn handle_chat_client(stream: UnixStream, guy_bridge: &mut GuyBridge) -> io::Res
         if raw.is_empty() {
             continue;
         }
-        let incoming = parse_chat_meta_message(raw);
+        let decoded = decode_ipc_line(raw)?;
+        let incoming = parse_chat_meta_message(&decoded);
         if incoming.message.is_empty() {
             continue;
         }
 
-        let _ = persist_chat_message("user", &incoming.source, &incoming.user_id, &incoming.message);
+        let _ = persist_chat_message(
+            "user",
+            &incoming.source,
+            &incoming.user_id,
+            &incoming.message,
+        );
 
-        let response = match guy_bridge.ask(&incoming.message) {
-            Ok(response) => response,
+        let (reply_tx, reply_rx) = mpsc::channel();
+        chat_tx
+            .send(QueuedChatRequest { incoming, reply_tx })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "chat worker is not available")
+            })?;
+        let response = reply_rx.recv().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "chat worker closed reply channel",
+            )
+        })??;
+
+        writeln!(writer, "{}", encode_ipc_line(&response)?)?;
+        writer.flush()?;
+    }
+}
+
+struct QueuedChatRequest {
+    incoming: IncomingChatMessage,
+    reply_tx: Sender<io::Result<String>>,
+}
+
+struct AssistantReply {
+    text: String,
+    thinking: Option<String>,
+}
+
+fn run_chat_worker(chat_rx: Receiver<QueuedChatRequest>) {
+    let mut guy_bridge = match GuyBridge::spawn() {
+        Ok(bridge) => bridge,
+        Err(err) => {
+            eprintln!("Botty-Boss failed to run Botty-Guy: {err}");
+            return;
+        }
+    };
+
+    while let Ok(request) = chat_rx.recv() {
+        let leader_message = leader_message_for_source(&request.incoming);
+        let response = match guy_bridge.ask(&leader_message) {
+            Ok(response) => Ok(response),
             Err(_) => {
-                *guy_bridge = GuyBridge::spawn()?;
-                guy_bridge.ask(&incoming.message)?
+                if take_interrupt_flag() {
+                    let _ = request.reply_tx.send(Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "Request interrupted.",
+                    )));
+                    if let Ok(bridge) = GuyBridge::spawn() {
+                        guy_bridge = bridge;
+                    }
+                    continue;
+                }
+                match GuyBridge::spawn().and_then(|bridge| {
+                    guy_bridge = bridge;
+                    guy_bridge.ask(&leader_message)
+                }) {
+                    Ok(response) => Ok(response),
+                    Err(err) => Err(err),
+                }
             }
         };
 
-        let _ = persist_chat_message("assistant", &incoming.source, &incoming.user_id, &response);
+        if let Ok(reply) = &response {
+            let _ = persist_chat_message(
+                "assistant",
+                &request.incoming.source,
+                &request.incoming.user_id,
+                &format_assistant_memory_message(reply),
+            );
+        }
 
-        writeln!(writer, "{response}")?;
-        writer.flush()?;
+        let _ = request.reply_tx.send(response.map(|reply| reply.text));
     }
 }
 
@@ -844,6 +990,24 @@ struct IncomingChatMessage {
     source: String,
     user_id: String,
     message: String,
+}
+
+fn leader_message_for_source(incoming: &IncomingChatMessage) -> String {
+    let prefix = format!("{}: ", incoming.source);
+    if incoming.message.starts_with(&prefix) {
+        incoming.message.clone()
+    } else {
+        format!("{prefix}{}", incoming.message)
+    }
+}
+
+fn take_interrupt_flag() -> bool {
+    let path = interrupt_flag_file();
+    if !path.exists() {
+        return false;
+    }
+    let _ = fs::remove_file(path);
+    true
 }
 
 fn parse_chat_meta_message(raw: &str) -> IncomingChatMessage {
@@ -882,9 +1046,7 @@ fn persist_chat_message(role: &str, source: &str, user_id: &str, message: &str) 
     let month_day = local_time_format("%m%d")?;
     let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")?;
     let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
-    let line = format!(
-        "[{timestamp}] source={source} user_id={user_id} {role}: {sanitized}\n"
-    );
+    let line = format!("[{timestamp}] source={source} user_id={user_id} {role}: {sanitized}\n");
 
     let dir = botty_root_dir().join("memory").join("deep").join(year);
     fs::create_dir_all(&dir)?;
@@ -893,6 +1055,15 @@ fn persist_chat_message(role: &str, source: &str, user_id: &str, message: &str) 
     let mut file = OpenOptions::new().create(true).append(true).open(target)?;
     file.write_all(line.as_bytes())?;
     Ok(())
+}
+
+fn format_assistant_memory_message(reply: &AssistantReply) -> String {
+    match reply.thinking.as_deref().map(str::trim) {
+        Some(thinking) if !thinking.is_empty() => {
+            format!("|{{'thinking': {}}} | {}", json!(thinking), reply.text)
+        }
+        _ => reply.text.clone(),
+    }
 }
 
 fn select_chat_memory_file(
@@ -913,7 +1084,9 @@ fn select_chat_memory_file(
         }
     }
 
-    Err(io::Error::other("too many chat memory files for current day"))
+    Err(io::Error::other(
+        "too many chat memory files for current day",
+    ))
 }
 
 fn local_time_format(format: &str) -> io::Result<String> {
@@ -941,6 +1114,39 @@ fn wait_for_chat_socket(timeout: Duration) -> io::Result<()> {
     ))
 }
 
+fn encode_ipc_line(value: &str) -> io::Result<String> {
+    serde_json::to_string(value)
+        .map_err(|err| io::Error::other(format!("encode ipc line failed: {err}")))
+}
+
+fn decode_ipc_line(value: &str) -> io::Result<String> {
+    serde_json::from_str(value).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decode ipc line failed: {err}"),
+        )
+    })
+}
+
+fn decode_assistant_reply(raw: &str) -> io::Result<AssistantReply> {
+    let value: Value = serde_json::from_str(raw).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decode assistant reply failed: {err}"),
+        )
+    })?;
+    let text = value
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let thinking = value
+        .get("thinking")
+        .and_then(Value::as_str)
+        .map(|value| value.to_string());
+    Ok(AssistantReply { text, thinking })
+}
+
 fn runtime_suffix() -> &'static str {
     if cfg!(debug_assertions) {
         "-dev"
@@ -953,6 +1159,12 @@ fn setup_config_file() -> PathBuf {
     botty_root_dir()
         .join("config")
         .join(format!("setup{}.conf", runtime_suffix()))
+}
+
+fn crond_pid_file() -> PathBuf {
+    botty_root_dir()
+        .join("run")
+        .join(format!("crond{}.pid", runtime_suffix()))
 }
 
 struct SetupConfig {
@@ -1044,6 +1256,14 @@ fn guy_process_name() -> &'static str {
         "Botty-Guy-dev"
     } else {
         "Botty-Guy"
+    }
+}
+
+fn crond_process_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "Botty-crond-dev"
+    } else {
+        "Botty-crond"
     }
 }
 

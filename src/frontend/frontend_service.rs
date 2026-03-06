@@ -1,5 +1,6 @@
 use crate::botty_boss;
 use crate::io::transport::TransportPlugin;
+use serde_json;
 use std::env;
 use std::fs;
 use std::io;
@@ -10,7 +11,14 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-pub const COMMANDS: [&str; 3] = ["/setup", "/exit", "/quit"];
+pub const COMMANDS: [&str; 6] = [
+    "/setup",
+    "/restart-server",
+    "/new",
+    "/remember",
+    "/exit",
+    "/quit",
+];
 pub const CHATBOT_PROVIDERS: [&str; 2] = ["telegram", "feishu"];
 const CHAT_META_PREFIX: &str = "__botty_meta__";
 
@@ -278,12 +286,14 @@ pub enum RestartStatus {
 pub enum FrontendRequest {
     SendChat { message: String },
     LoadSetup,
+    RestartServer,
     SaveSetup { config: SetupConfig },
 }
 
 pub enum FrontendResponse {
     ChatReply { reply: String },
     SetupLoaded { config: SetupConfig },
+    ServerRestarted { status: RestartStatus },
     SetupSaved { result: SaveSetupResult },
 }
 
@@ -313,6 +323,16 @@ pub trait FrontendRpc {
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected response for LoadSetup",
+            )),
+        }
+    }
+
+    fn restart_server(&mut self) -> io::Result<RestartStatus> {
+        match self.call(FrontendRequest::RestartServer)? {
+            FrontendResponse::ServerRestarted { status } => Ok(status),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for RestartServer",
             )),
         }
     }
@@ -356,6 +376,13 @@ impl FrontendRpc for LocalFrontendRpc {
             FrontendRequest::LoadSetup => Ok(FrontendResponse::SetupLoaded {
                 config: load_setup_config()?,
             }),
+            FrontendRequest::RestartServer => {
+                let status = match botty_boss::restart_all_report() {
+                    Ok(lines) => RestartStatus::Success(lines.join("\n")),
+                    Err(err) => RestartStatus::Failed(format!("Restart failed: {err}")),
+                };
+                Ok(FrontendResponse::ServerRestarted { status })
+            }
             FrontendRequest::SaveSetup { config } => {
                 let path = setup_config_file();
                 save_setup_config(&config)?;
@@ -436,7 +463,7 @@ impl BossSocketTransport {
 impl TransportPlugin for BossSocketTransport {
     fn request(&mut self, message: &str) -> io::Result<String> {
         let payload = encode_meta_message("tui", "tui", message);
-        writeln!(self.writer, "{payload}")?;
+        writeln!(self.writer, "{}", encode_ipc_line(&payload)?)?;
         self.writer.flush()?;
 
         let mut reply = String::new();
@@ -447,12 +474,26 @@ impl TransportPlugin for BossSocketTransport {
                 "Botty-Boss closed connection",
             ));
         }
-        Ok(reply.trim_end().to_string())
+        decode_ipc_line(reply.trim_end())
     }
 }
 
 fn encode_meta_message(source: &str, user_id: &str, message: &str) -> String {
     format!("{CHAT_META_PREFIX}|source={source}|user_id={user_id}|{message}")
+}
+
+fn encode_ipc_line(value: &str) -> io::Result<String> {
+    serde_json::to_string(value)
+        .map_err(|err| io::Error::other(format!("encode ipc line failed: {err}")))
+}
+
+fn decode_ipc_line(value: &str) -> io::Result<String> {
+    serde_json::from_str(value).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decode ipc line failed: {err}"),
+        )
+    })
 }
 
 fn load_setup_config() -> io::Result<SetupConfig> {
