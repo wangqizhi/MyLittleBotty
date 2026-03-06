@@ -114,11 +114,11 @@ pub fn stop_all() -> io::Result<()> {
         targets.push(pid);
     }
 
-    targets.extend(find_pids_by_pattern(boss_process_name())?);
-    targets.extend(find_pids_by_pattern(guy_process_name())?);
+    targets.extend(find_pids_by_process_name(boss_process_name())?);
+    targets.extend(find_pids_by_process_name(guy_process_name())?);
     for spec in input_process_specs() {
         let name = spec.process_name();
-        targets.extend(find_pids_by_pattern(&name)?);
+        targets.extend(find_pids_by_process_name(&name)?);
     }
     targets.sort_unstable();
     targets.dedup();
@@ -187,7 +187,8 @@ pub fn update_self() -> io::Result<()> {
     }
 
     let snapshot = collect_status_snapshot()?;
-    if snapshot.boss_running() || !snapshot.guy_pids.is_empty() {
+    let should_restart_after_update = snapshot.boss_running() || !snapshot.guy_pids.is_empty();
+    if should_restart_after_update {
         println!("Detected running processes:");
         println!("Boss pids: {}", format_pid_list(&snapshot.boss_pids));
         println!("Guy pids: {}", format_pid_list(&snapshot.guy_pids));
@@ -200,6 +201,11 @@ pub fn update_self() -> io::Result<()> {
 
     download_and_replace_binary()?;
     println!("Updated mylittlebotty to {latest_version}");
+    if should_restart_after_update {
+        start_daemon()?;
+        wait_for_chat_socket(Duration::from_secs(5))?;
+        println!("Botty-Boss restarted");
+    }
     Ok(())
 }
 
@@ -276,7 +282,9 @@ fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
     }
 }
 
-fn find_pids_by_pattern(pattern: &str) -> io::Result<Vec<i32>> {
+fn find_pids_by_process_name(name: &str) -> io::Result<Vec<i32>> {
+    let escaped = regex_escape(name);
+    let pattern = format!("^{escaped}([[:space:]]|$)");
     let output = Command::new("pgrep").arg("-f").arg(pattern).output()?;
     if !output.status.success() {
         return Ok(Vec::new());
@@ -290,6 +298,20 @@ fn find_pids_by_pattern(pattern: &str) -> io::Result<Vec<i32>> {
         }
     }
     Ok(pids)
+}
+
+fn regex_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '.' | '^' | '$' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 struct StatusSnapshot {
@@ -311,7 +333,7 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
         if is_process_alive(boss_pid) {
             boss_pids.push(boss_pid);
             let descendants = find_descendant_pids(boss_pid)?;
-            let mut candidates = find_pids_by_pattern(guy_process_name())?;
+            let mut candidates = find_pids_by_process_name(guy_process_name())?;
             candidates.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
             guy_pids = candidates;
         } else {

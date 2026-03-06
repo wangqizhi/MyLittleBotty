@@ -1,6 +1,6 @@
 [package]
 name = "mylittlebotty"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 
 authors = ["Kizi Wang <wangqizhi1987@gmail.com>"]
@@ -20,3 +20,4 @@ install_script_url = "https://raw.githubusercontent.com/wangqizhi/MyLittleBotty/
 libc = "0.2"
 crossterm = "0.28.1"
 ratatui = { version = "0.29.0", default-features = false, features = ["crossterm"] }
+unicode-width = "0.2"
