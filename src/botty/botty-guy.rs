@@ -227,18 +227,33 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
                     err.to_string()
                 }
             };
-            let outbound_reply = if plugin.provider_name() == "telegram" {
-                "Get ur order!".to_string()
-            } else {
-                reply.clone()
-            };
-
-            match plugin.send_reply(&message.target, &outbound_reply) {
-                Ok(Some(sent_id)) => {
-                    let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
+            if plugin.provider_name() == "telegram" {
+                match plugin.send_reply(&message.target, "Get ur order!") {
+                    Ok(Some(sent_id)) => {
+                        let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
+                    }
+                    Ok(None) => {}
+                    Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
                 }
-                Ok(None) => {}
-                Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
+                if !reply.trim().is_empty() {
+                    match plugin.send_reply(&message.target, &reply) {
+                        Ok(Some(sent_id)) => {
+                            let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            eprintln!("{} send message failed: {err}", plugin.provider_name())
+                        }
+                    }
+                }
+            } else {
+                match plugin.send_reply(&message.target, &reply) {
+                    Ok(Some(sent_id)) => {
+                        let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
+                    }
+                    Ok(None) => {}
+                    Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
+                }
             }
         }
 
