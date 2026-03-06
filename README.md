@@ -93,7 +93,6 @@ Supported behavior:
 - `mylittlebotty webui`: entry exists, but the frontend is not implemented
 - `mylittlebotty app`: entry exists, but the frontend is not implemented
 - `crond` `run_script`: schema exists, but execution is not implemented
-- The CLI currently has no `--help` output
 
 ## Install
 
@@ -197,6 +196,19 @@ This is interactive. It will ask:
 mylittlebotty version
 ```
 
+### 7. Show help
+
+```bash
+mylittlebotty help
+```
+
+You can also use:
+
+```bash
+mylittlebotty --help
+mylittlebotty -h
+```
+
 ## Configuration
 
 The simplest way to configure the app is from the TUI:
@@ -254,6 +266,7 @@ The table below reflects everything currently implemented in `src/main.rs`.
 | Command | Purpose | Usage |
 | --- | --- | --- |
 | `mylittlebotty` | Start the `Botty-Boss` background daemon | `mylittlebotty` |
+| `mylittlebotty help` | Show CLI help | `mylittlebotty help` |
 | `mylittlebotty version` | Print the current version | `mylittlebotty version` |
 | `mylittlebotty status` | Show service status and PID information | `mylittlebotty status` |
 | `mylittlebotty stop` | Stop Botty-related processes | `mylittlebotty stop` |
@@ -262,6 +275,11 @@ The table below reflects everything currently implemented in `src/main.rs`.
 | `mylittlebotty tui` | Start the TUI frontend | `mylittlebotty tui` |
 | `mylittlebotty webui` | Reserved WebUI entry, not implemented yet | `mylittlebotty webui` |
 | `mylittlebotty app` | Reserved app frontend entry, not implemented yet | `mylittlebotty app` |
+
+Short help flags:
+
+- `mylittlebotty -h`
+- `mylittlebotty --help`
 
 ### Internal flags
 

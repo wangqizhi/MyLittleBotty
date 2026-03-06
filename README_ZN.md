@@ -91,7 +91,6 @@ TUI 内置命令：
 - `mylittlebotty webui`：当前未实现，执行会报错。
 - `mylittlebotty app`：当前未实现，执行会报错。
 - `crond` 的 `run_script` 实际执行逻辑：当前未实现。
-- CLI 当前没有 `--help` 输出。
 
 ## 安装
 
@@ -195,6 +194,19 @@ mylittlebotty update
 mylittlebotty version
 ```
 
+### 7. 查看帮助
+
+```bash
+mylittlebotty help
+```
+
+也可以使用：
+
+```bash
+mylittlebotty --help
+mylittlebotty -h
+```
+
 ## 配置方法
 
 最简单的方式是进入 TUI 后执行：
@@ -252,6 +264,7 @@ chatbot.feishu.chat_id=
 | 命令 | 作用 | 用法 |
 | --- | --- | --- |
 | `mylittlebotty` | 启动后台守护进程 `Botty-Boss` | `mylittlebotty` |
+| `mylittlebotty help` | 显示 CLI 帮助 | `mylittlebotty help` |
 | `mylittlebotty version` | 输出版本号 | `mylittlebotty version` |
 | `mylittlebotty status` | 查看后台服务状态和 PID 信息 | `mylittlebotty status` |
 | `mylittlebotty stop` | 停止 Botty 相关进程 | `mylittlebotty stop` |
@@ -260,6 +273,11 @@ chatbot.feishu.chat_id=
 | `mylittlebotty tui` | 启动 TUI 前端 | `mylittlebotty tui` |
 | `mylittlebotty webui` | 预留 WebUI 入口，当前未实现 | `mylittlebotty webui` |
 | `mylittlebotty app` | 预留 App 前端入口，当前未实现 | `mylittlebotty app` |
+
+简写帮助参数：
+
+- `mylittlebotty -h`
+- `mylittlebotty --help`
 
 ### 内部参数
 
