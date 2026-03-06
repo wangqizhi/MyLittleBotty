@@ -37,11 +37,13 @@ pub enum SetupEditor {
 pub struct ProviderEdit {
     pub selected_provider: usize,
     pub input: String,
+    pub cursor: usize,
 }
 
 pub struct FieldEdit {
     pub selected_field: SetupFieldId,
     pub input: String,
+    pub cursor: usize,
 }
 
 pub enum SubmitOutcome {
@@ -277,16 +279,20 @@ impl FrontendApp {
         }
 
         if field == SetupFieldId::ChatbotProvider {
+            let input = config.provider_apikey(*selected_provider).to_string();
             *editor = Some(SetupEditor::Provider(ProviderEdit {
                 selected_provider: *selected_provider,
-                input: config.provider_apikey(*selected_provider).to_string(),
+                cursor: input.len(),
+                input,
             }));
             return;
         }
 
+        let input = config.editable_value(field);
         *editor = Some(SetupEditor::Field(FieldEdit {
             selected_field: field,
-            input: config.editable_value(field),
+            cursor: input.len(),
+            input,
         }));
     }
 
@@ -319,10 +325,25 @@ impl FrontendApp {
         };
         match editor.as_mut() {
             Some(SetupEditor::Provider(provider)) => {
-                provider.input.pop();
+                delete_previous_char(&mut provider.input, &mut provider.cursor);
             }
             Some(SetupEditor::Field(field)) => {
-                field.input.pop();
+                delete_previous_char(&mut field.input, &mut field.cursor);
+            }
+            None => {}
+        }
+    }
+
+    pub fn editor_delete(&mut self) {
+        let Mode::Setup { editor, .. } = &mut self.mode else {
+            return;
+        };
+        match editor.as_mut() {
+            Some(SetupEditor::Provider(provider)) => {
+                delete_current_char(&mut provider.input, provider.cursor);
+            }
+            Some(SetupEditor::Field(field)) => {
+                delete_current_char(&mut field.input, field.cursor);
             }
             None => {}
         }
@@ -333,44 +354,85 @@ impl FrontendApp {
             return;
         };
         match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => provider.input.push(c),
-            Some(SetupEditor::Field(field)) => field.input.push(c),
+            Some(SetupEditor::Provider(provider)) => {
+                provider.input.insert(provider.cursor, c);
+                provider.cursor += c.len_utf8();
+            }
+            Some(SetupEditor::Field(field)) => {
+                field.input.insert(field.cursor, c);
+                field.cursor += c.len_utf8();
+            }
             None => {}
         }
     }
 
-    pub fn editor_provider_prev(&mut self) {
-        let Mode::Setup { editor, config, .. } = &mut self.mode else {
+    pub fn editor_move_left(&mut self) {
+        let Mode::Setup { editor, .. } = &mut self.mode else {
             return;
         };
-        let Some(SetupEditor::Provider(provider)) = editor.as_mut() else {
-            return;
-        };
-
-        if provider.selected_provider == 0 {
-            provider.selected_provider =
-                crate::frontend::frontend_service::CHATBOT_PROVIDERS.len() - 1;
-        } else {
-            provider.selected_provider -= 1;
+        match editor.as_mut() {
+            Some(SetupEditor::Provider(provider)) => {
+                provider.cursor = previous_char_boundary(&provider.input, provider.cursor);
+            }
+            Some(SetupEditor::Field(field)) => {
+                field.cursor = previous_char_boundary(&field.input, field.cursor);
+            }
+            None => {}
         }
-        provider.input = config
-            .provider_apikey(provider.selected_provider)
-            .to_string();
     }
 
-    pub fn editor_provider_next(&mut self) {
-        let Mode::Setup { editor, config, .. } = &mut self.mode else {
+    pub fn editor_move_right(&mut self) {
+        let Mode::Setup { editor, .. } = &mut self.mode else {
             return;
         };
-        let Some(SetupEditor::Provider(provider)) = editor.as_mut() else {
-            return;
-        };
+        match editor.as_mut() {
+            Some(SetupEditor::Provider(provider)) => {
+                provider.cursor = next_char_boundary(&provider.input, provider.cursor);
+            }
+            Some(SetupEditor::Field(field)) => {
+                field.cursor = next_char_boundary(&field.input, field.cursor);
+            }
+            None => {}
+        }
+    }
 
-        provider.selected_provider = (provider.selected_provider + 1)
-            % crate::frontend::frontend_service::CHATBOT_PROVIDERS.len();
-        provider.input = config
-            .provider_apikey(provider.selected_provider)
-            .to_string();
+    pub fn editor_move_home(&mut self) {
+        let Mode::Setup { editor, .. } = &mut self.mode else {
+            return;
+        };
+        match editor.as_mut() {
+            Some(SetupEditor::Provider(provider)) => provider.cursor = 0,
+            Some(SetupEditor::Field(field)) => field.cursor = 0,
+            None => {}
+        }
+    }
+
+    pub fn editor_move_end(&mut self) {
+        let Mode::Setup { editor, .. } = &mut self.mode else {
+            return;
+        };
+        match editor.as_mut() {
+            Some(SetupEditor::Provider(provider)) => provider.cursor = provider.input.len(),
+            Some(SetupEditor::Field(field)) => field.cursor = field.input.len(),
+            None => {}
+        }
+    }
+
+    pub fn editor_clear(&mut self) {
+        let Mode::Setup { editor, .. } = &mut self.mode else {
+            return;
+        };
+        match editor.as_mut() {
+            Some(SetupEditor::Provider(provider)) => {
+                provider.input.clear();
+                provider.cursor = 0;
+            }
+            Some(SetupEditor::Field(field)) => {
+                field.input.clear();
+                field.cursor = 0;
+            }
+            None => {}
+        }
     }
 
     pub fn editor_submit(&mut self) {
@@ -482,6 +544,45 @@ impl FrontendApp {
             }
         }
     }
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let mut index = cursor.saturating_sub(1);
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
+    let mut index = cursor + 1;
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index.min(text.len())
+}
+
+fn delete_previous_char(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let start = previous_char_boundary(text, *cursor);
+    text.drain(start..*cursor);
+    *cursor = start;
+}
+
+fn delete_current_char(text: &mut String, cursor: usize) {
+    if cursor >= text.len() {
+        return;
+    }
+    let end = next_char_boundary(text, cursor);
+    text.drain(cursor..end);
 }
 
 fn write_new_session_marker() -> io::Result<()> {

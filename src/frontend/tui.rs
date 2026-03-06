@@ -52,6 +52,11 @@ pub fn run() -> io::Result<()> {
             continue;
         }
 
+        if app.is_setup_mode() {
+            handle_setup_key(&mut app, &mut rpc, key)?;
+            continue;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
@@ -68,11 +73,6 @@ pub fn run() -> io::Result<()> {
             } else {
                 app.push_system("Use /quit to exit TUI.");
             }
-            continue;
-        }
-
-        if app.is_setup_mode() {
-            handle_setup_key(&mut app, &mut rpc, key)?;
             continue;
         }
 
@@ -136,11 +136,23 @@ fn handle_setup_key<R: FrontendRpc>(
     );
 
     if editor_open {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('a') | KeyCode::Char('A') => app.editor_move_home(),
+                KeyCode::Char('c') | KeyCode::Char('C') => app.editor_clear(),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc => app.editor_cancel(),
-            KeyCode::Left => app.editor_provider_prev(),
-            KeyCode::Right => app.editor_provider_next(),
+            KeyCode::Left => app.editor_move_left(),
+            KeyCode::Right => app.editor_move_right(),
+            KeyCode::Home => app.editor_move_home(),
+            KeyCode::End => app.editor_move_end(),
             KeyCode::Backspace => app.editor_backspace(),
+            KeyCode::Delete => app.editor_delete(),
             KeyCode::Enter => app.editor_submit(),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.editor_insert(c)
@@ -406,11 +418,12 @@ fn render_provider_editor(frame: &mut Frame, editor: &ProviderEdit) {
         .selected_provider
         .min(CHATBOT_PROVIDERS.len().saturating_sub(1))];
     let hint = Paragraph::new(Text::from(vec![
-        Line::raw("Left/Right: switch provider"),
-        Line::raw("Type: edit apikey"),
+        Line::raw("Left/Right: move cursor"),
+        Line::raw("Ctrl+A: line start | Ctrl+C: clear"),
         Line::raw("Enter: save provider+apikey"),
         Line::raw("Esc: cancel"),
         Line::raw(""),
+        Line::raw("Use setup Left/Right outside editor to switch provider"),
         Line::raw(format!("Provider: {selected}")),
     ]))
     .wrap(Wrap { trim: false });
@@ -419,16 +432,18 @@ fn render_provider_editor(frame: &mut Frame, editor: &ProviderEdit) {
     let input = Paragraph::new(editor.input.as_str()).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Provider API Key"),
+            .title("Provider API Key | Ctrl+A Home | <- -> Move | Ctrl+C Clear"),
     );
     frame.render_widget(input, parts[1]);
-    place_cursor(frame, parts[1], text_display_width(editor.input.as_str()));
+    place_cursor(frame, parts[1], text_display_width_at(editor.input.as_str(), editor.cursor));
 }
 
 fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {
     let area = centered_rect(frame.area(), 70, 24);
     frame.render_widget(Clear, area);
-    let block = Block::default().borders(Borders::ALL).title("Edit Value");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Edit Value | Ctrl+A Home | <- -> Move | Ctrl+C Clear");
     frame.render_widget(block, area);
 
     let inner = Rect {
@@ -456,11 +471,18 @@ fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {
     let input = Paragraph::new(editor.input.as_str())
         .block(Block::default().borders(Borders::ALL).title(label));
     frame.render_widget(input, parts[1]);
-    place_cursor(frame, parts[1], text_display_width(editor.input.as_str()));
+    place_cursor(frame, parts[1], text_display_width_at(editor.input.as_str(), editor.cursor));
 }
 
 fn text_display_width(text: &str) -> u16 {
     text.width().min(u16::MAX as usize) as u16 + 1
+}
+
+fn text_display_width_at(text: &str, cursor: usize) -> u16 {
+    text[..cursor.min(text.len())]
+        .width()
+        .min(u16::MAX as usize) as u16
+        + 1
 }
 
 fn place_cursor(frame: &mut Frame, input_rect: Rect, desired_col: u16) {
