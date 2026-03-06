@@ -18,6 +18,8 @@ const CHAT_META_PREFIX: &str = "__botty_meta__";
 pub enum SetupFieldId {
     AiProviderEndpoint,
     AiProviderApikey,
+    AiProviderModel,
+    AiProviderDebug,
     ChatbotProvider,
     TelegramEnabled,
     FeishuEnabled,
@@ -27,9 +29,11 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 8] = [
+    pub const ALL: [SetupFieldId; 10] = [
         SetupFieldId::AiProviderEndpoint,
         SetupFieldId::AiProviderApikey,
+        SetupFieldId::AiProviderModel,
+        SetupFieldId::AiProviderDebug,
         SetupFieldId::ChatbotProvider,
         SetupFieldId::TelegramEnabled,
         SetupFieldId::FeishuEnabled,
@@ -49,6 +53,8 @@ impl SetupFieldId {
         match self {
             SetupFieldId::AiProviderEndpoint => "AI provider endpoint",
             SetupFieldId::AiProviderApikey => "AI provider apikey",
+            SetupFieldId::AiProviderModel => "AI provider model",
+            SetupFieldId::AiProviderDebug => "AI provider debug",
             SetupFieldId::ChatbotProvider => "chatbot provider",
             SetupFieldId::TelegramEnabled => "telegram enabled",
             SetupFieldId::FeishuEnabled => "feishu enabled",
@@ -61,7 +67,9 @@ impl SetupFieldId {
     pub fn is_toggle(self) -> bool {
         matches!(
             self,
-            SetupFieldId::TelegramEnabled | SetupFieldId::FeishuEnabled
+            SetupFieldId::AiProviderDebug
+                | SetupFieldId::TelegramEnabled
+                | SetupFieldId::FeishuEnabled
         )
     }
 
@@ -81,6 +89,8 @@ pub struct SetupFieldView {
 pub struct SetupConfig {
     pub ai_provider_endpoint: String,
     pub ai_provider_apikey: String,
+    pub ai_provider_model: String,
+    pub ai_provider_debug: bool,
     pub chatbot_provider: String,
     pub chatbot_telegram_api_base: String,
     pub chatbot_telegram_apikey: String,
@@ -99,6 +109,8 @@ impl Default for SetupConfig {
         Self {
             ai_provider_endpoint: String::new(),
             ai_provider_apikey: String::new(),
+            ai_provider_model: "MiniMax-M2.1".to_string(),
+            ai_provider_debug: false,
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
             chatbot_telegram_apikey: String::new(),
@@ -138,6 +150,14 @@ impl SetupConfig {
         match field {
             SetupFieldId::AiProviderEndpoint => self.ai_provider_endpoint.clone(),
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey.clone(),
+            SetupFieldId::AiProviderModel => self.ai_provider_model.clone(),
+            SetupFieldId::AiProviderDebug => {
+                if self.ai_provider_debug {
+                    "[x] true".to_string()
+                } else {
+                    "[ ] false".to_string()
+                }
+            }
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramEnabled => {
                 if self.chatbot_telegram_enabled {
@@ -167,6 +187,8 @@ impl SetupConfig {
         match field {
             SetupFieldId::AiProviderEndpoint => self.ai_provider_endpoint.clone(),
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey.clone(),
+            SetupFieldId::AiProviderModel => self.ai_provider_model.clone(),
+            SetupFieldId::AiProviderDebug => String::new(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramPollSeconds => {
                 self.chatbot_telegram_poll_interval_seconds.to_string()
@@ -183,6 +205,8 @@ impl SetupConfig {
         match field {
             SetupFieldId::AiProviderEndpoint => self.ai_provider_endpoint = value.to_string(),
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey = value.to_string(),
+            SetupFieldId::AiProviderModel => self.ai_provider_model = value.to_string(),
+            SetupFieldId::AiProviderDebug => {}
             SetupFieldId::ChatbotProvider => self.chatbot_provider = value.to_string(),
             SetupFieldId::TelegramPollSeconds => {
                 if let Ok(seconds) = value.trim().parse::<u64>() {
@@ -199,6 +223,7 @@ impl SetupConfig {
 
     pub fn toggle_field(&mut self, field: SetupFieldId) {
         match field {
+            SetupFieldId::AiProviderDebug => self.ai_provider_debug = !self.ai_provider_debug,
             SetupFieldId::TelegramEnabled => {
                 self.chatbot_telegram_enabled = !self.chatbot_telegram_enabled
             }
@@ -334,8 +359,8 @@ impl FrontendRpc for LocalFrontendRpc {
             FrontendRequest::SaveSetup { config } => {
                 let path = setup_config_file();
                 save_setup_config(&config)?;
-                let restart_status = match botty_boss::restart_all() {
-                    Ok(()) => RestartStatus::Success("Botty input processes restarted.".to_string()),
+                let restart_status = match botty_boss::restart_all_report() {
+                    Ok(lines) => RestartStatus::Success(lines.join("\n")),
                     Err(err) => RestartStatus::Failed(format!("Auto restart failed: {err}")),
                 };
 
@@ -451,8 +476,12 @@ fn load_setup_config() -> io::Result<SetupConfig> {
         match key.trim() {
             "ai.provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
             "ai.provider.apikey" => config.ai_provider_apikey = value.to_string(),
+            "ai.provider.model" => config.ai_provider_model = value.to_string(),
+            "ai.provider.debug" => config.ai_provider_debug = parse_bool(value),
             "provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
             "provider.apikey" => config.ai_provider_apikey = value.to_string(),
+            "provider.model" => config.ai_provider_model = value.to_string(),
+            "provider.debug" => config.ai_provider_debug = parse_bool(value),
             "chatbot.provider" => apply_chatbot_provider_list(&mut config, value),
             "chatbot.telegram.api_base" => config.chatbot_telegram_api_base = value.to_string(),
             "chatbot.telegram.apikey" => config.chatbot_telegram_apikey = value.to_string(),
@@ -495,9 +524,11 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.endpoint={}\nai.provider.apikey={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_endpoint,
         config.ai_provider_apikey,
+        config.ai_provider_model,
+        config.ai_provider_debug,
         enabled_provider_list(config),
         config.chatbot_telegram_api_base,
         config.chatbot_telegram_apikey,

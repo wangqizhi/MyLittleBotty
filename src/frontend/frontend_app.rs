@@ -404,8 +404,11 @@ impl FrontendApp {
 
     fn push_restart_status(&mut self, result: SaveSetupResult) {
         match result.restart_status {
-            RestartStatus::Success(message) => self.push_system(&message),
-            RestartStatus::Failed(message) => self.push_system(&message),
+            RestartStatus::Success(message) | RestartStatus::Failed(message) => {
+                for line in message.lines().filter(|line| !line.trim().is_empty()) {
+                    self.push_system(line);
+                }
+            }
         }
     }
 }

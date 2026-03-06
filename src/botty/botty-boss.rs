@@ -108,6 +108,18 @@ pub fn is_boss_running() -> io::Result<bool> {
 }
 
 pub fn stop_all() -> io::Result<()> {
+    println!("{}", stop_all_report()?);
+    Ok(())
+}
+
+pub fn restart_all() -> io::Result<()> {
+    for line in restart_all_report()? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub fn stop_all_report() -> io::Result<String> {
     let mut targets = Vec::new();
     let pid_path = boss_pid_file();
     if let Some(pid) = read_pid_file(&pid_path)? {
@@ -124,9 +136,8 @@ pub fn stop_all() -> io::Result<()> {
     targets.dedup();
 
     if targets.is_empty() {
-        println!("No Botty processes running");
         let _ = fs::remove_file(pid_path);
-        return Ok(());
+        return Ok("No Botty processes running".to_string());
     }
 
     for &pid in &targets {
@@ -146,19 +157,20 @@ pub fn stop_all() -> io::Result<()> {
     let _ = fs::remove_file(chat_socket_path());
     let _ = fs::remove_file(guy_role_config_file());
     if forced == 0 {
-        println!("Stopped Botty-Boss and Botty-Guy");
+        Ok("Stopped Botty-Boss and Botty-Guy".to_string())
     } else {
-        println!("Stopped Botty-Boss and Botty-Guy (force killed {forced})");
+        Ok(format!(
+            "Stopped Botty-Boss and Botty-Guy (force killed {forced})"
+        ))
     }
-    Ok(())
 }
 
-pub fn restart_all() -> io::Result<()> {
-    stop_all()?;
+pub fn restart_all_report() -> io::Result<Vec<String>> {
+    let mut lines = vec![stop_all_report()?];
     start_daemon()?;
     wait_for_chat_socket(Duration::from_secs(5))?;
-    println!("Botty-Boss restarted");
-    Ok(())
+    lines.push("Botty-Boss restarted".to_string());
+    Ok(lines)
 }
 
 pub fn print_status() -> io::Result<()> {
@@ -944,6 +956,7 @@ fn setup_config_file() -> PathBuf {
 }
 
 struct SetupConfig {
+    ai_provider_debug: bool,
     telegram_enabled: bool,
     telegram_apikey: String,
     feishu_enabled: bool,
@@ -954,6 +967,7 @@ struct SetupConfig {
 impl Default for SetupConfig {
     fn default() -> Self {
         Self {
+            ai_provider_debug: false,
             telegram_enabled: true,
             telegram_apikey: String::new(),
             feishu_enabled: false,
@@ -992,6 +1006,8 @@ fn load_setup_config() -> io::Result<SetupConfig> {
                     .map(|s| s.trim())
                     .any(|provider| provider == "feishu");
             }
+            "ai.provider.debug" => config.ai_provider_debug = parse_bool(value),
+            "provider.debug" => config.ai_provider_debug = parse_bool(value),
             "chatbot.telegram.enabled" => config.telegram_enabled = parse_bool(value),
             "chatbot.telegram.apikey" => config.telegram_apikey = value.to_string(),
             "chatbot.feishu.enabled" => config.feishu_enabled = parse_bool(value),

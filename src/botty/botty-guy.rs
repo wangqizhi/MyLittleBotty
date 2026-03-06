@@ -1,3 +1,4 @@
+use crate::botty_brain::BottyBrain;
 use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
@@ -24,6 +25,13 @@ const CHAT_META_PREFIX: &str = "__botty_meta__";
 
 pub fn run() {
     set_process_name(guy_process_name());
+    let brain = match BottyBrain::from_setup() {
+        Ok(brain) => brain,
+        Err(err) => {
+            eprintln!("Botty-Guy failed to load brain config: {err}");
+            return;
+        }
+    };
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut lines = stdin.lock().lines();
@@ -41,7 +49,13 @@ pub fn run() {
             continue;
         }
 
-        let reply = format!("收到：{message}");
+        let reply = match brain.think(message) {
+            Ok(reply) => reply,
+            Err(err) => {
+                eprintln!("Botty-Guy failed to ask llm: {err}");
+                "大模型请求失败".to_string()
+            }
+        };
         if let Err(err) = writeln!(stdout, "{reply}") {
             eprintln!("Botty-Guy failed to write output: {err}");
             break;

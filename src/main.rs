@@ -1,9 +1,12 @@
 #[path = "botty/botty-boss.rs"]
 mod botty_boss;
+#[path = "botty/botty-brain.rs"]
+mod botty_brain;
 #[path = "botty/botty-guy.rs"]
 mod botty_guy;
 mod frontend;
 mod io;
+mod llm_provider;
 
 use std::env;
 
