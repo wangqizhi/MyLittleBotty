@@ -220,13 +220,6 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
             }
             let prefixed = format!("{}: {normalized}", plugin.provider_name());
 
-            let reply = match ask_leader_guy(plugin.provider_name(), user_id, &prefixed) {
-                Ok(reply) => reply,
-                Err(err) => {
-                    eprintln!("{} ask leader failed: {err}", plugin.provider_name());
-                    err.to_string()
-                }
-            };
             if plugin.provider_name() == "telegram" {
                 match plugin.send_reply(&message.target, "Get ur order!") {
                     Ok(Some(sent_id)) => {
@@ -235,6 +228,16 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
                     Ok(None) => {}
                     Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
                 }
+            }
+
+            let reply = match ask_leader_guy(plugin.provider_name(), user_id, &prefixed) {
+                Ok(reply) => reply,
+                Err(err) => {
+                    eprintln!("{} ask leader failed: {err}", plugin.provider_name());
+                    err.to_string()
+                }
+            };
+            if plugin.provider_name() == "telegram" {
                 if !reply.trim().is_empty() {
                     match plugin.send_reply(&message.target, &reply) {
                         Ok(Some(sent_id)) => {

@@ -35,6 +35,11 @@ TUI 内置命令：
 - Anthropic
 - MiniMax
 
+测试状态：
+
+- 实际只测试过 MiniMax。
+- OpenAI 兼容接口和 Anthropic 目前只是代码里有适配，尚未经过真实使用验证。
+
 实际使用依赖配置文件中的：
 
 - `ai.provider.endpoint`
@@ -66,6 +71,11 @@ TUI 内置命令：
 
 - Telegram 轮询收消息并回消息
 - 飞书群聊轮询收消息并回消息
+
+测试状态：
+
+- Telegram 是当前主要使用和验证过的接入方式。
+- 飞书目前更适合视为占位接入，尚未完整测试。
 
 支持能力：
 
@@ -249,9 +259,9 @@ chatbot.feishu.chat_id=
 - `ai.provider.debug`：是否记录调试日志
 - `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道
-- `chatbot.feishu.enabled`：是否启用飞书输入通道
+- `chatbot.feishu.enabled`：是否启用飞书输入通道占位配置
 - `chatbot.telegram.whitelist_user_ids`：Telegram 允许访问的用户 ID，多个值用逗号分隔
-- `chatbot.feishu.chat_id`：飞书目标会话 ID
+- `chatbot.feishu.chat_id`：飞书目标会话 ID 占位配置
 
 修改完配置后，TUI 保存时会自动触发一次服务重启。
 

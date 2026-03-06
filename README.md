@@ -37,6 +37,11 @@ The code currently supports these provider adapters:
 - Anthropic
 - MiniMax
 
+Testing status:
+
+- Only MiniMax has been tested in practice.
+- OpenAI-compatible and Anthropic adapters exist in code, but have not been verified in real use yet.
+
 Runtime behavior depends on these config keys:
 
 - `ai.provider.endpoint`
@@ -68,6 +73,11 @@ Two input channels are currently implemented:
 
 - Telegram polling and reply
 - Feishu polling and reply
+
+Testing status:
+
+- Telegram is the primary implemented channel.
+- Feishu is currently best treated as a placeholder integration and has not been fully tested yet.
 
 Supported behavior:
 
@@ -251,9 +261,9 @@ Common meanings:
 - `ai.provider.debug`: enable request/response debug logging
 - `chatbot.provider`: selected chatbot provider, currently `telegram` or `feishu`
 - `chatbot.telegram.enabled`: enable Telegram input worker
-- `chatbot.feishu.enabled`: enable Feishu input worker
+- `chatbot.feishu.enabled`: enable Feishu input worker placeholder
 - `chatbot.telegram.whitelist_user_ids`: comma-separated Telegram user IDs allowed to access the bot
-- `chatbot.feishu.chat_id`: target Feishu chat ID
+- `chatbot.feishu.chat_id`: target Feishu chat ID placeholder
 
 Saving from the TUI automatically triggers a service restart.
 
