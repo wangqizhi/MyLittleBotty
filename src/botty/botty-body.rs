@@ -1,14 +1,10 @@
 use crate::botty_brain::BottyBrain;
+use crate::botty_guy::{expand_role_skill_names, resolve_role_spec, BottyGuyRoleSpec};
 use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
 };
 use crate::prompt;
-use crate::skill::buildin_crond::BuildinCrondSkill;
-use crate::skill::buildin_list::BuildinListSkill;
-use crate::skill::buildin_remember::BuildinRememberSkill;
-use crate::skill::buildin_watch::BuildinWatchSkill;
-use crate::skill::buildin_write::BuildinWriteSkill;
-use crate::skill::BottySkill;
+use crate::skill::{build_skill, BottySkill};
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -28,20 +24,33 @@ pub struct AssistantReply {
 
 pub struct BottyBody {
     brain: BottyBrain,
+    role_spec: &'static BottyGuyRoleSpec,
     skills: Vec<Box<dyn BottySkill>>,
 }
 
 impl BottyBody {
-    pub fn from_setup() -> io::Result<Self> {
+    pub fn from_setup(role: &str) -> io::Result<Self> {
+        let role_spec = resolve_role_spec(role).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown Botty-Guy role: {role}"),
+            )
+        })?;
+        let mut skills = Vec::new();
+        for skill_name in expand_role_skill_names(role_spec) {
+            let skill = build_skill(skill_name).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown skill in role `{}`: {skill_name}", role_spec.role),
+                )
+            })?;
+            skills.push(skill);
+        }
+
         Ok(Self {
             brain: BottyBrain::from_setup()?,
-            skills: vec![
-                Box::new(BuildinListSkill::new()),
-                Box::new(BuildinWatchSkill::new()),
-                Box::new(BuildinWriteSkill::new()),
-                Box::new(BuildinRememberSkill::new()),
-                Box::new(BuildinCrondSkill::new()),
-            ],
+            role_spec,
+            skills,
         })
     }
 
@@ -66,7 +75,8 @@ impl BottyBody {
         }
 
         let tools = self.tool_definitions();
-        let system_prompt = build_system_prompt_with_deep_memory(DEEP_MEMORY_CONTEXT_ROUNDS)?;
+        let system_prompt =
+            build_system_prompt_for_role(self.role_spec, DEEP_MEMORY_CONTEXT_ROUNDS)?;
         let conversation = [ProviderMessage::UserText(input.to_string())];
         let first_response = self.brain.think(&system_prompt, &conversation, &tools)?;
 
@@ -85,7 +95,8 @@ impl BottyBody {
         tools: &[ProviderToolDefinition],
         first_tool_use: ProviderToolUse,
     ) -> io::Result<AssistantReply> {
-        let system_prompt = build_system_prompt_with_deep_memory(DEEP_MEMORY_CONTEXT_ROUNDS)?;
+        let system_prompt =
+            build_system_prompt_for_role(self.role_spec, DEEP_MEMORY_CONTEXT_ROUNDS)?;
         let mut conversation = vec![ProviderMessage::UserText(input.to_string())];
         let mut tool_use = first_tool_use;
 
@@ -311,9 +322,17 @@ enum DeepMemoryRole {
     Assistant,
 }
 
-fn build_system_prompt_with_deep_memory(rounds: usize) -> io::Result<String> {
-    let remember = load_remember_summary()?;
-    let memory = load_recent_deep_memory_transcript(rounds)?;
+fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> io::Result<String> {
+    let remember = if role_spec.include_memory_context {
+        load_remember_summary()?
+    } else {
+        String::new()
+    };
+    let memory = if role_spec.include_memory_context {
+        load_recent_deep_memory_transcript(rounds)?
+    } else {
+        String::new()
+    };
     let current_local_time = local_time_string()?;
     let remember_section = if remember.is_empty() {
         String::new()
@@ -330,6 +349,9 @@ fn build_system_prompt_with_deep_memory(rounds: usize) -> io::Result<String> {
     Ok(prompt::render(
         prompt::TOOL_SYSTEM_PROMPT,
         &[
+            ("role_name", role_spec.role),
+            ("role_description", role_spec.description),
+            ("role_instruction", role_spec.system_instruction_prompt),
             ("remember_section", &remember_section),
             ("memory_section", &memory_section),
             ("current_local_time", &current_local_time),

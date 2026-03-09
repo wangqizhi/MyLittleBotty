@@ -121,9 +121,14 @@ impl BottyBrain {
         }
 
         let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")?;
+        let role = env::var("BOTTY_GUY_ROLE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "leader".to_string());
         let sanitized = content.replace('\n', "\\n").replace('\r', "\\r");
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "[{timestamp}] {direction}: {sanitized}")?;
+        writeln!(file, "[{timestamp}] role={role} {direction}: {sanitized}")?;
         Ok(())
     }
 }

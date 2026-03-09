@@ -681,11 +681,12 @@ struct GuyBridge {
 }
 
 impl GuyBridge {
-    fn spawn() -> io::Result<Self> {
+    fn spawn(role: &str) -> io::Result<Self> {
         let exe = env::current_exe()?;
         let mut cmd = Command::new(exe);
         cmd.arg0(guy_process_name())
             .arg("--guy")
+            .env("BOTTY_GUY_ROLE", role)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -698,7 +699,7 @@ impl GuyBridge {
 
         let child_pid = i32::try_from(child.id())
             .map_err(|_| io::Error::other("failed to convert guy pid to i32"))?;
-        persist_guy_role(child_pid, GUY_DEFAULT_ROLE)?;
+        persist_guy_role(child_pid, role)?;
 
         let stdin = child
             .stdin
@@ -826,7 +827,9 @@ fn spawn_enabled_input_processes(config: &SetupConfig) -> Vec<InputProcessBridge
     let exe = match env::current_exe() {
         Ok(exe) => exe,
         Err(err) => {
-            boss_log_error(&format!("Botty-Boss failed to get current executable path: {err}"));
+            boss_log_error(&format!(
+                "Botty-Boss failed to get current executable path: {err}"
+            ));
             return bridges;
         }
     };
@@ -1009,7 +1012,7 @@ struct AssistantReply {
 }
 
 fn run_chat_worker(chat_rx: Receiver<QueuedChatRequest>) {
-    let mut guy_bridge = match GuyBridge::spawn() {
+    let mut guy_bridge = match GuyBridge::spawn(GUY_DEFAULT_ROLE) {
         Ok(bridge) => bridge,
         Err(err) => {
             boss_log_error(&format!("Botty-Boss failed to run Botty-Guy: {err}"));
@@ -1033,12 +1036,12 @@ fn run_chat_worker(chat_rx: Receiver<QueuedChatRequest>) {
                         io::ErrorKind::Interrupted,
                         "Request interrupted.",
                     )));
-                    if let Ok(bridge) = GuyBridge::spawn() {
+                    if let Ok(bridge) = GuyBridge::spawn(GUY_DEFAULT_ROLE) {
                         guy_bridge = bridge;
                     }
                     continue;
                 }
-                match GuyBridge::spawn().and_then(|bridge| {
+                match GuyBridge::spawn(GUY_DEFAULT_ROLE).and_then(|bridge| {
                     guy_bridge = bridge;
                     guy_bridge.ask(&leader_message)
                 }) {
@@ -1199,8 +1202,8 @@ fn boss_log_error(message: &str) {
 }
 
 fn write_boss_log_line(writer: &mut dyn Write, message: &str) -> io::Result<()> {
-    let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")
-        .unwrap_or_else(|_| "unknown-time".to_string());
+    let timestamp =
+        local_time_format("%Y-%m-%d %H:%M:%S").unwrap_or_else(|_| "unknown-time".to_string());
     writeln!(writer, "[{timestamp}] {message}")
 }
 

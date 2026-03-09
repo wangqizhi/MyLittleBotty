@@ -44,7 +44,9 @@ fn print_history(files: &[PathBuf], threshold: &str, is_debug: bool) -> io::Resu
             Err(err) => return Err(err),
         };
         let lines: Vec<&str> = content.lines().collect();
-        let has_line_timestamps = lines.iter().any(|line| split_timestamped_line(line).is_some());
+        let has_line_timestamps = lines
+            .iter()
+            .any(|line| split_timestamped_line(line).is_some());
 
         let header = if is_debug { "debug" } else { "log" };
         println!("== {header}: {} ==", path.display());
@@ -160,27 +162,45 @@ fn format_debug_line(line: &str) -> String {
     let Some((timestamp, payload)) = split_timestamped_line(line) else {
         return line.to_string();
     };
+    let (role, payload) = split_debug_role(payload);
+    let role_prefix = role.map(|role| format!(" role={role}")).unwrap_or_default();
 
     if let Some(url) = payload.strip_prefix("request-url: ") {
-        return format!("[{timestamp}] request-url {}", url.trim());
+        return format!("[{timestamp}]{role_prefix} request-url {}", url.trim());
     }
 
     if let Some(json) = payload.strip_prefix("request: ") {
-        return format!("[{timestamp}] {}", summarize_debug_request(json));
+        return format!(
+            "[{timestamp}]{role_prefix} {}",
+            summarize_debug_request(json)
+        );
     }
 
     if let Some(json) = payload.strip_prefix("response: ") {
-        return format!("[{timestamp}] {}", summarize_debug_response(json));
+        return format!(
+            "[{timestamp}]{role_prefix} {}",
+            summarize_debug_response(json)
+        );
     }
 
     if let Some(stderr) = payload.strip_prefix("response-stderr: ") {
         return format!(
-            "[{timestamp}] response-stderr {}",
+            "[{timestamp}]{role_prefix} response-stderr {}",
             truncate_text(stderr.trim(), CONTENT_PREVIEW_LIMIT)
         );
     }
 
     line.to_string()
+}
+
+fn split_debug_role(payload: &str) -> (Option<&str>, &str) {
+    let Some(rest) = payload.strip_prefix("role=") else {
+        return (None, payload);
+    };
+    let Some((role, remainder)) = rest.split_once(' ') else {
+        return (Some(rest.trim()), "");
+    };
+    (Some(role.trim()), remainder.trim_start())
 }
 
 fn summarize_debug_request(json: &str) -> String {

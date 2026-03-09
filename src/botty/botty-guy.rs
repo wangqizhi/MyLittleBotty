@@ -1,4 +1,5 @@
 use crate::botty_body::{AssistantReply, BottyBody};
+use crate::prompt;
 use serde_json::{self, json};
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -16,6 +17,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+pub(crate) const BOTTY_GUY_ROLE_ENV: &str = "BOTTY_GUY_ROLE";
+const BOTTY_GUY_DEFAULT_ROLE: &str = "leader";
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const TELEGRAM_POLL_INTERVAL_SECONDS_DEFAULT: u64 = 1;
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
@@ -25,9 +28,46 @@ const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
 const CHAT_META_PREFIX: &str = "__botty_meta__";
 const CONTROL_PREFIX: &str = "__botty_control__";
 
+#[derive(Clone, Copy)]
+pub(crate) struct BottyGuyRoleSpec {
+    pub role: &'static str,
+    pub description: &'static str,
+    pub system_instruction_prompt: &'static str,
+    pub skill_groups: &'static [&'static str],
+    pub skills: &'static [&'static str],
+    pub include_memory_context: bool,
+}
+
+const BASE_SKILL_GROUP: &[&str] = &["list", "watch", "write"];
+const LEADER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
+    role: "leader",
+    description: "Dispatch tasks to the right role and manage scheduled tasks.",
+    system_instruction_prompt: prompt::ROLE_LEADER_SYSTEM_PROMPT,
+    skill_groups: &["base"],
+    skills: &["crond", "leader"],
+    include_memory_context: true,
+};
+const PAPERWORK_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
+    role: "paperwork",
+    description: "Handle document writing, note taking, and paperwork-oriented local tasks.",
+    system_instruction_prompt: prompt::ROLE_PAPERWORK_SYSTEM_PROMPT,
+    skill_groups: &["base"],
+    skills: &[],
+    include_memory_context: false,
+};
+const ALL_IN_ONE_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
+    role: "all-in-one",
+    description: "Fallback worker with every built-in skill enabled.",
+    system_instruction_prompt: prompt::ROLE_ALL_IN_ONE_SYSTEM_PROMPT,
+    skill_groups: &["base"],
+    skills: &["remember", "crond"],
+    include_memory_context: false,
+};
+
 pub fn run() {
     set_process_name(guy_process_name());
-    let body = match BottyBody::from_setup() {
+    let role = requested_role();
+    let body = match BottyBody::from_setup(role.as_str()) {
         Ok(body) => body,
         Err(err) => {
             eprintln!("Botty-Guy failed to load body config: {err}");
@@ -111,6 +151,69 @@ pub fn run() {
             eprintln!("Botty-Guy failed to flush output: {err}");
             break;
         }
+    }
+}
+
+pub(crate) fn requested_role() -> String {
+    std::env::var(BOTTY_GUY_ROLE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| BOTTY_GUY_DEFAULT_ROLE.to_string())
+}
+
+pub(crate) fn resolve_role_spec(role: &str) -> Option<&'static BottyGuyRoleSpec> {
+    match role.trim() {
+        "" | BOTTY_GUY_DEFAULT_ROLE => Some(&LEADER_ROLE_SPEC),
+        "paperwork" => Some(&PAPERWORK_ROLE_SPEC),
+        "all-in-one" => Some(&ALL_IN_ONE_ROLE_SPEC),
+        _ => None,
+    }
+}
+
+pub(crate) fn expand_role_skill_names(spec: &BottyGuyRoleSpec) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for group in spec.skill_groups {
+        for skill in skill_group_members(group) {
+            if !names.contains(skill) {
+                names.push(*skill);
+            }
+        }
+    }
+    for skill in spec.skills {
+        if !names.contains(skill) {
+            names.push(*skill);
+        }
+    }
+    names
+}
+
+pub(crate) fn delegated_role_names() -> Vec<&'static str> {
+    vec![PAPERWORK_ROLE_SPEC.role, ALL_IN_ONE_ROLE_SPEC.role]
+}
+
+pub(crate) fn delegated_role_exists(role: &str) -> bool {
+    delegated_role_names().contains(&role)
+}
+
+pub(crate) fn delegated_task_prompt(role: &str, task: &str, necessary_info: &str) -> String {
+    let context_block = if necessary_info.trim().is_empty() {
+        "Necessary information:\n(none)".to_string()
+    } else {
+        format!("Necessary information:\n{}", necessary_info.trim())
+    };
+
+    format!(
+        "Delegated by leader.\nTarget role: {role}\nTask:\n{}\n\n{}\n\nReturn the final answer directly.",
+        task.trim(),
+        context_block
+    )
+}
+
+fn skill_group_members(group: &str) -> &'static [&'static str] {
+    match group {
+        "base" => BASE_SKILL_GROUP,
+        _ => &[],
     }
 }
 
