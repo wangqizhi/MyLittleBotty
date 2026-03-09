@@ -1,6 +1,7 @@
 use crate::frontend::frontend_app::{
-    FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode, ProviderEdit, Role, SetupEditor,
-    SubmitOutcome,
+    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor,
+    GuyEnvEditorFocus, Mode, ProviderEdit, Role, SetupEditor, SubAgentEditor,
+    SubAgentEditorFocus, SubmitOutcome,
 };
 use crate::frontend::frontend_service::{
     mask_secret, FrontendRpc, LocalFrontendRpc, SetupConfig, CHATBOT_PROVIDERS,
@@ -29,6 +30,7 @@ pub fn run() -> io::Result<()> {
     let mut pending_setup_save: Option<
         Receiver<io::Result<crate::frontend::frontend_service::SaveSetupResult>>,
     > = None;
+    let mut pending_desc_gen: Option<Receiver<io::Result<String>>> = None;
 
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -46,6 +48,15 @@ pub fn run() -> io::Result<()> {
                 pending_setup_save = None;
             }
         }
+        if let Some(receiver) = pending_desc_gen.as_ref() {
+            if let Ok(result) = receiver.try_recv() {
+                match result {
+                    Ok(desc) => app.sub_agent_editor_set_description(desc),
+                    Err(err) => app.push_system(&format!("generate description failed: {err}")),
+                }
+                pending_desc_gen = None;
+            }
+        }
 
         terminal.draw(|f| render(&app, f))?;
 
@@ -59,6 +70,20 @@ pub fn run() -> io::Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        if matches!(app.mode(), Mode::SubAgent { .. }) {
+            if let Some((name, skills)) =
+                handle_sub_agent_key(&mut app, key, pending_desc_gen.is_some())
+            {
+                pending_desc_gen = Some(spawn_desc_gen_request(name, skills));
+            }
+            continue;
+        }
+
+        if matches!(app.mode(), Mode::CreateSkill { .. }) {
+            handle_create_skill_key(&mut app, key);
             continue;
         }
 
@@ -280,7 +305,7 @@ fn handle_panel_key<R: FrontendRpc>(
             }
             _ => {}
         },
-        Mode::Chat => {}
+        Mode::Chat | Mode::SubAgent { .. } | Mode::CreateSkill { .. } => {}
     }
 
     Ok(None)
@@ -305,6 +330,8 @@ fn render(app: &FrontendApp, frame: &mut Frame) {
         ),
         Mode::GuyEnvEdit { .. } => render_guy_env_edit_page(app, frame),
         Mode::GuyEnvList { .. } => render_guy_env_list_page(app, frame),
+        Mode::SubAgent { .. } => render_sub_agent_page(app, frame),
+        Mode::CreateSkill { .. } => render_create_skill_page(app, frame),
     }
 }
 
@@ -871,6 +898,378 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
         ])
         .split(vertical[1]);
     horizontal[1]
+}
+
+// --- Sub-agent key handler ---
+
+/// Returns Some((name, skills)) if the user requested description generation.
+fn handle_sub_agent_key(
+    app: &mut FrontendApp,
+    key: KeyEvent,
+    desc_gen_pending: bool,
+) -> Option<(String, Vec<String>)> {
+    let has_editor = matches!(
+        app.mode(),
+        Mode::SubAgent {
+            editor: Some(_),
+            ..
+        }
+    );
+
+    if has_editor {
+        // Inside the sub-agent editor
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('a') | KeyCode::Char('A') => app.sub_agent_editor_move_home(),
+                KeyCode::Char('c') | KeyCode::Char('C') => app.sub_agent_editor_clear(),
+                KeyCode::Char('s') | KeyCode::Char('S') => app.sub_agent_editor_save(),
+                KeyCode::Char('g') | KeyCode::Char('G') => {
+                    if !desc_gen_pending {
+                        return app.sub_agent_editor_generate_description();
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Esc => app.sub_agent_editor_cancel(),
+            KeyCode::Tab => app.sub_agent_editor_cycle_focus(),
+            KeyCode::BackTab => app.sub_agent_editor_cycle_focus(),
+            KeyCode::Left => app.sub_agent_editor_move_left(),
+            KeyCode::Right => app.sub_agent_editor_move_right(),
+            KeyCode::Up => app.sub_agent_editor_skill_prev(),
+            KeyCode::Down => app.sub_agent_editor_skill_next(),
+            KeyCode::Backspace => app.sub_agent_editor_backspace(),
+            KeyCode::Delete => app.sub_agent_editor_delete(),
+            KeyCode::Char(' ') => app.sub_agent_editor_toggle_skill(),
+            KeyCode::Enter => app.sub_agent_editor_save(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.sub_agent_editor_insert(c);
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    // List view
+    match key.code {
+        KeyCode::Esc => app.close_panel(),
+        KeyCode::Up => app.sub_agent_prev_entry(),
+        KeyCode::Down | KeyCode::Tab => app.sub_agent_next_entry(),
+        KeyCode::BackTab => app.sub_agent_prev_entry(),
+        KeyCode::Enter => app.open_sub_agent_editor(),
+        _ => {}
+    }
+    None
+}
+
+// --- Create skill key handler ---
+
+fn handle_create_skill_key(app: &mut FrontendApp, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => app.create_skill_editor_move_home(),
+            KeyCode::Char('c') | KeyCode::Char('C') => app.create_skill_editor_clear(),
+            KeyCode::Char('s') | KeyCode::Char('S') => app.create_skill_editor_save(),
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => app.close_panel(),
+        KeyCode::Tab => app.create_skill_editor_cycle_focus(),
+        KeyCode::BackTab => app.create_skill_editor_cycle_focus(),
+        KeyCode::Left => app.create_skill_editor_move_left(),
+        KeyCode::Right => app.create_skill_editor_move_right(),
+        KeyCode::Backspace => app.create_skill_editor_backspace(),
+        KeyCode::Delete => app.create_skill_editor_delete(),
+        KeyCode::Enter => app.create_skill_editor_save(),
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.create_skill_editor_insert(c);
+        }
+        _ => {}
+    }
+}
+
+// --- Sub-agent rendering ---
+
+fn render_sub_agent_page(app: &FrontendApp, frame: &mut Frame) {
+    let Some((selected_entry, agents, editor)) = app.sub_agent_state() else {
+        return;
+    };
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(frame.area());
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(layout[0]);
+
+    let mut items = Vec::new();
+    for (idx, agent) in agents.iter().enumerate() {
+        let style = if idx == selected_entry {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let skill_list = agent.skills.join(", ");
+        items.push(
+            ListItem::new(Line::raw(format!(
+                "{} | skills: [{}] | {}",
+                agent.name, skill_list, agent.description
+            )))
+            .style(style),
+        );
+    }
+    let new_idx = agents.len();
+    let new_style = if selected_entry == new_idx {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    items.push(ListItem::new(Line::raw("[Create new sub-agent]")).style(new_style));
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Sub-agents (Up/Down select, Enter edit/create)"),
+    );
+    frame.render_widget(list, top[0]);
+
+    let selected_text = if selected_entry < agents.len() {
+        let a = &agents[selected_entry];
+        format!(
+            "Name: {}\nDescription: {}\nSkills: {}",
+            a.name,
+            a.description,
+            a.skills.join(", ")
+        )
+    } else {
+        "[Create new sub-agent]".to_string()
+    };
+    let help = Paragraph::new(Text::from(vec![
+        Line::raw("Actions:"),
+        Line::raw("- Enter: edit/create sub-agent"),
+        Line::raw("- Esc: back to chat"),
+        Line::raw(""),
+        Line::raw(selected_text),
+    ]))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().borders(Borders::ALL).title("Details"));
+    frame.render_widget(help, top[1]);
+
+    let footer = Paragraph::new(Line::raw(
+        "Sub-agents are custom roles that leader can delegate tasks to.",
+    ))
+    .style(Style::default().fg(Color::Black).bg(Color::Green));
+    frame.render_widget(footer, layout[1]);
+
+    if let Some(editor) = editor {
+        render_sub_agent_editor(frame, editor);
+    }
+}
+
+fn render_sub_agent_editor(frame: &mut Frame, editor: &SubAgentEditor) {
+    let area = centered_rect(frame.area(), 80, 80);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Sub-agent Editor | Tab switch field | Ctrl+S save | Ctrl+G gen desc");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // name
+            Constraint::Min(4),   // skills list
+            Constraint::Length(3), // description
+            Constraint::Length(3), // hints
+        ])
+        .split(inner);
+
+    let name_title = if editor.focus == SubAgentEditorFocus::Name {
+        "Name (active)"
+    } else {
+        "Name"
+    };
+    let name_input = Paragraph::new(editor.name_input.as_str())
+        .block(Block::default().borders(Borders::ALL).title(name_title));
+    frame.render_widget(name_input, parts[0]);
+
+    // Skills list
+    let skills_title = if editor.focus == SubAgentEditorFocus::Skills {
+        "Skills (Space toggle, Up/Down navigate)"
+    } else {
+        "Skills"
+    };
+    let max_visible = parts[1].height.saturating_sub(2) as usize;
+    let start = editor.skill_scroll.saturating_sub(max_visible.saturating_sub(1));
+    let mut skill_items = Vec::new();
+    for (idx, skill) in editor
+        .available_skills
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(max_visible)
+    {
+        let checked = if editor.selected_skills.get(idx).copied().unwrap_or(false) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let style = if idx == editor.skill_scroll && editor.focus == SubAgentEditorFocus::Skills {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        skill_items.push(ListItem::new(Line::raw(format!("{checked} {skill}"))).style(style));
+    }
+    let skills_list = List::new(skill_items)
+        .block(Block::default().borders(Borders::ALL).title(skills_title));
+    frame.render_widget(skills_list, parts[1]);
+
+    let desc_title = if editor.focus == SubAgentEditorFocus::Description {
+        "Description (active) | Ctrl+G auto-generate"
+    } else {
+        "Description"
+    };
+    let desc_text = if editor.generating_description {
+        "Generating..."
+    } else {
+        editor.description_input.as_str()
+    };
+    let desc_input = Paragraph::new(desc_text)
+        .block(Block::default().borders(Borders::ALL).title(desc_title));
+    frame.render_widget(desc_input, parts[2]);
+
+    let hints = Paragraph::new(Text::from(vec![
+        Line::raw("Tab: cycle focus | Space: toggle skill | Ctrl+G: auto gen description"),
+        Line::raw("Enter/Ctrl+S: save | Esc: cancel"),
+    ]))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(hints, parts[3]);
+
+    match editor.focus {
+        SubAgentEditorFocus::Name => place_cursor(
+            frame,
+            parts[0],
+            text_display_width_at(editor.name_input.as_str(), editor.name_cursor),
+        ),
+        SubAgentEditorFocus::Description => place_cursor(
+            frame,
+            parts[2],
+            text_display_width_at(editor.description_input.as_str(), editor.description_cursor),
+        ),
+        SubAgentEditorFocus::Skills => {} // no text cursor in skills list
+    }
+}
+
+// --- Create skill rendering ---
+
+fn render_create_skill_page(app: &FrontendApp, frame: &mut Frame) {
+    let Some(editor) = app.create_skill_editor() else {
+        return;
+    };
+
+    let area = centered_rect(frame.area(), 80, 80);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Create Custom Skill | Tab switch field | Ctrl+S save | Esc cancel");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // name
+            Constraint::Length(3), // description
+            Constraint::Length(3), // usage
+            Constraint::Length(3), // action
+            Constraint::Length(3), // prompt_template
+            Constraint::Min(1),   // hints
+        ])
+        .split(inner);
+
+    let fields: [(&str, &str, usize, CreateSkillEditorFocus); 5] = [
+        ("Name", &editor.name_input, editor.name_cursor, CreateSkillEditorFocus::Name),
+        ("Description", &editor.description_input, editor.description_cursor, CreateSkillEditorFocus::Description),
+        ("Usage", &editor.usage_input, editor.usage_cursor, CreateSkillEditorFocus::Usage),
+        ("Action (prompt/script)", &editor.action_input, editor.action_cursor, CreateSkillEditorFocus::Action),
+        ("Prompt Template (use {{input}})", &editor.prompt_template_input, editor.prompt_template_cursor, CreateSkillEditorFocus::PromptTemplate),
+    ];
+
+    for (i, (label, value, _cursor, focus_id)) in fields.iter().enumerate() {
+        let title = if editor.focus == *focus_id {
+            format!("{label} (active)")
+        } else {
+            label.to_string()
+        };
+        let input = Paragraph::new(*value)
+            .block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(input, parts[i]);
+    }
+
+    let hints = Paragraph::new(Text::from(vec![
+        Line::raw("Tab: cycle fields | Enter/Ctrl+S: save | Esc: cancel"),
+        Line::raw("Skill files are saved to ~/.mylittlebotty/skill/<name>.json"),
+        Line::raw("Action 'prompt': uses prompt_template with {{input}} placeholder"),
+        Line::raw("Action 'script': runs ~/.mylittlebotty/skill/scripts/<name>.sh"),
+    ]))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().borders(Borders::ALL).title("Help"));
+    frame.render_widget(hints, parts[5]);
+
+    // Place cursor on active field
+    for (i, (_label, value, cursor, focus_id)) in fields.iter().enumerate() {
+        if editor.focus == *focus_id {
+            place_cursor(frame, parts[i], text_display_width_at(value, *cursor));
+            break;
+        }
+    }
+}
+
+fn spawn_desc_gen_request(name: String, skills: Vec<String>) -> Receiver<io::Result<String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = LocalFrontendRpc::connect().and_then(|mut rpc| {
+            let prompt = format!(
+                "Generate a short one-sentence description (for the leader to know when to delegate tasks) for a sub-agent named '{}' that has these skills bound: [{}]. Reply with ONLY the description text, nothing else.",
+                name, skills.join(", ")
+            );
+            rpc.send_chat(&prompt)
+        });
+        let _ = sender.send(result);
+    });
+    receiver
 }
 
 struct TerminalGuard;

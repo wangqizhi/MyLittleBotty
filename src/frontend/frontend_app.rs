@@ -1,8 +1,14 @@
+use crate::botty_guy::{
+    delete_custom_role_config, load_all_custom_role_configs, save_custom_role_config,
+    CustomRoleConfig,
+};
 use crate::frontend::frontend_service::{
     command_suggestions, FrontendRpc, GuyEnvSetResult, RestartStatus, SaveSetupResult, SetupConfig,
     SetupFieldId,
 };
 use crate::io as botty_io;
+use crate::skill::all_available_skill_names;
+use crate::skill::custom_skill;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -38,6 +44,63 @@ pub enum Mode {
         selected_entry: usize,
         entries: Vec<(String, String)>,
     },
+    SubAgent {
+        agents: Vec<SubAgentEntry>,
+        selected_entry: usize,
+        editor: Option<SubAgentEditor>,
+    },
+    CreateSkill {
+        editor: CreateSkillEditor,
+    },
+}
+
+pub struct SubAgentEntry {
+    pub name: String,
+    pub description: String,
+    pub skills: Vec<String>,
+}
+
+pub struct SubAgentEditor {
+    pub original_name: Option<String>,
+    pub name_input: String,
+    pub name_cursor: usize,
+    pub description_input: String,
+    pub description_cursor: usize,
+    pub available_skills: Vec<String>,
+    pub selected_skills: Vec<bool>,
+    pub skill_scroll: usize,
+    pub focus: SubAgentEditorFocus,
+    pub generating_description: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum SubAgentEditorFocus {
+    Name,
+    Description,
+    Skills,
+}
+
+pub struct CreateSkillEditor {
+    pub name_input: String,
+    pub name_cursor: usize,
+    pub description_input: String,
+    pub description_cursor: usize,
+    pub usage_input: String,
+    pub usage_cursor: usize,
+    pub action_input: String,
+    pub action_cursor: usize,
+    pub prompt_template_input: String,
+    pub prompt_template_cursor: usize,
+    pub focus: CreateSkillEditorFocus,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum CreateSkillEditorFocus {
+    Name,
+    Description,
+    Usage,
+    Action,
+    PromptTemplate,
 }
 
 pub enum SetupEditor {
@@ -134,7 +197,11 @@ impl FrontendApp {
     pub fn is_setup_mode(&self) -> bool {
         matches!(
             self.mode,
-            Mode::Setup { .. } | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. }
+            Mode::Setup { .. }
+                | Mode::GuyEnvEdit { .. }
+                | Mode::GuyEnvList { .. }
+                | Mode::SubAgent { .. }
+                | Mode::CreateSkill { .. }
         )
     }
 
@@ -319,6 +386,14 @@ impl FrontendApp {
             self.start_new_chat_session()?;
             return Ok(SubmitOutcome::None);
         }
+        if message == "/sub-agent" {
+            self.enter_sub_agent_mode();
+            return Ok(SubmitOutcome::None);
+        }
+        if message == "/create-skill" {
+            self.enter_create_skill_mode();
+            return Ok(SubmitOutcome::None);
+        }
         if let Some(argument) = message.strip_prefix("/set-guy-env ") {
             self.push_user(&message);
             self.handle_set_guy_env(rpc, argument)?;
@@ -418,7 +493,8 @@ impl FrontendApp {
                 original_work_dir,
                 ..
             } => (config.clone(), original_work_dir.clone()),
-            Mode::Chat | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. } => return None,
+            Mode::Chat | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. }
+            | Mode::SubAgent { .. } | Mode::CreateSkill { .. } => return None,
         };
 
         let previous = botty_io::resolve_work_dir_input(&original_work_dir);
@@ -1106,6 +1182,554 @@ impl FrontendApp {
                 GuyEnvEditorFocus::Value => GuyEnvEditorFocus::Key,
             };
         }
+    }
+
+    // --- Sub-agent mode ---
+
+    pub fn enter_sub_agent_mode(&mut self) {
+        let configs = load_all_custom_role_configs();
+        let agents: Vec<SubAgentEntry> = configs
+            .into_iter()
+            .map(|c| SubAgentEntry {
+                name: c.name,
+                description: c.description,
+                skills: c.skills,
+            })
+            .collect();
+        self.mode = Mode::SubAgent {
+            agents,
+            selected_entry: 0,
+            editor: None,
+        };
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    pub fn sub_agent_state(&self) -> Option<(usize, &[SubAgentEntry], Option<&SubAgentEditor>)> {
+        match &self.mode {
+            Mode::SubAgent {
+                agents,
+                selected_entry,
+                editor,
+            } => Some((*selected_entry, agents, editor.as_ref())),
+            _ => None,
+        }
+    }
+
+    pub fn sub_agent_prev_entry(&mut self) {
+        let Mode::SubAgent {
+            selected_entry,
+            agents,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        let len = agents.len() + 1; // +1 for [Create new]
+        if len == 0 {
+            return;
+        }
+        if *selected_entry == 0 {
+            *selected_entry = len - 1;
+        } else {
+            *selected_entry -= 1;
+        }
+    }
+
+    pub fn sub_agent_next_entry(&mut self) {
+        let Mode::SubAgent {
+            selected_entry,
+            agents,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        let len = agents.len() + 1;
+        *selected_entry = (*selected_entry + 1) % len;
+    }
+
+    pub fn open_sub_agent_editor(&mut self) {
+        let Mode::SubAgent {
+            selected_entry,
+            agents,
+            editor,
+        } = &mut self.mode
+        else {
+            return;
+        };
+
+        let available_skills = all_available_skill_names();
+        let new_editor = if *selected_entry < agents.len() {
+            let agent = &agents[*selected_entry];
+            let selected_skills: Vec<bool> = available_skills
+                .iter()
+                .map(|s| agent.skills.contains(s))
+                .collect();
+            SubAgentEditor {
+                original_name: Some(agent.name.clone()),
+                name_input: agent.name.clone(),
+                name_cursor: agent.name.len(),
+                description_input: agent.description.clone(),
+                description_cursor: agent.description.len(),
+                available_skills,
+                selected_skills,
+                skill_scroll: 0,
+                focus: SubAgentEditorFocus::Name,
+                generating_description: false,
+            }
+        } else {
+            let selected_skills = vec![false; available_skills.len()];
+            SubAgentEditor {
+                original_name: None,
+                name_input: String::new(),
+                name_cursor: 0,
+                description_input: String::new(),
+                description_cursor: 0,
+                available_skills,
+                selected_skills,
+                skill_scroll: 0,
+                focus: SubAgentEditorFocus::Name,
+                generating_description: false,
+            }
+        };
+        *editor = Some(new_editor);
+    }
+
+    pub fn sub_agent_editor_toggle_skill(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        if editor.focus != SubAgentEditorFocus::Skills {
+            return;
+        }
+        if editor.skill_scroll < editor.selected_skills.len() {
+            editor.selected_skills[editor.skill_scroll] =
+                !editor.selected_skills[editor.skill_scroll];
+        }
+    }
+
+    pub fn sub_agent_editor_skill_prev(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        if editor.focus == SubAgentEditorFocus::Skills && editor.skill_scroll > 0 {
+            editor.skill_scroll -= 1;
+        }
+    }
+
+    pub fn sub_agent_editor_skill_next(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        if editor.focus == SubAgentEditorFocus::Skills
+            && editor.skill_scroll + 1 < editor.available_skills.len()
+        {
+            editor.skill_scroll += 1;
+        }
+    }
+
+    pub fn sub_agent_editor_cycle_focus(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        editor.focus = match editor.focus {
+            SubAgentEditorFocus::Name => SubAgentEditorFocus::Skills,
+            SubAgentEditorFocus::Skills => SubAgentEditorFocus::Description,
+            SubAgentEditorFocus::Description => SubAgentEditorFocus::Name,
+        };
+    }
+
+    pub fn sub_agent_editor_insert(&mut self, c: char) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => {
+                editor.name_input.insert(editor.name_cursor, c);
+                editor.name_cursor += c.len_utf8();
+            }
+            SubAgentEditorFocus::Description => {
+                editor.description_input.insert(editor.description_cursor, c);
+                editor.description_cursor += c.len_utf8();
+            }
+            SubAgentEditorFocus::Skills => {}
+        }
+    }
+
+    pub fn sub_agent_editor_backspace(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => {
+                delete_previous_char(&mut editor.name_input, &mut editor.name_cursor);
+            }
+            SubAgentEditorFocus::Description => {
+                delete_previous_char(
+                    &mut editor.description_input,
+                    &mut editor.description_cursor,
+                );
+            }
+            SubAgentEditorFocus::Skills => {}
+        }
+    }
+
+    pub fn sub_agent_editor_delete(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => {
+                delete_current_char(&mut editor.name_input, editor.name_cursor);
+            }
+            SubAgentEditorFocus::Description => {
+                delete_current_char(&mut editor.description_input, editor.description_cursor);
+            }
+            SubAgentEditorFocus::Skills => {}
+        }
+    }
+
+    pub fn sub_agent_editor_move_left(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => {
+                editor.name_cursor = previous_char_boundary(&editor.name_input, editor.name_cursor);
+            }
+            SubAgentEditorFocus::Description => {
+                editor.description_cursor =
+                    previous_char_boundary(&editor.description_input, editor.description_cursor);
+            }
+            SubAgentEditorFocus::Skills => {}
+        }
+    }
+
+    pub fn sub_agent_editor_move_right(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => {
+                editor.name_cursor = next_char_boundary(&editor.name_input, editor.name_cursor);
+            }
+            SubAgentEditorFocus::Description => {
+                editor.description_cursor =
+                    next_char_boundary(&editor.description_input, editor.description_cursor);
+            }
+            SubAgentEditorFocus::Skills => {}
+        }
+    }
+
+    pub fn sub_agent_editor_move_home(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => editor.name_cursor = 0,
+            SubAgentEditorFocus::Description => editor.description_cursor = 0,
+            SubAgentEditorFocus::Skills => editor.skill_scroll = 0,
+        }
+    }
+
+    pub fn sub_agent_editor_clear(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        match editor.focus {
+            SubAgentEditorFocus::Name => {
+                editor.name_input.clear();
+                editor.name_cursor = 0;
+            }
+            SubAgentEditorFocus::Description => {
+                editor.description_input.clear();
+                editor.description_cursor = 0;
+            }
+            SubAgentEditorFocus::Skills => {}
+        }
+    }
+
+    pub fn sub_agent_editor_save(&mut self) {
+        let Mode::SubAgent {
+            agents, editor, ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        let Some(editor_state) = editor.take() else {
+            return;
+        };
+
+        let original_name = editor_state.original_name.clone();
+        let name = editor_state.name_input.trim().to_string();
+        if name.is_empty() {
+            self.push_system("Sub-agent name cannot be empty.");
+            return;
+        }
+
+        let selected_skills: Vec<String> = editor_state
+            .available_skills
+            .iter()
+            .zip(editor_state.selected_skills.iter())
+            .filter(|(_, selected)| **selected)
+            .map(|(skill, _)| skill.clone())
+            .collect();
+
+        let config = CustomRoleConfig {
+            name: name.clone(),
+            description: editor_state.description_input.trim().to_string(),
+            skills: selected_skills.clone(),
+        };
+
+        match save_custom_role_config(&config) {
+            Ok(path) => {
+                let mut cleanup_error = None;
+                if let Some(original_name) = original_name.as_ref().filter(|original_name| **original_name != name) {
+                    if let Err(err) = delete_custom_role_config(original_name) {
+                        cleanup_error =
+                            Some(format!("delete old sub-agent config failed: {err}"));
+                    }
+                }
+
+                // Update local list
+                if let Some(existing) = agents.iter_mut().find(|a| {
+                    a.name == name
+                        || original_name
+                            .as_ref()
+                            .is_some_and(|original_name| a.name == *original_name)
+                }) {
+                    existing.name = name.clone();
+                    existing.description = config.description;
+                    existing.skills = selected_skills;
+                } else {
+                    agents.push(SubAgentEntry {
+                        name,
+                        description: config.description,
+                        skills: selected_skills,
+                    });
+                }
+                if let Some(message) = cleanup_error {
+                    self.push_system(&message);
+                }
+                self.push_system(&format!("Sub-agent saved to {}", path.display()));
+            }
+            Err(err) => self.push_system(&format!("save sub-agent failed: {err}")),
+        }
+    }
+
+    pub fn sub_agent_editor_cancel(&mut self) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        *editor = None;
+    }
+
+    pub fn sub_agent_editor_generate_description(&mut self) -> Option<(String, Vec<String>)> {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return None;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return None;
+        };
+        let name = editor.name_input.trim().to_string();
+        let selected_skills: Vec<String> = editor
+            .available_skills
+            .iter()
+            .zip(editor.selected_skills.iter())
+            .filter(|(_, selected)| **selected)
+            .map(|(skill, _)| skill.clone())
+            .collect();
+        if name.is_empty() || selected_skills.is_empty() {
+            return None;
+        }
+        editor.generating_description = true;
+        Some((name, selected_skills))
+    }
+
+    pub fn sub_agent_editor_set_description(&mut self, description: String) {
+        let Mode::SubAgent { editor, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(editor) = editor.as_mut() else {
+            return;
+        };
+        editor.description_input = description;
+        editor.description_cursor = editor.description_input.len();
+        editor.generating_description = false;
+    }
+
+    // --- Create skill mode ---
+
+    pub fn enter_create_skill_mode(&mut self) {
+        self.mode = Mode::CreateSkill {
+            editor: CreateSkillEditor {
+                name_input: String::new(),
+                name_cursor: 0,
+                description_input: String::new(),
+                description_cursor: 0,
+                usage_input: String::new(),
+                usage_cursor: 0,
+                action_input: "prompt".to_string(),
+                action_cursor: 6,
+                prompt_template_input: String::new(),
+                prompt_template_cursor: 0,
+                focus: CreateSkillEditorFocus::Name,
+            },
+        };
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    pub fn create_skill_editor(&self) -> Option<&CreateSkillEditor> {
+        match &self.mode {
+            Mode::CreateSkill { editor } => Some(editor),
+            _ => None,
+        }
+    }
+
+    pub fn create_skill_editor_cycle_focus(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        editor.focus = match editor.focus {
+            CreateSkillEditorFocus::Name => CreateSkillEditorFocus::Description,
+            CreateSkillEditorFocus::Description => CreateSkillEditorFocus::Usage,
+            CreateSkillEditorFocus::Usage => CreateSkillEditorFocus::Action,
+            CreateSkillEditorFocus::Action => CreateSkillEditorFocus::PromptTemplate,
+            CreateSkillEditorFocus::PromptTemplate => CreateSkillEditorFocus::Name,
+        };
+    }
+
+    pub fn create_skill_editor_insert(&mut self, c: char) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (input, cursor) = create_skill_active_field(editor);
+        input.insert(*cursor, c);
+        *cursor += c.len_utf8();
+    }
+
+    pub fn create_skill_editor_backspace(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (input, cursor) = create_skill_active_field(editor);
+        delete_previous_char(input, cursor);
+    }
+
+    pub fn create_skill_editor_delete(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (input, cursor) = create_skill_active_field(editor);
+        delete_current_char(input, *cursor);
+    }
+
+    pub fn create_skill_editor_move_left(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (input, cursor) = create_skill_active_field(editor);
+        *cursor = previous_char_boundary(input, *cursor);
+    }
+
+    pub fn create_skill_editor_move_right(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (input, cursor) = create_skill_active_field(editor);
+        *cursor = next_char_boundary(input, *cursor);
+    }
+
+    pub fn create_skill_editor_move_home(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (_, cursor) = create_skill_active_field(editor);
+        *cursor = 0;
+    }
+
+    pub fn create_skill_editor_clear(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let (input, cursor) = create_skill_active_field(editor);
+        input.clear();
+        *cursor = 0;
+    }
+
+    pub fn create_skill_editor_save(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        let name = editor.name_input.trim().to_string();
+        if name.is_empty() {
+            self.push_system("Skill name cannot be empty.");
+            return;
+        }
+        let description = editor.description_input.trim().to_string();
+        let usage = editor.usage_input.trim().to_string();
+        let action = editor.action_input.trim().to_string();
+        let prompt_template = editor.prompt_template_input.trim().to_string();
+
+        match custom_skill::save_custom_skill(&name, &description, &usage, &action, &prompt_template)
+        {
+            Ok(path) => {
+                self.mode = Mode::Chat;
+                self.push_system(&format!("Custom skill saved to {}", path.display()));
+            }
+            Err(err) => self.push_system(&format!("save custom skill failed: {err}")),
+        }
+    }
+}
+
+fn create_skill_active_field(editor: &mut CreateSkillEditor) -> (&mut String, &mut usize) {
+    match editor.focus {
+        CreateSkillEditorFocus::Name => (&mut editor.name_input, &mut editor.name_cursor),
+        CreateSkillEditorFocus::Description => (
+            &mut editor.description_input,
+            &mut editor.description_cursor,
+        ),
+        CreateSkillEditorFocus::Usage => (&mut editor.usage_input, &mut editor.usage_cursor),
+        CreateSkillEditorFocus::Action => (&mut editor.action_input, &mut editor.action_cursor),
+        CreateSkillEditorFocus::PromptTemplate => (
+            &mut editor.prompt_template_input,
+            &mut editor.prompt_template_cursor,
+        ),
     }
 }
 

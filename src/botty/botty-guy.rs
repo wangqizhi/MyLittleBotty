@@ -1,6 +1,6 @@
 use crate::botty_body::{AssistantReply, BottyBody};
 use crate::prompt;
-use serde_json::{self, json};
+use serde_json::{self, json, Value};
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -66,14 +66,6 @@ const ALL_IN_ONE_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
 
 pub fn run() {
     set_process_name(guy_process_name());
-    let role = requested_role();
-    let body = match BottyBody::from_setup(role.as_str()) {
-        Ok(body) => body,
-        Err(err) => {
-            eprintln!("Botty-Guy failed to load body config: {err}");
-            return;
-        }
-    };
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut lines = stdin.lock().lines();
@@ -126,7 +118,9 @@ pub fn run() {
             continue;
         }
 
-        let reply = match body.think(message) {
+        // Rebuild the body for each message so skill/config/env changes take effect
+        // without requiring a worker restart.
+        let reply = match BottyBody::from_setup(requested_role().as_str()).and_then(|body| body.think(message)) {
             Ok(reply) => reply,
             Err(err) => {
                 eprintln!("Botty-Guy failed to process input: {err}");
@@ -171,6 +165,25 @@ pub(crate) fn resolve_role_spec(role: &str) -> Option<&'static BottyGuyRoleSpec>
     }
 }
 
+pub(crate) fn resolve_role_spec_or_custom(role: &str) -> Option<ResolvedRole> {
+    if let Some(spec) = resolve_role_spec(role) {
+        return Some(ResolvedRole::Builtin(spec));
+    }
+    load_custom_role_config(role).map(ResolvedRole::Custom)
+}
+
+pub(crate) enum ResolvedRole {
+    Builtin(&'static BottyGuyRoleSpec),
+    Custom(CustomRoleConfig),
+}
+
+#[derive(Clone)]
+pub(crate) struct CustomRoleConfig {
+    pub name: String,
+    pub description: String,
+    pub skills: Vec<String>,
+}
+
 pub(crate) fn expand_role_skill_names(spec: &BottyGuyRoleSpec) -> Vec<&'static str> {
     let mut names = Vec::new();
     for group in spec.skill_groups {
@@ -188,12 +201,57 @@ pub(crate) fn expand_role_skill_names(spec: &BottyGuyRoleSpec) -> Vec<&'static s
     names
 }
 
-pub(crate) fn delegated_role_names() -> Vec<&'static str> {
-    vec![PAPERWORK_ROLE_SPEC.role, ALL_IN_ONE_ROLE_SPEC.role]
+pub(crate) fn expand_custom_role_skill_names(config: &CustomRoleConfig) -> Vec<String> {
+    let mut names = Vec::new();
+    for skill in &config.skills {
+        if skill == "base" {
+            for base_skill in BASE_SKILL_GROUP {
+                let s = base_skill.to_string();
+                if !names.contains(&s) {
+                    names.push(s);
+                }
+            }
+        } else if !names.contains(skill) {
+            names.push(skill.clone());
+        }
+    }
+    names
+}
+
+pub(crate) fn delegated_role_names() -> Vec<String> {
+    let mut names: Vec<String> = vec![
+        PAPERWORK_ROLE_SPEC.role.to_string(),
+        ALL_IN_ONE_ROLE_SPEC.role.to_string(),
+    ];
+    for config in load_all_custom_role_configs() {
+        if !names.iter().any(|n| n == &config.name) {
+            names.push(config.name);
+        }
+    }
+    names
 }
 
 pub(crate) fn delegated_role_exists(role: &str) -> bool {
-    delegated_role_names().contains(&role)
+    delegated_role_names().iter().any(|n| n == role)
+}
+
+pub(crate) fn delegated_role_descriptions() -> Vec<(String, String)> {
+    let mut result = vec![
+        (
+            PAPERWORK_ROLE_SPEC.role.to_string(),
+            PAPERWORK_ROLE_SPEC.description.to_string(),
+        ),
+        (
+            ALL_IN_ONE_ROLE_SPEC.role.to_string(),
+            ALL_IN_ONE_ROLE_SPEC.description.to_string(),
+        ),
+    ];
+    for config in load_all_custom_role_configs() {
+        if !result.iter().any(|(n, _)| n == &config.name) {
+            result.push((config.name, config.description));
+        }
+    }
+    result
 }
 
 pub(crate) fn delegated_task_prompt(role: &str, task: &str, necessary_info: &str) -> String {
@@ -1137,4 +1195,109 @@ fn set_process_name(name: &str) {
             }
         }
     }
+}
+
+// --- Custom sub-agent / role config ---
+
+fn sub_agents_config_file() -> PathBuf {
+    botty_root_dir().join("config").join("sub-agents.json")
+}
+
+pub(crate) fn load_all_custom_role_configs() -> Vec<CustomRoleConfig> {
+    let path = sub_agents_config_file();
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+    let value: Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let agents = match value.get("agents").and_then(Value::as_array) {
+        Some(agents) => agents,
+        None => return Vec::new(),
+    };
+    agents
+        .iter()
+        .filter_map(|agent| {
+            let name = agent.get("name")?.as_str()?.to_string();
+            let description = agent
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let skills = agent
+                .get("skills")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(CustomRoleConfig {
+                name,
+                description,
+                skills,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn load_custom_role_config(role: &str) -> Option<CustomRoleConfig> {
+    load_all_custom_role_configs()
+        .into_iter()
+        .find(|config| config.name == role)
+}
+
+pub(crate) fn save_custom_role_config(config: &CustomRoleConfig) -> io::Result<PathBuf> {
+    let path = sub_agents_config_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut all = load_all_custom_role_configs();
+    if let Some(existing) = all.iter_mut().find(|c| c.name == config.name) {
+        existing.description = config.description.clone();
+        existing.skills = config.skills.clone();
+    } else {
+        all.push(config.clone());
+    }
+    let agents_json: Vec<Value> = all
+        .iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "description": c.description,
+                "skills": c.skills,
+            })
+        })
+        .collect();
+    let content = serde_json::to_string_pretty(&json!({ "agents": agents_json }))
+        .map_err(|err| io::Error::other(format!("serialize sub-agents config failed: {err}")))?;
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+pub(crate) fn delete_custom_role_config(name: &str) -> io::Result<()> {
+    let path = sub_agents_config_file();
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut all = load_all_custom_role_configs();
+    all.retain(|c| c.name != name);
+    let agents_json: Vec<Value> = all
+        .iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "description": c.description,
+                "skills": c.skills,
+            })
+        })
+        .collect();
+    let content = serde_json::to_string_pretty(&json!({ "agents": agents_json }))
+        .map_err(|err| io::Error::other(format!("serialize sub-agents config failed: {err}")))?;
+    fs::write(&path, content)?;
+    Ok(())
 }

@@ -11,13 +11,15 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-pub const COMMANDS: [&str; 8] = [
+pub const COMMANDS: [&str; 10] = [
     "/setup",
     "/restart-server",
     "/new",
     "/remember",
     "/set-guy-env",
     "/list-guy-env",
+    "/sub-agent",
+    "/create-skill",
     "/exit",
     "/quit",
 ];

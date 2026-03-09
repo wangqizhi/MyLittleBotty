@@ -1,5 +1,8 @@
 use crate::botty_brain::BottyBrain;
-use crate::botty_guy::{expand_role_skill_names, resolve_role_spec, BottyGuyRoleSpec};
+use crate::botty_guy::{
+    expand_custom_role_skill_names, expand_role_skill_names,
+    resolve_role_spec_or_custom, BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
+};
 use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
 };
@@ -22,34 +25,61 @@ pub struct AssistantReply {
     pub thinking: Option<String>,
 }
 
+enum RoleInfo {
+    Builtin(&'static BottyGuyRoleSpec),
+    Custom(CustomRoleConfig),
+}
+
 pub struct BottyBody {
     brain: BottyBrain,
-    role_spec: &'static BottyGuyRoleSpec,
+    role_info: RoleInfo,
     skills: Vec<Box<dyn BottySkill>>,
 }
 
 impl BottyBody {
     pub fn from_setup(role: &str) -> io::Result<Self> {
-        let role_spec = resolve_role_spec(role).ok_or_else(|| {
+        let resolved = resolve_role_spec_or_custom(role).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unknown Botty-Guy role: {role}"),
             )
         })?;
-        let mut skills = Vec::new();
-        for skill_name in expand_role_skill_names(role_spec) {
-            let skill = build_skill(skill_name).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unknown skill in role `{}`: {skill_name}", role_spec.role),
-                )
-            })?;
-            skills.push(skill);
-        }
+
+        let (role_info, skills) = match resolved {
+            ResolvedRole::Builtin(spec) => {
+                let mut skills = Vec::new();
+                for skill_name in expand_role_skill_names(spec) {
+                    let skill = build_skill(skill_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("unknown skill in role `{}`: {skill_name}", spec.role),
+                        )
+                    })?;
+                    skills.push(skill);
+                }
+                (RoleInfo::Builtin(spec), skills)
+            }
+            ResolvedRole::Custom(config) => {
+                let mut skills = Vec::new();
+                for skill_name in expand_custom_role_skill_names(&config) {
+                    let skill = build_skill(&skill_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "unknown skill in custom role `{}`: {skill_name}",
+                                config.name
+                            ),
+                        )
+                    })?;
+                    skills.push(skill);
+                }
+                (RoleInfo::Custom(config), skills)
+            }
+        };
 
         Ok(Self {
             brain: BottyBrain::from_setup()?,
-            role_spec,
+            role_info,
             skills,
         })
     }
@@ -75,8 +105,7 @@ impl BottyBody {
         }
 
         let tools = self.tool_definitions();
-        let system_prompt =
-            build_system_prompt_for_role(self.role_spec, DEEP_MEMORY_CONTEXT_ROUNDS)?;
+        let system_prompt = self.build_system_prompt()?;
         let conversation = [ProviderMessage::UserText(input.to_string())];
         let first_response = self.brain.think(&system_prompt, &conversation, &tools)?;
 
@@ -95,8 +124,7 @@ impl BottyBody {
         tools: &[ProviderToolDefinition],
         first_tool_use: ProviderToolUse,
     ) -> io::Result<AssistantReply> {
-        let system_prompt =
-            build_system_prompt_for_role(self.role_spec, DEEP_MEMORY_CONTEXT_ROUNDS)?;
+        let system_prompt = self.build_system_prompt()?;
         let mut conversation = vec![ProviderMessage::UserText(input.to_string())];
         let mut tool_use = first_tool_use;
 
@@ -140,6 +168,17 @@ impl BottyBody {
             io::ErrorKind::InvalidInput,
             format!("unknown tool: {name}"),
         ))
+    }
+
+    fn build_system_prompt(&self) -> io::Result<String> {
+        match &self.role_info {
+            RoleInfo::Builtin(spec) => {
+                build_system_prompt_for_role(spec, DEEP_MEMORY_CONTEXT_ROUNDS)
+            }
+            RoleInfo::Custom(config) => {
+                build_system_prompt_for_custom_role(config, DEEP_MEMORY_CONTEXT_ROUNDS)
+            }
+        }
     }
 
     fn tool_definitions(&self) -> Vec<ProviderToolDefinition> {
@@ -354,6 +393,28 @@ fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> 
             ("role_instruction", role_spec.system_instruction_prompt),
             ("remember_section", &remember_section),
             ("memory_section", &memory_section),
+            ("current_local_time", &current_local_time),
+        ],
+    ))
+}
+
+fn build_system_prompt_for_custom_role(
+    config: &CustomRoleConfig,
+    _rounds: usize,
+) -> io::Result<String> {
+    let current_local_time = local_time_string()?;
+    let instruction = format!(
+        "You are a custom sub-agent named `{}`. {}\nHandle the delegated task using your bound skills.",
+        config.name, config.description
+    );
+    Ok(prompt::render(
+        prompt::TOOL_SYSTEM_PROMPT,
+        &[
+            ("role_name", &config.name),
+            ("role_description", &config.description),
+            ("role_instruction", &instruction),
+            ("remember_section", ""),
+            ("memory_section", ""),
             ("current_local_time", &current_local_time),
         ],
     ))

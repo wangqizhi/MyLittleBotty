@@ -10,6 +10,8 @@ pub mod buildin_remember;
 pub mod buildin_watch;
 #[path = "buildin-write.rs"]
 pub mod buildin_write;
+#[path = "custom-skill.rs"]
+pub mod custom_skill;
 
 use std::io;
 
@@ -19,6 +21,7 @@ use crate::skill::buildin_list::BuildinListSkill;
 use crate::skill::buildin_remember::BuildinRememberSkill;
 use crate::skill::buildin_watch::BuildinWatchSkill;
 use crate::skill::buildin_write::BuildinWriteSkill;
+use crate::skill::custom_skill::load_all_custom_skills;
 
 pub trait BottySkill {
     fn name(&self) -> &'static str;
@@ -26,6 +29,8 @@ pub trait BottySkill {
     fn input_schema_json(&self) -> &'static str;
     fn execute(&self, input_json: &str) -> io::Result<String>;
 }
+
+pub const BUILDIN_SKILL_NAMES: &[&str] = &["list", "watch", "write", "remember", "crond", "leader"];
 
 pub fn build_skill(name: &str) -> Option<Box<dyn BottySkill>> {
     match name {
@@ -35,6 +40,26 @@ pub fn build_skill(name: &str) -> Option<Box<dyn BottySkill>> {
         "remember" => Some(Box::new(BuildinRememberSkill::new())),
         "crond" => Some(Box::new(BuildinCrondSkill::new())),
         "leader" => Some(Box::new(BuildinLeaderSkill::new())),
-        _ => None,
+        _ => build_custom_skill(name),
     }
+}
+
+fn build_custom_skill(name: &str) -> Option<Box<dyn BottySkill>> {
+    let customs = load_all_custom_skills();
+    for skill in customs {
+        if skill.skill_name == name {
+            return Some(Box::new(skill));
+        }
+    }
+    None
+}
+
+pub fn all_available_skill_names() -> Vec<String> {
+    let mut names: Vec<String> = BUILDIN_SKILL_NAMES.iter().map(|s| s.to_string()).collect();
+    for skill in load_all_custom_skills() {
+        if !names.contains(&skill.skill_name) {
+            names.push(skill.skill_name);
+        }
+    }
+    names
 }

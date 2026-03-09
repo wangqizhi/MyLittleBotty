@@ -1,5 +1,6 @@
 use crate::botty_guy::{
-    delegated_role_exists, delegated_role_names, delegated_task_prompt, BOTTY_GUY_ROLE_ENV,
+    delegated_role_descriptions, delegated_role_exists, delegated_role_names,
+    delegated_task_prompt, BOTTY_GUY_ROLE_ENV,
 };
 use crate::skill::BottySkill;
 use serde_json::Value;
@@ -8,30 +9,26 @@ use std::io;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Command, Stdio};
 
-const LEADER_TOOL_SCHEMA_JSON: &str = r#"{
-  "type": "object",
-  "properties": {
-    "role": {
-      "type": "string",
-      "description": "Target Botty-Guy role. Available roles: paperwork, all-in-one"
-    },
-    "task": {
-      "type": "string",
-      "description": "Delegated task for the target role"
-    },
-    "necessary_info": {
-      "type": "string",
-      "description": "Only the minimal context the target role needs. Do not include old chat history or summaries."
-    }
-  },
-  "required": ["role", "task"]
-}"#;
-
 pub struct BuildinLeaderSkill;
 
 impl BuildinLeaderSkill {
     pub fn new() -> Self {
         Self
+    }
+
+    fn build_schema_json() -> String {
+        let descs = delegated_role_descriptions();
+        let role_list: Vec<String> = descs
+            .iter()
+            .map(|(name, desc)| format!("{name}: {desc}"))
+            .collect();
+        let role_desc = format!(
+            "Target Botty-Guy role. Available roles:\\n{}",
+            role_list.join("\\n")
+        );
+        format!(
+            r#"{{"type":"object","properties":{{"role":{{"type":"string","description":"{role_desc}"}},"task":{{"type":"string","description":"Delegated task for the target role"}},"necessary_info":{{"type":"string","description":"Only the minimal context the target role needs. Do not include old chat history or summaries."}}}},"required":["role","task"]}}"#,
+        )
     }
 }
 
@@ -45,7 +42,8 @@ impl BottySkill for BuildinLeaderSkill {
     }
 
     fn input_schema_json(&self) -> &'static str {
-        LEADER_TOOL_SCHEMA_JSON
+        // Leak dynamic schema so it has 'static lifetime — this is built once per leader skill instance
+        Box::leak(Self::build_schema_json().into_boxed_str())
     }
 
     fn execute(&self, input_json: &str) -> io::Result<String> {
@@ -58,11 +56,12 @@ impl BottySkill for BuildinLeaderSkill {
 
         let role = required_string(&input, "role")?;
         if !delegated_role_exists(role) {
+            let names = delegated_role_names();
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "unsupported delegated role: {role}. available roles: {}",
-                    delegated_role_names().join(", ")
+                    names.join(", ")
                 ),
             ));
         }
