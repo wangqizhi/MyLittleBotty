@@ -2,6 +2,14 @@
 
 MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 守护进程、`Botty-Guy` 对话执行进程、`Botty-crond` 定时提醒进程组成。当前版本主要提供本地聊天、TUI 配置、Telegram/飞书消息接入、提醒调度、版本更新和进程管理能力。
 
+## 最近更新
+
+- `2026-03-09`：发布 `0.0.9`。
+- `2026-03-09`：新增基于角色的 `Botty-Guy` 运行方式。默认 `leader` 角色可以把任务分派给 `paperwork` 和 `all-in-one` 子角色，并尽量缩小传递上下文。
+- `2026-03-09`：新增内置 `leader` skill 与角色专用系统提示词，任务分派和各角色职责变成显式机制。
+- `2026-03-09`：新增 `mylittlebotty log` 命令，并在调试日志里展示 `role=...`，更容易区分 leader 与被分派子进程。
+- `2026-03-09`：TUI 新增 `Botty-Guy` 持久化环境变量编辑，以及 `work_dir` 配置和迁移能力。
+
 ## 当前已实现功能
 
 ### 1. 本地常驻服务
@@ -52,17 +60,35 @@ TUI 内置命令：
 
 当 `ai.provider.debug=true` 时，会把请求和响应写入调试日志。
 
-### 4. 本地工具能力
+### 4. 角色化 Agent 能力
 
-当前 Botty 已接入五个内置工具：
+`Botty-Guy` 现在会按角色装配能力：
+
+- `leader`：默认角色，保留记忆上下文，负责提醒协调和任务分派。
+- `paperwork`：面向文书类任务的轻量角色，使用更小的上下文执行。
+- `all-in-one`：兜底执行角色，可以直接使用通用内置工具。
+
+分派能力由内置 `leader` skill 实现：
+
+- leader 判断任务适合哪个角色
+- 通过 `BOTTY_GUY_ROLE=<role>` 拉起新的 `Botty-Guy` 子进程
+- 只把最小必要任务信息发给子进程，而不是整段历史对话
+- 再把子进程结果回传给原始会话
+
+更详细的设计说明见 `doc/role-agent.md`。
+
+### 5. 本地工具能力
+
+当前 Botty 已接入六个内置工具，但不同角色可用的工具不同：
 
 - `list`：列出本地目录内容，目录会追加 `/`，符号链接会追加 `@`。可通过 `~/.mylittlebotty/config/list.conf` 中的 `list.blacklist=...` 配置访问黑名单，默认禁止访问 `~/.mylittlebotty/`。
 - `watch`：读取本地文件内容。文本文件最多返回 16 KiB，大于 500 KiB 的大文件只返回最近一段尾部内容，二进制文件返回可打印片段预览。可通过 `~/.mylittlebotty/config/watch.conf` 中的 `watch.blacklist=...` 配置访问黑名单。
 - `write`：向本地文件写入或追加文本，必要时自动创建父目录。它始终以 Botty 配置的 work dir 作为根目录，默认是 `~/opt/mylittlebotty-workdir`，也可以在 setup 中修改。用户提供的任何路径都会被当成这个根目录下的路径处理，因此即使看起来是绝对路径，也不会写到宿主机任意位置。
 - `remember`：当 `memory/summary/remember.md` 和最近对话上下文都不够时，Botty 会先让模型从当前用户话题里提炼少量高信号关键词，再对 `~/.mylittlebotty/memory/deep` 做本地文本搜索，并把命中行及其上下文返回给模型继续判断。
 - `crond`：查询、创建、编辑保存在 `~/.mylittlebotty/reminder.rec` 中的提醒任务。
+- `leader`：仅 `leader` 角色可用，用于把任务转交给其它角色专用的 `Botty-Guy` 子进程执行。
 
-### 5. 定时提醒
+### 6. 定时提醒
 
 - 提醒数据保存在 `~/.mylittlebotty/reminder.rec`。
 - `Botty-crond` 会轮询到期提醒并执行。
@@ -71,7 +97,7 @@ TUI 内置命令：
 - 执行完成后会把提醒状态改为 `done`。
 - 如果启用了 Telegram/飞书推送，提醒结果会回发到对应聊天渠道。
 
-### 6. Telegram / 飞书接入
+### 7. Telegram / 飞书接入
 
 当前实现了两个输入通道：
 
@@ -90,7 +116,7 @@ TUI 内置命令：
 - 飞书 chat_id 指定
 - 接收到外部消息后转发给本地 `Botty-Guy` 处理
 
-### 7. 长期记忆摘要
+### 8. 长期记忆摘要
 
 - 通过 `/remember` 触发整理长期记忆。
 - 摘要结果写入 `~/.mylittlebotty/memory/summary/remember.md`。
@@ -98,7 +124,7 @@ TUI 内置命令：
 - 正常对话时，Botty 会优先使用 `memory/summary/remember.md` 和最近对话历史。
 - 如果当前话题在这些内容里没有出现，内置 `remember` 工具会先让模型提炼搜索关键词，再在本地搜索 `~/.mylittlebotty/memory/deep`，并返回命中片段及其上下文。
 
-### 8. 自更新
+### 9. 自更新
 
 - `mylittlebotty update` 会检查 GitHub 最新 release。
 - 如果发现新版本，会提示确认后下载并替换本地二进制。
@@ -227,6 +253,20 @@ mylittlebotty --help
 mylittlebotty -h
 ```
 
+### 8. 查看日志
+
+```bash
+mylittlebotty log
+```
+
+持续跟随输出：
+
+```bash
+mylittlebotty log -f
+```
+
+这个命令会汇总最近的 debug 与 boss 日志。现在 debug 输出里会带 `role=...`，方便区分 leader 和被分派角色的流量。
+
 ## 配置方法
 
 最简单的方式是进入 TUI 后执行：
@@ -248,6 +288,7 @@ ai.provider.endpoint=
 ai.provider.apikey=
 ai.provider.model=MiniMax-M2.1
 ai.provider.debug=false
+work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
 chatbot.telegram.apikey=
@@ -267,6 +308,7 @@ chatbot.feishu.chat_id=
 - `ai.provider.apikey`：模型 API Key
 - `ai.provider.model`：模型名
 - `ai.provider.debug`：是否记录调试日志
+- `work_dir`：`write` 工具使用的根目录；在 TUI 中修改时会迁移旧工作目录内容
 - `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道
 - `chatbot.feishu.enabled`：是否启用飞书输入通道占位配置
@@ -286,6 +328,7 @@ chatbot.feishu.chat_id=
 | `mylittlebotty` | 启动后台守护进程 `Botty-Boss` | `mylittlebotty` |
 | `mylittlebotty help` | 显示 CLI 帮助 | `mylittlebotty help` |
 | `mylittlebotty version` | 输出版本号 | `mylittlebotty version` |
+| `mylittlebotty log` | 查看最近运行日志和调试日志 | `mylittlebotty log` |
 | `mylittlebotty status` | 查看后台服务状态和 PID 信息 | `mylittlebotty status` |
 | `mylittlebotty stop` | 停止 Botty 相关进程 | `mylittlebotty stop` |
 | `mylittlebotty restart` | 重启后台服务 | `mylittlebotty restart` |
@@ -322,6 +365,7 @@ chatbot.feishu.chat_id=
 - `~/.mylittlebotty/config/watch.conf`：`watch` 内置工具的可选黑名单配置
 - `~/.mylittlebotty/log/`：日志目录
 - `~/.mylittlebotty/run/`：pid、socket、flag 等运行时文件
+- `~/.mylittlebotty/run/guy-role-map*.conf`：运行中的 `Botty-Guy` 进程与角色映射文件
 - `~/.mylittlebotty/reminder.rec`：提醒任务记录
 - `~/.mylittlebotty/memory/summary/remember.md`：长期记忆摘要
 
