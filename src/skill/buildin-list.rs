@@ -63,7 +63,11 @@ impl BottySkill for BuildinListSkill {
             return Ok(format!("DIR {}\n(empty)", resolved.display()));
         }
 
-        Ok(format!("DIR {}\n{}", resolved.display(), entries.join("\n")))
+        Ok(format!(
+            "DIR {}\n{}",
+            resolved.display(),
+            entries.join("\n")
+        ))
     }
 }
 

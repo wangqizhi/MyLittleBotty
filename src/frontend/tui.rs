@@ -356,7 +356,11 @@ fn render_chat_page(app: &FrontendApp, frame: &mut Frame) {
         frame.render_widget(list, rect);
     }
 
-    place_cursor(frame, input_rect, text_display_width(&app.input()[..app.input_cursor()]));
+    place_cursor(
+        frame,
+        input_rect,
+        text_display_width(&app.input()[..app.input_cursor()]),
+    );
 }
 
 fn spawn_chat_request(message: String) -> Receiver<io::Result<String>> {

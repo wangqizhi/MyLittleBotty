@@ -630,7 +630,11 @@ impl FrontendApp {
     }
 
     fn push_command_history(&mut self, message: &str) {
-        if self.command_history.last().is_some_and(|last| last == message) {
+        if self
+            .command_history
+            .last()
+            .is_some_and(|last| last == message)
+        {
             return;
         }
 

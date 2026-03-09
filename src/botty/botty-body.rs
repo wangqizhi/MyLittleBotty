@@ -2,6 +2,7 @@ use crate::botty_brain::BottyBrain;
 use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
 };
+use crate::prompt;
 use crate::skill::buildin_crond::BuildinCrondSkill;
 use crate::skill::buildin_list::BuildinListSkill;
 use crate::skill::buildin_watch::BuildinWatchSkill;
@@ -13,12 +14,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const TOOL_SYSTEM_PROMPT: &str = "You are Botty. You can use local tools. Use list when the user asks to list directory contents. Use watch when the user asks to inspect, open, read, or show a file. Use crond when the user asks to query, create, or edit reminders or scheduled tasks. Preserve user-provided paths exactly when calling list or watch. Do not guess usernames, do not replace ~ with /root or any other home path, and do not rewrite relative or absolute paths unless the user explicitly asked for a different path. The tools themselves resolve ~ and relative paths. For crond create/edit, always provide schedule_at in exact local format YYYY-MM-DD HH:MM:SS and choose task_type precisely. Only use crond for scheduling-related requests. If you use a tool, rely on the tool result to answer the user. Do not describe a tool call to the user.";
 const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
-const REMEMBER_SYSTEM_PROMPT: &str = "You maintain long-term memory for Botty. Output Markdown only. Keep the final remember.md within 100 lines. Focus only on key events, the user's recent important requests, and what has been solved, is pending, or changed. Omit trivial chat. Compress aggressively and prefer recent, actionable context. When needed, forget older low-value details.";
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
-const REMINDER_SYSTEM_PROMPT: &str = "You are Botty. A scheduled reminder is due right now. Do not use conversation history or long-term memory. Only use the reminder payload provided in this request. Reply with the reminder message that should be sent to the user now.";
 
 pub struct AssistantReply {
     pub text: String,
@@ -177,26 +175,23 @@ impl BottyBody {
         transcript: &str,
     ) -> io::Result<String> {
         let user_prompt = match existing_summary.filter(|text| !text.trim().is_empty()) {
-            Some(summary) => format!(
-                "Current remember.md:\n```md\n{summary}\n```\n\nNew deep memory transcript:\n```text\n{transcript}\n```\n\nUpdate remember.md. Keep it under 100 lines. Keep only key events and the user's recent important requests plus solution status."
+            Some(summary) => prompt::render(
+                prompt::REMEMBER_UPDATE_PROMPT,
+                &[("summary", summary), ("transcript", transcript)],
             ),
-            None => format!(
-                "Deep memory transcript to summarize:\n```text\n{transcript}\n```\n\nWrite remember.md in Markdown. Keep it under 100 lines. Keep only key events and the user's recent important requests plus solution status."
-            ),
+            None => prompt::render(prompt::REMEMBER_INIT_PROMPT, &[("transcript", transcript)]),
         };
         self.run_summary_prompt(&user_prompt)
     }
 
     fn compress_remember_summary(&self, summary: &str) -> io::Result<String> {
-        let user_prompt = format!(
-            "This remember.md is too long. Rewrite it to at most 100 lines. You may forget long-term low-value details. Keep only key events, recent important requests, and current resolution status.\n\n```md\n{summary}\n```"
-        );
+        let user_prompt = prompt::render(prompt::REMEMBER_COMPRESS_PROMPT, &[("summary", summary)]);
         self.run_summary_prompt(&user_prompt)
     }
 
     fn run_summary_prompt(&self, user_prompt: &str) -> io::Result<String> {
         let response = self.brain.think(
-            REMEMBER_SYSTEM_PROMPT,
+            prompt::REMEMBER_SYSTEM_PROMPT,
             &[ProviderMessage::UserText(user_prompt.to_string())],
             &[],
         )?;
@@ -228,11 +223,16 @@ impl BottyBody {
             .and_then(Value::as_str)
             .unwrap_or_default();
 
-        let user_prompt = format!(
-            "Original user reminder request:\n{original_request}\n\nScheduled time:\n{scheduled_at}\n\nCurrent local time:\n{current_time}\n\nThe reminder time has arrived. Reply with the message that should now be sent to the user."
+        let user_prompt = prompt::render(
+            prompt::REMINDER_USER_PROMPT,
+            &[
+                ("original_request", original_request),
+                ("scheduled_at", scheduled_at),
+                ("current_time", current_time),
+            ],
         );
         match self.brain.think(
-            REMINDER_SYSTEM_PROMPT,
+            prompt::REMINDER_SYSTEM_PROMPT,
             &[ProviderMessage::UserText(user_prompt)],
             &[],
         )? {
@@ -303,23 +303,26 @@ fn build_system_prompt_with_deep_memory(rounds: usize) -> io::Result<String> {
     let remember = load_remember_summary()?;
     let memory = load_recent_deep_memory_transcript(rounds)?;
     let current_local_time = local_time_string()?;
-    let mut prompt = TOOL_SYSTEM_PROMPT.to_string();
-    if remember.is_empty() && memory.is_empty() {
-        prompt.push_str(&format!("\n\nCurrent local time: {current_local_time}"));
-        return Ok(prompt);
-    }
-
-    if !remember.is_empty() {
-        prompt.push_str("\n\nLong-term memory summary from memory/summary/remember.md:\n");
-        prompt.push_str(&remember);
-    }
-    if !memory.is_empty() {
-        prompt.push_str(&format!(
+    let remember_section = if remember.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nLong-term memory summary from memory/summary/remember.md:\n{remember}")
+    };
+    let memory_section = if memory.is_empty() {
+        String::new()
+    } else {
+        format!(
             "\n\nRecent conversation history from memory/deep (latest {rounds} rounds):\n{memory}"
-        ));
-    }
-    prompt.push_str(&format!("\n\nCurrent local time: {current_local_time}"));
-    Ok(prompt)
+        )
+    };
+    Ok(prompt::render(
+        prompt::TOOL_SYSTEM_PROMPT,
+        &[
+            ("remember_section", &remember_section),
+            ("memory_section", &memory_section),
+            ("current_local_time", &current_local_time),
+        ],
+    ))
 }
 
 fn load_recent_deep_memory_transcript(rounds: usize) -> io::Result<String> {

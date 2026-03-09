@@ -11,6 +11,7 @@ mod botty_guy;
 mod frontend;
 mod io;
 mod llm_provider;
+mod prompt;
 mod skill;
 
 use std::env;
