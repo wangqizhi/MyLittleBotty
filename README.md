@@ -371,7 +371,7 @@ The program uses these paths by default:
 - `~/.mylittlebotty/reminder.rec`: reminder records
 - `~/.mylittlebotty/memory/summary/remember.md`: long-term memory summary
 
-In debug builds, some runtime files use a `-dev` suffix.
+In development runs, some generated config, runtime, or log files use a `-dev` suffix. Normal production use does not add `-dev`.
 
 ## Recommended Flow
 

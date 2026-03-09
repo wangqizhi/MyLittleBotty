@@ -369,7 +369,7 @@ chatbot.feishu.chat_id=
 - `~/.mylittlebotty/reminder.rec`：提醒任务记录
 - `~/.mylittlebotty/memory/summary/remember.md`：长期记忆摘要
 
-在 debug 构建下，部分运行时文件会带 `-dev` 后缀。
+在开发环境运行时，部分生成的配置、运行时或日志文件会带 `-dev` 后缀；正式程序不会带 `-dev`。
 
 ## 当前推荐使用流程
 
