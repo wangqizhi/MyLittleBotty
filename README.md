@@ -56,10 +56,12 @@ When `ai.provider.debug=true`, request and response payloads are written to the 
 
 ### 4. Local tool usage
 
-Botty currently exposes three built-in tools:
+Botty currently exposes five built-in tools:
 
 - `list`: list the content of a local directory. Directories are suffixed with `/`, symlinks with `@`, and access can be restricted with `~/.mylittlebotty/config/list.conf` via `list.blacklist=...`. The default blacklist blocks `~/.mylittlebotty/`.
 - `watch`: read a local file. Text files are truncated to at most 16 KiB, large files over 500 KiB return only the recent tail, binary files return a printable preview, and access can be restricted with `~/.mylittlebotty/config/watch.conf` via `watch.blacklist=...`.
+- `write`: write or append text to a local file, automatically creating parent directories when needed. It is strictly rooted at Botty's configured work dir, which defaults to `~/opt/mylittlebotty-workdir` and can be changed through setup. Any user-provided path is treated as a path under that root, so even absolute-looking inputs are remapped inside the work dir instead of writing to arbitrary host locations.
+- `remember`: when `memory/summary/remember.md` and the recent conversation context are not enough, Botty first asks the model to extract a few high-signal search keywords from the current user topic, then searches `~/.mylittlebotty/memory/deep` with local text search and returns matching lines with surrounding context for the model to continue reasoning.
 - `crond`: query, create, and edit reminder records stored in `~/.mylittlebotty/reminder.rec`.
 
 ### 5. Scheduled reminders
@@ -95,6 +97,8 @@ Supported behavior:
 - `/remember` triggers long-term memory summarization.
 - The summary is written to `~/.mylittlebotty/memory/summary/remember.md`.
 - The last summary checkpoint is written to `~/.mylittlebotty/memory/summary/rec.time`.
+- During normal chat, Botty first relies on `memory/summary/remember.md` and recent conversation history.
+- If the current topic does not appear there, the built-in `remember` tool may extract search keywords with the model and then search `~/.mylittlebotty/memory/deep` locally, returning matching snippets with surrounding context.
 
 ### 8. Self-update
 

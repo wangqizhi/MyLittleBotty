@@ -1,5 +1,5 @@
 use crate::botty_boss;
-use crate::botty_paths;
+use crate::io as botty_io;
 use crate::io::transport::TransportPlugin;
 use serde_json;
 use std::fs;
@@ -126,7 +126,7 @@ impl Default for SetupConfig {
             ai_provider_apikey: String::new(),
             ai_provider_model: "MiniMax-M2.1".to_string(),
             ai_provider_debug: false,
-            work_dir: botty_paths::default_work_dir_display(),
+            work_dir: botty_io::default_work_dir_display(),
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
             chatbot_telegram_apikey: String::new(),
@@ -226,7 +226,7 @@ impl SetupConfig {
             SetupFieldId::AiProviderModel => self.ai_provider_model = value.to_string(),
             SetupFieldId::AiProviderDebug => {}
             SetupFieldId::WorkDir => {
-                self.work_dir = botty_paths::normalize_work_dir_input(value);
+                self.work_dir = botty_io::normalize_work_dir_input(value);
             }
             SetupFieldId::ChatbotProvider => self.chatbot_provider = value.to_string(),
             SetupFieldId::TelegramPollSeconds => {
@@ -432,15 +432,15 @@ impl FrontendRpc for LocalFrontendRpc {
             }
             FrontendRequest::SaveSetup { config } => {
                 let path = setup_config_file();
-                let previous_work_dir = botty_paths::effective_work_dir()?;
-                let next_work_dir = botty_paths::resolve_work_dir_input(&config.work_dir);
+                let previous_work_dir = botty_io::effective_work_dir()?;
+                let next_work_dir = botty_io::resolve_work_dir_input(&config.work_dir);
                 save_setup_config(&config)?;
                 if previous_work_dir != next_work_dir {
                     migrate_work_dir_contents(&previous_work_dir, &next_work_dir)?;
                 } else {
                     fs::create_dir_all(&next_work_dir)?;
                 }
-                let work_dir_config_path = botty_paths::save_work_dir_setting(&config.work_dir)?;
+                let work_dir_config_path = botty_io::save_work_dir_setting(&config.work_dir)?;
                 let restart_status = match botty_boss::restart_all_report() {
                     Ok(lines) => RestartStatus::Success(lines.join("\n")),
                     Err(err) => RestartStatus::Failed(format!("Auto restart failed: {err}")),
@@ -579,7 +579,7 @@ fn decode_ipc_line(value: &str) -> io::Result<String> {
 fn load_setup_config() -> io::Result<SetupConfig> {
     let path = setup_config_file();
     let mut config = SetupConfig::default();
-    config.work_dir = botty_paths::load_work_dir_setting()?;
+    config.work_dir = botty_io::load_work_dir_setting()?;
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(config),
@@ -759,7 +759,7 @@ fn guy_env_config_file() -> PathBuf {
 }
 
 fn botty_root_dir() -> PathBuf {
-    botty_paths::config_root_dir()
+    botty_io::config_root_dir()
 }
 
 fn runtime_suffix() -> &'static str {
@@ -776,7 +776,7 @@ fn migrate_work_dir_contents(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
         return Ok(());
     }
 
-    if botty_paths::paths_overlap(from, to) {
+    if botty_io::paths_overlap(from, to) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(

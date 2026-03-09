@@ -54,10 +54,12 @@ TUI 内置命令：
 
 ### 4. 本地工具能力
 
-当前 Botty 已接入三个内置工具：
+当前 Botty 已接入五个内置工具：
 
 - `list`：列出本地目录内容，目录会追加 `/`，符号链接会追加 `@`。可通过 `~/.mylittlebotty/config/list.conf` 中的 `list.blacklist=...` 配置访问黑名单，默认禁止访问 `~/.mylittlebotty/`。
 - `watch`：读取本地文件内容。文本文件最多返回 16 KiB，大于 500 KiB 的大文件只返回最近一段尾部内容，二进制文件返回可打印片段预览。可通过 `~/.mylittlebotty/config/watch.conf` 中的 `watch.blacklist=...` 配置访问黑名单。
+- `write`：向本地文件写入或追加文本，必要时自动创建父目录。它始终以 Botty 配置的 work dir 作为根目录，默认是 `~/opt/mylittlebotty-workdir`，也可以在 setup 中修改。用户提供的任何路径都会被当成这个根目录下的路径处理，因此即使看起来是绝对路径，也不会写到宿主机任意位置。
+- `remember`：当 `memory/summary/remember.md` 和最近对话上下文都不够时，Botty 会先让模型从当前用户话题里提炼少量高信号关键词，再对 `~/.mylittlebotty/memory/deep` 做本地文本搜索，并把命中行及其上下文返回给模型继续判断。
 - `crond`：查询、创建、编辑保存在 `~/.mylittlebotty/reminder.rec` 中的提醒任务。
 
 ### 5. 定时提醒
@@ -93,6 +95,8 @@ TUI 内置命令：
 - 通过 `/remember` 触发整理长期记忆。
 - 摘要结果写入 `~/.mylittlebotty/memory/summary/remember.md`。
 - 最近整理时间写入 `~/.mylittlebotty/memory/summary/rec.time`。
+- 正常对话时，Botty 会优先使用 `memory/summary/remember.md` 和最近对话历史。
+- 如果当前话题在这些内容里没有出现，内置 `remember` 工具会先让模型提炼搜索关键词，再在本地搜索 `~/.mylittlebotty/memory/deep`，并返回命中片段及其上下文。
 
 ### 8. 自更新
 

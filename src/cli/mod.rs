@@ -1,0 +1,110 @@
+mod commands;
+
+use clap::{Args, Parser, Subcommand};
+use std::io;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "mylittlebotty",
+    version,
+    about = "Botty,Botty! Do my order!",
+    long_about = None,
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    internal: InternalFlags,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Start(commands::start::StartCommand),
+    Version(commands::version::VersionCommand),
+    Status(commands::status::StatusCommand),
+    Stop(commands::stop::StopCommand),
+    Restart(commands::restart::RestartCommand),
+    Update(commands::update::UpdateCommand),
+    Log(commands::log::LogCommand),
+    Tui(commands::tui::TuiCommand),
+    Webui(commands::webui::WebuiCommand),
+    App(commands::app::AppCommand),
+}
+
+#[derive(Args, Debug, Default)]
+struct InternalFlags {
+    #[arg(long, hide = true)]
+    boss_daemon: bool,
+
+    #[arg(long, hide = true)]
+    guy: bool,
+
+    #[arg(long = "input-telegram", hide = true)]
+    input_telegram: bool,
+
+    #[arg(long = "input-feishu", hide = true)]
+    input_feishu: bool,
+
+    #[arg(long, hide = true)]
+    crond: bool,
+}
+
+impl InternalFlags {
+    fn dispatch(self) -> bool {
+        if self.guy {
+            commands::internal::run_guy();
+            return true;
+        }
+
+        if self.input_telegram {
+            commands::internal::run_telegram_input();
+            return true;
+        }
+
+        if self.input_feishu {
+            commands::internal::run_feishu_input();
+            return true;
+        }
+
+        if self.crond {
+            commands::internal::run_crond();
+            return true;
+        }
+
+        if self.boss_daemon {
+            commands::internal::run_boss_daemon();
+            return true;
+        }
+
+        false
+    }
+}
+
+pub fn run() -> io::Result<()> {
+    let cli = Cli::parse();
+
+    if cli.internal.dispatch() {
+        return Ok(());
+    }
+
+    match cli.command.unwrap_or_default() {
+        Command::Start(command) => command.run(),
+        Command::Version(command) => command.run(),
+        Command::Status(command) => command.run(),
+        Command::Stop(command) => command.run(),
+        Command::Restart(command) => command.run(),
+        Command::Update(command) => command.run(),
+        Command::Log(command) => command.run(),
+        Command::Tui(command) => command.run(),
+        Command::Webui(command) => command.run(),
+        Command::App(command) => command.run(),
+    }
+}
+
+impl Default for Command {
+    fn default() -> Self {
+        Self::Start(commands::start::StartCommand::default())
+    }
+}

@@ -610,22 +610,22 @@ pub fn run_supervisor() {
     let _pid_guard = match acquire_boss_pid_guard() {
         Ok(Some(guard)) => guard,
         Ok(None) => {
-            eprintln!("Botty-Boss is already running, exiting duplicate supervisor");
+            boss_log_error("Botty-Boss is already running, exiting duplicate supervisor");
             return;
         }
         Err(err) => {
-            eprintln!("Botty-Boss failed to acquire pid file: {err}");
+            boss_log_error(&format!("Botty-Boss failed to acquire pid file: {err}"));
             return;
         }
     };
 
     set_process_name(boss_process_name());
-    println!("Botty-Boss supervisor is running");
+    boss_log_info("Botty-Boss supervisor is running");
 
     let _socket_guard = match bind_chat_socket() {
         Ok(guard) => guard,
         Err(err) => {
-            eprintln!("Botty-Boss failed to bind chat socket: {err}");
+            boss_log_error(&format!("Botty-Boss failed to bind chat socket: {err}"));
             return;
         }
     };
@@ -642,11 +642,11 @@ pub fn run_supervisor() {
                 let chat_tx = chat_tx.clone();
                 thread::spawn(move || {
                     if let Err(err) = handle_chat_client(stream, chat_tx) {
-                        eprintln!("Botty-Boss failed to handle chat session: {err}");
+                        boss_log_error(&format!("Botty-Boss failed to handle chat session: {err}"));
                     }
                 });
             }
-            Err(err) => eprintln!("Botty-Boss accept error: {err}"),
+            Err(err) => boss_log_error(&format!("Botty-Boss accept error: {err}")),
         }
     }
 }
@@ -761,7 +761,9 @@ fn spawn_crond_process() -> Option<InputProcessBridge> {
     let exe = match env::current_exe() {
         Ok(exe) => exe,
         Err(err) => {
-            eprintln!("Botty-Boss failed to get current executable path for Botty-crond: {err}");
+            boss_log_error(&format!(
+                "Botty-Boss failed to get current executable path for Botty-crond: {err}"
+            ));
             return None;
         }
     };
@@ -782,7 +784,7 @@ fn spawn_crond_process() -> Option<InputProcessBridge> {
     {
         Ok(child) => Some(InputProcessBridge { child }),
         Err(err) => {
-            eprintln!("Botty-Boss failed to run {process_name}: {err}");
+            boss_log_error(&format!("Botty-Boss failed to run {process_name}: {err}"));
             None
         }
     }
@@ -824,7 +826,7 @@ fn spawn_enabled_input_processes(config: &SetupConfig) -> Vec<InputProcessBridge
     let exe = match env::current_exe() {
         Ok(exe) => exe,
         Err(err) => {
-            eprintln!("Botty-Boss failed to get current executable path: {err}");
+            boss_log_error(&format!("Botty-Boss failed to get current executable path: {err}"));
             return bridges;
         }
     };
@@ -845,7 +847,7 @@ fn spawn_enabled_input_processes(config: &SetupConfig) -> Vec<InputProcessBridge
 
         match child {
             Ok(child) => bridges.push(InputProcessBridge { child }),
-            Err(err) => eprintln!("Botty-Boss failed to run {process_name}: {err}"),
+            Err(err) => boss_log_error(&format!("Botty-Boss failed to run {process_name}: {err}")),
         }
     }
 
@@ -1010,7 +1012,7 @@ fn run_chat_worker(chat_rx: Receiver<QueuedChatRequest>) {
     let mut guy_bridge = match GuyBridge::spawn() {
         Ok(bridge) => bridge,
         Err(err) => {
-            eprintln!("Botty-Boss failed to run Botty-Guy: {err}");
+            boss_log_error(&format!("Botty-Boss failed to run Botty-Guy: {err}"));
             return;
         }
     };
@@ -1186,6 +1188,20 @@ fn local_time_format(format: &str) -> io::Result<String> {
         return Err(io::Error::other("failed to get local time by date command"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn boss_log_info(message: &str) {
+    let _ = write_boss_log_line(&mut io::stdout(), message);
+}
+
+fn boss_log_error(message: &str) {
+    let _ = write_boss_log_line(&mut io::stderr(), message);
+}
+
+fn write_boss_log_line(writer: &mut dyn Write, message: &str) -> io::Result<()> {
+    let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")
+        .unwrap_or_else(|_| "unknown-time".to_string());
+    writeln!(writer, "[{timestamp}] {message}")
 }
 
 fn wait_for_chat_socket(timeout: Duration) -> io::Result<()> {

@@ -2,7 +2,7 @@ use crate::frontend::frontend_service::{
     command_suggestions, FrontendRpc, GuyEnvSetResult, RestartStatus, SaveSetupResult, SetupConfig,
     SetupFieldId,
 };
-use crate::botty_paths;
+use crate::io as botty_io;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -421,8 +421,8 @@ impl FrontendApp {
             Mode::Chat | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. } => return None,
         };
 
-        let previous = botty_paths::resolve_work_dir_input(&original_work_dir);
-        let next = botty_paths::resolve_work_dir_input(&config.work_dir);
+        let previous = botty_io::resolve_work_dir_input(&original_work_dir);
+        let next = botty_io::resolve_work_dir_input(&config.work_dir);
         self.pending_setup_save = Some(if previous != next {
             "正在迁移 work dir...".to_string()
         } else {

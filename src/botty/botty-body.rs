@@ -5,7 +5,9 @@ use crate::llm_provider::{
 use crate::prompt;
 use crate::skill::buildin_crond::BuildinCrondSkill;
 use crate::skill::buildin_list::BuildinListSkill;
+use crate::skill::buildin_remember::BuildinRememberSkill;
 use crate::skill::buildin_watch::BuildinWatchSkill;
+use crate::skill::buildin_write::BuildinWriteSkill;
 use crate::skill::BottySkill;
 use serde_json::Value;
 use std::env;
@@ -17,6 +19,7 @@ use std::process::Command;
 const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
+const MAX_TOOL_CALL_STEPS: usize = 8;
 
 pub struct AssistantReply {
     pub text: String,
@@ -35,6 +38,8 @@ impl BottyBody {
             skills: vec![
                 Box::new(BuildinListSkill::new()),
                 Box::new(BuildinWatchSkill::new()),
+                Box::new(BuildinWriteSkill::new()),
+                Box::new(BuildinRememberSkill::new()),
                 Box::new(BuildinCrondSkill::new()),
             ],
         })
@@ -78,32 +83,39 @@ impl BottyBody {
         &self,
         input: &str,
         tools: &[ProviderToolDefinition],
-        tool_use: ProviderToolUse,
+        first_tool_use: ProviderToolUse,
     ) -> io::Result<AssistantReply> {
-        let tool_result =
-            self.execute_tool(tool_use.name.as_str(), tool_use.input_json.as_str())?;
         let system_prompt = build_system_prompt_with_deep_memory(DEEP_MEMORY_CONTEXT_ROUNDS)?;
-        let conversation = [
-            ProviderMessage::UserText(input.to_string()),
-            ProviderMessage::AssistantToolUse {
+        let mut conversation = vec![ProviderMessage::UserText(input.to_string())];
+        let mut tool_use = first_tool_use;
+
+        for _ in 0..MAX_TOOL_CALL_STEPS {
+            let tool_result =
+                self.execute_tool(tool_use.name.as_str(), tool_use.input_json.as_str())?;
+            conversation.push(ProviderMessage::AssistantToolUse {
                 assistant_content_json: tool_use.assistant_content_json,
-            },
-            ProviderMessage::UserToolResult {
+            });
+            conversation.push(ProviderMessage::UserToolResult {
                 tool_use_id: tool_use.id,
                 content: tool_result,
-            },
-        ];
-        let final_response = self.brain.think(&system_prompt, &conversation, tools)?;
+            });
 
-        match final_response {
-            ProviderResponse::Text(reply) => Ok(AssistantReply {
-                text: reply.text,
-                thinking: reply.thinking,
-            }),
-            ProviderResponse::ToolUse(_) => {
-                Err(io::Error::other("llm returned unexpected nested tool call"))
+            match self.brain.think(&system_prompt, &conversation, tools)? {
+                ProviderResponse::Text(reply) => {
+                    return Ok(AssistantReply {
+                        text: reply.text,
+                        thinking: reply.thinking,
+                    });
+                }
+                ProviderResponse::ToolUse(next_tool_use) => {
+                    tool_use = next_tool_use;
+                }
             }
         }
+
+        Err(io::Error::other(format!(
+            "llm exceeded maximum chained tool calls ({MAX_TOOL_CALL_STEPS})"
+        )))
     }
 
     fn execute_tool(&self, name: &str, argument: &str) -> io::Result<String> {

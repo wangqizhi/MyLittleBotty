@@ -1,10 +1,11 @@
+use crate::io as botty_io;
 use crate::skill::BottySkill;
 use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 const LARGE_FILE_THRESHOLD_BYTES: u64 = 500 * 1024;
@@ -172,14 +173,31 @@ fn parse_path_argument(input: &str) -> io::Result<String> {
 }
 
 fn resolve_path(path: &str) -> io::Result<PathBuf> {
+    let current_dir = env::current_dir()?;
+    let work_dir = ensure_work_dir_root()?;
+    resolve_path_with_work_dir(&current_dir, &work_dir, path)
+}
+
+fn resolve_path_with_work_dir(
+    current_dir: &Path,
+    work_dir: &Path,
+    path: &str,
+) -> io::Result<PathBuf> {
     let expanded = expand_user_path(path);
     let candidate = expanded.as_path();
     let absolute = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
-        env::current_dir()?.join(candidate)
+        current_dir.join(candidate)
     };
-    absolute.canonicalize()
+    match absolute.canonicalize() {
+        Ok(resolved) => Ok(resolved),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let fallback = work_dir.join(sanitize_user_path(path));
+            fallback.canonicalize()
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn ensure_path_allowed(path: &Path) -> io::Result<()> {
@@ -296,6 +314,26 @@ fn expand_user_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn ensure_work_dir_root() -> io::Result<PathBuf> {
+    let root = botty_io::effective_work_dir()?;
+    fs::create_dir_all(&root)?;
+    root.canonicalize()
+}
+
+fn sanitize_user_path(raw_path: &str) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for component in Path::new(raw_path).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::ParentDir => {
+                relative.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    relative
+}
+
 fn watch_config_file() -> PathBuf {
     botty_root_dir()
         .join("config")
@@ -391,6 +429,44 @@ mod tests {
     fn resolve_path_expands_tilde() {
         let resolved = resolve_path("~/.mylittlebotty").unwrap();
         assert_eq!(resolved, home_dir().join(".mylittlebotty"));
+    }
+
+    #[test]
+    fn resolve_path_falls_back_to_work_dir_for_relative_path() {
+        let current_dir = unique_test_path("watch-current-dir");
+        let work_dir = unique_test_path("watch-work-dir");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        let path = work_dir.join("watch-fallback-relative.txt");
+        fs::write(&path, "hello").unwrap();
+
+        let resolved =
+            resolve_path_with_work_dir(&current_dir, &work_dir, "watch-fallback-relative.txt")
+                .unwrap();
+        assert_eq!(resolved, path.canonicalize().unwrap());
+
+        fs::remove_dir_all(current_dir).unwrap();
+        fs::remove_dir_all(work_dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_path_falls_back_to_work_dir_for_absolute_path() {
+        let current_dir = unique_test_path("watch-current-dir");
+        let work_dir = unique_test_path("watch-work-dir");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        let tmp_dir = work_dir.join("tmp");
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let path = tmp_dir.join("watch-fallback-absolute.txt");
+        fs::write(&path, "hello").unwrap();
+
+        let resolved =
+            resolve_path_with_work_dir(&current_dir, &work_dir, "/tmp/watch-fallback-absolute.txt")
+                .unwrap();
+        assert_eq!(resolved, path.canonicalize().unwrap());
+
+        fs::remove_dir_all(current_dir).unwrap();
+        fs::remove_dir_all(work_dir).unwrap();
     }
 
     #[test]

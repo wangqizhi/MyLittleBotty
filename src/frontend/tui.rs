@@ -26,8 +26,9 @@ pub fn run() -> io::Result<()> {
     let mut rpc = LocalFrontendRpc::connect()?;
     let mut app = FrontendApp::new();
     let mut pending_reply: Option<Receiver<io::Result<String>>> = None;
-    let mut pending_setup_save: Option<Receiver<io::Result<crate::frontend::frontend_service::SaveSetupResult>>> =
-        None;
+    let mut pending_setup_save: Option<
+        Receiver<io::Result<crate::frontend::frontend_service::SaveSetupResult>>,
+    > = None;
 
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -498,7 +499,7 @@ fn render_setup_page(
         Line::raw("- Tab / Shift+Tab: Next/Prev field"),
         Line::raw(""),
         Line::raw("Work dir:"),
-        Line::raw("- default: ~/.mylittlebotty/work-dir/"),
+        Line::raw("- default: ~/opt/mylittlebotty-workdir"),
         Line::raw("- changing it migrates current work-dir contents"),
         Line::raw(""),
         Line::raw("Chatbot provider:"),
@@ -513,7 +514,8 @@ fn render_setup_page(
     frame.render_widget(side, top[1]);
 
     let footer = Paragraph::new(Line::raw(
-        pending_message.unwrap_or("Enter edits field in a modal. Toggle fields support Enter/Space."),
+        pending_message
+            .unwrap_or("Enter edits field in a modal. Toggle fields support Enter/Space."),
     ))
     .style(if pending_message.is_some() {
         Style::default().fg(Color::Black).bg(Color::Yellow)

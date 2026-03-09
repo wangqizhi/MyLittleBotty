@@ -1,9 +1,10 @@
+use crate::io as botty_io;
 use crate::skill::BottySkill;
 use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const LIST_TOOL_SCHEMA_JSON: &str = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path of the directory to list\"}},\"required\":[\"path\"]}";
 const LIST_BLACKLIST_KEY: &str = "list.blacklist";
@@ -32,9 +33,21 @@ impl BottySkill for BuildinListSkill {
 
     fn execute(&self, input_json: &str) -> io::Result<String> {
         let path = parse_path_argument(input_json)?;
-        let resolved = resolve_path(&path)?;
+        let resolved = match resolve_path(&path) {
+            Ok(resolved) => resolved,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(format_missing_directory_result(&path));
+            }
+            Err(err) => return Err(err),
+        };
         ensure_path_allowed(&resolved)?;
-        let metadata = fs::metadata(&resolved)?;
+        let metadata = match fs::metadata(&resolved) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(format_missing_directory_result(&path));
+            }
+            Err(err) => return Err(err),
+        };
         if !metadata.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -81,14 +94,37 @@ fn parse_path_argument(input: &str) -> io::Result<String> {
 }
 
 fn resolve_path(path: &str) -> io::Result<PathBuf> {
+    let current_dir = env::current_dir()?;
+    let work_dir = ensure_work_dir_root()?;
+    resolve_path_with_work_dir(&current_dir, &work_dir, path)
+}
+
+fn resolve_path_with_work_dir(
+    current_dir: &Path,
+    work_dir: &Path,
+    path: &str,
+) -> io::Result<PathBuf> {
     let expanded = expand_user_path(path);
     let candidate = expanded.as_path();
     let absolute = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
-        env::current_dir()?.join(candidate)
+        current_dir.join(candidate)
     };
-    absolute.canonicalize()
+    match absolute.canonicalize() {
+        Ok(resolved) => Ok(resolved),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let fallback = work_dir.join(sanitize_user_path(path));
+            fallback.canonicalize()
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn format_missing_directory_result(path: &str) -> String {
+    format!(
+        "LIST_MISSING_DIR {path}\nThe requested directory does not exist. Do not call list again for this path unless the user explicitly asks to inspect a different existing directory. If the user wants to save, record, or update content, continue by using write instead."
+    )
 }
 
 fn ensure_path_allowed(path: &Path) -> io::Result<()> {
@@ -205,6 +241,26 @@ fn expand_user_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn ensure_work_dir_root() -> io::Result<PathBuf> {
+    let root = botty_io::effective_work_dir()?;
+    fs::create_dir_all(&root)?;
+    root.canonicalize()
+}
+
+fn sanitize_user_path(raw_path: &str) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for component in Path::new(raw_path).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::ParentDir => {
+                relative.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    relative
+}
+
 fn list_config_file() -> PathBuf {
     botty_root_dir()
         .join("config")
@@ -285,5 +341,71 @@ mod tests {
     fn expand_user_path_supports_home_symbol() {
         assert_eq!(expand_user_path("~"), home_dir());
         assert_eq!(expand_user_path("~/tmp"), home_dir().join("tmp"));
+    }
+
+    #[test]
+    fn resolve_path_falls_back_to_work_dir_for_relative_path() {
+        let current_dir = unique_test_dir("list-current");
+        let work_dir = unique_test_dir("list-work");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        let notes_dir = work_dir.join("list-fallback-relative");
+        fs::create_dir_all(&notes_dir).unwrap();
+
+        let resolved =
+            resolve_path_with_work_dir(&current_dir, &work_dir, "list-fallback-relative").unwrap();
+        assert_eq!(resolved, notes_dir.canonicalize().unwrap());
+
+        fs::remove_dir_all(current_dir).unwrap();
+        fs::remove_dir_all(work_dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_path_falls_back_to_work_dir_for_absolute_path() {
+        let current_dir = unique_test_dir("list-current");
+        let work_dir = unique_test_dir("list-work");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        let dir = work_dir.join("tmp").join("list-fallback-absolute");
+        fs::create_dir_all(&dir).unwrap();
+
+        let resolved =
+            resolve_path_with_work_dir(&current_dir, &work_dir, "/tmp/list-fallback-absolute")
+                .unwrap();
+        assert_eq!(resolved, dir.canonicalize().unwrap());
+
+        fs::remove_dir_all(current_dir).unwrap();
+        fs::remove_dir_all(work_dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_path_keeps_missing_fallback_directory_as_not_found() {
+        let current_dir = unique_test_dir("list-current");
+        let work_dir = unique_test_dir("list-work");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        let dir = work_dir.join("notes");
+        let err = resolve_path_with_work_dir(&current_dir, &work_dir, "notes").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!dir.exists());
+
+        fs::remove_dir_all(current_dir).unwrap();
+        fs::remove_dir_all(work_dir).unwrap();
+    }
+
+    #[test]
+    fn missing_directory_result_guides_model_to_write() {
+        let result = format_missing_directory_result("notes");
+        assert!(result.contains("LIST_MISSING_DIR notes"));
+        assert!(result.contains("Do not call list again"));
+        assert!(result.contains("continue by using write instead"));
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("{nanos}-{name}"))
     }
 }
