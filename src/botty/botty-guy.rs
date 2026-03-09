@@ -23,6 +23,7 @@ const FEISHU_POLL_INTERVAL_SECONDS_DEFAULT: u64 = 1;
 const FEISHU_SEEN_CACHE_LIMIT: usize = 200;
 const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
 const CHAT_META_PREFIX: &str = "__botty_meta__";
+const CONTROL_PREFIX: &str = "__botty_control__";
 
 pub fn run() {
     set_process_name(guy_process_name());
@@ -54,6 +55,34 @@ pub fn run() {
         };
         let message = message.trim();
         if message.is_empty() {
+            continue;
+        }
+
+        if let Some((key, value)) = parse_set_env_control(message) {
+            // SAFETY: setting process environment is intended here as a local control action
+            // handled on the single worker process before the value is read by later requests.
+            unsafe {
+                std::env::set_var(&key, &value);
+            }
+            let reply = AssistantReply {
+                text: format!("set env ok: {key}"),
+                thinking: None,
+            };
+            let encoded_reply = match encode_ipc_line(&encode_assistant_reply(&reply)) {
+                Ok(reply) => reply,
+                Err(err) => {
+                    eprintln!("Botty-Guy failed to encode control output: {err}");
+                    break;
+                }
+            };
+            if let Err(err) = writeln!(stdout, "{encoded_reply}") {
+                eprintln!("Botty-Guy failed to write control output: {err}");
+                break;
+            }
+            if let Err(err) = stdout.flush() {
+                eprintln!("Botty-Guy failed to flush control output: {err}");
+                break;
+            }
             continue;
         }
 
@@ -718,6 +747,18 @@ fn encode_assistant_reply(reply: &AssistantReply) -> String {
 
 fn encode_meta_message(source: &str, user_id: &str, message: &str) -> String {
     format!("{CHAT_META_PREFIX}|source={source}|user_id={user_id}|{message}")
+}
+
+fn parse_set_env_control(message: &str) -> Option<(String, String)> {
+    let payload = message.strip_prefix(CONTROL_PREFIX)?;
+    let payload = payload.strip_prefix("set-env|")?;
+    let mut parts = payload.splitn(2, '|');
+    let key = parts.next()?.trim();
+    let value = parts.next()?.to_string();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), value))
 }
 
 fn encode_ipc_line(value: &str) -> io::Result<String> {

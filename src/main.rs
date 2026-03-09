@@ -8,6 +8,7 @@ mod botty_brain;
 mod botty_crond;
 #[path = "botty/botty-guy.rs"]
 mod botty_guy;
+mod botty_paths;
 mod frontend;
 mod io;
 mod llm_provider;

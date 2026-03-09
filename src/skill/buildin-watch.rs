@@ -3,9 +3,14 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+const LARGE_FILE_THRESHOLD_BYTES: u64 = 500 * 1024;
+const LARGE_FILE_TAIL_LINES: usize = 10;
+const LARGE_FILE_TAIL_READ_BYTES: u64 = 64 * 1024;
+const BINARY_PREVIEW_LIMIT: usize = 32;
 const WATCH_TOOL_SCHEMA_JSON: &str = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path of the file to read\"}},\"required\":[\"path\"]}";
 const WATCH_BLACKLIST_KEY: &str = "watch.blacklist";
 const DEFAULT_BLACKLIST: &[&str] = &[
@@ -61,14 +66,100 @@ impl BottySkill for BuildinWatchSkill {
             ));
         }
 
-        let content = fs::read_to_string(&resolved)?;
-        let truncated = truncate_utf8(content.as_str(), MAX_OUTPUT_BYTES);
-        let mut reply = format!("FILE {}\n{}", resolved.display(), truncated);
-        if truncated.len() < content.len() {
-            reply.push_str("\n...[truncated]");
-        }
-        Ok(reply)
+        build_watch_reply(&resolved, metadata.len())
     }
+}
+
+fn build_watch_reply(path: &Path, file_size: u64) -> io::Result<String> {
+    if file_size > LARGE_FILE_THRESHOLD_BYTES {
+        return build_large_file_reply(path, file_size);
+    }
+
+    let bytes = fs::read(path)?;
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(format_text_reply(path, &content)),
+        Err(err) => Ok(format_binary_reply(path, err.as_bytes())),
+    }
+}
+
+fn build_large_file_reply(path: &Path, file_size: u64) -> io::Result<String> {
+    let tail = read_large_file_tail(path, LARGE_FILE_TAIL_LINES)?;
+    let tail = truncate_utf8(&tail, MAX_OUTPUT_BYTES);
+    Ok(format!(
+        "FILE {}\n[last {} lines of large file: {} bytes]\n{}",
+        path.display(),
+        LARGE_FILE_TAIL_LINES,
+        file_size,
+        tail
+    ))
+}
+
+fn format_text_reply(path: &Path, content: &str) -> String {
+    let truncated = truncate_utf8(content, MAX_OUTPUT_BYTES);
+    let mut reply = format!("FILE {}\n{}", path.display(), truncated);
+    if truncated.len() < content.len() {
+        reply.push_str("\n...[truncated]");
+    }
+    reply
+}
+
+fn format_binary_reply(path: &Path, bytes: &[u8]) -> String {
+    let preview = extract_printable_segments(bytes, BINARY_PREVIEW_LIMIT);
+    let body = if preview.is_empty() {
+        "[binary file: no printable text preview available]".to_string()
+    } else {
+        preview.join("\n")
+    };
+    format!("FILE {}\n[binary preview]\n{}", path.display(), body)
+}
+
+fn read_large_file_tail(path: &Path, line_count: usize) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let start = file_size.saturating_sub(LARGE_FILE_TAIL_READ_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    let text = String::from_utf8_lossy(&bytes);
+    let lines = text.lines().collect::<Vec<_>>();
+    let start_index = lines.len().saturating_sub(line_count);
+    let mut tail = lines[start_index..].join("\n");
+    if !tail.is_empty() && text.ends_with('\n') {
+        tail.push('\n');
+    }
+    if start > 0 {
+        tail = format!("...[tail only]\n{tail}");
+    }
+    Ok(tail)
+}
+
+fn extract_printable_segments(bytes: &[u8], limit: usize) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+
+    for &byte in bytes {
+        let ch = byte as char;
+        if ch.is_ascii_graphic() || ch == ' ' {
+            current.push(ch);
+            continue;
+        }
+
+        if current.len() >= 4 {
+            segments.push(current.clone());
+            if segments.len() == limit {
+                break;
+            }
+        }
+        current.clear();
+    }
+
+    if segments.len() < limit && current.len() >= 4 {
+        segments.push(current);
+    }
+
+    segments
 }
 
 fn parse_path_argument(input: &str) -> io::Result<String> {
@@ -254,6 +345,9 @@ fn truncate_utf8(content: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn blacklist_directory_rule_matches_children() {
@@ -297,5 +391,37 @@ mod tests {
     fn resolve_path_expands_tilde() {
         let resolved = resolve_path("~/.mylittlebotty").unwrap();
         assert_eq!(resolved, home_dir().join(".mylittlebotty"));
+    }
+
+    #[test]
+    fn binary_preview_extracts_printable_segments() {
+        let preview = format_binary_reply(Path::new("/tmp/test.bin"), b"\0Bud1\0ShowStatusBar\0");
+        assert!(preview.contains("[binary preview]"));
+        assert!(preview.contains("Bud1"));
+        assert!(preview.contains("ShowStatusBar"));
+    }
+
+    #[test]
+    fn large_file_reply_reads_last_lines_only() {
+        let path = unique_test_path("watch-large-tail.txt");
+        let mut file = File::create(&path).unwrap();
+        for index in 0..200_000 {
+            writeln!(file, "line-{index}").unwrap();
+        }
+
+        let reply = build_large_file_reply(&path, LARGE_FILE_THRESHOLD_BYTES + 1).unwrap();
+        assert!(reply.contains("[last 10 lines of large file"));
+        assert!(reply.contains("line-199999"));
+        assert!(!reply.contains("line-0"));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("{nanos}-{name}"))
     }
 }

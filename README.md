@@ -26,6 +26,9 @@ Built-in TUI commands:
 - `/restart-server`: restart local Botty background services
 - `/new`: start a new chat session
 - `/remember`: trigger long-term memory summarization
+- `/set-guy-env`: open the TUI editor for persisted `Botty-Guy` environment variables
+- `/set-guy-env KEY=VALUE`: validate the key, save the variable to disk, and try to hot-apply it to the running `Botty-Guy` process
+- `/list-guy-env`: open a read-only list page for persisted `Botty-Guy` environment variables
 - `/exit`: exit the TUI
 - `/quit`: exit the TUI
 
@@ -53,10 +56,11 @@ When `ai.provider.debug=true`, request and response payloads are written to the 
 
 ### 4. Local tool usage
 
-Botty currently exposes two built-in tools:
+Botty currently exposes three built-in tools:
 
-- `watch`: read a local text file when the user asks to inspect a file
-- `crond`: query, create, and edit reminder records
+- `list`: list the content of a local directory. Directories are suffixed with `/`, symlinks with `@`, and access can be restricted with `~/.mylittlebotty/config/list.conf` via `list.blacklist=...`. The default blacklist blocks `~/.mylittlebotty/`.
+- `watch`: read a local file. Text files are truncated to at most 16 KiB, large files over 500 KiB return only the recent tail, binary files return a printable preview, and access can be restricted with `~/.mylittlebotty/config/watch.conf` via `watch.blacklist=...`.
+- `crond`: query, create, and edit reminder records stored in `~/.mylittlebotty/reminder.rec`.
 
 ### 5. Scheduled reminders
 
@@ -159,6 +163,8 @@ Inside the TUI you can:
 
 - chat directly
 - run `/setup` to configure AI and chatbot channels
+- run `/set-guy-env` to open the env editor, or `/set-guy-env KEY=VALUE` to update one variable directly
+- run `/list-guy-env` to inspect persisted `Botty-Guy` env vars
 - run `/remember` to summarize long-term memory
 - run `/quit` or `/exit` to leave the TUI
 
@@ -309,6 +315,9 @@ The program uses these paths by default:
 
 - `~/.mylittlebotty/bin`: installed executable
 - `~/.mylittlebotty/config/setup.conf`: main config file
+- `~/.mylittlebotty/config/guy-env.conf`: persisted environment variables injected into `Botty-Guy`
+- `~/.mylittlebotty/config/list.conf`: optional blacklist config for the `list` tool
+- `~/.mylittlebotty/config/watch.conf`: optional blacklist config for the `watch` tool
 - `~/.mylittlebotty/log/`: log directory
 - `~/.mylittlebotty/run/`: runtime files such as pid, socket, and interrupt flags
 - `~/.mylittlebotty/reminder.rec`: reminder records

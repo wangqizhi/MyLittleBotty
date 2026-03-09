@@ -1,7 +1,8 @@
 use crate::frontend::frontend_service::{
-    command_suggestions, FrontendRpc, RestartStatus, SaveSetupResult, SetupConfig, SetupFieldId,
+    command_suggestions, FrontendRpc, GuyEnvSetResult, RestartStatus, SaveSetupResult, SetupConfig,
+    SetupFieldId,
 };
-use std::env;
+use crate::botty_paths;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -25,13 +26,38 @@ pub enum Mode {
         selected_field: usize,
         selected_provider: usize,
         editor: Option<SetupEditor>,
+        original_work_dir: String,
         config: SetupConfig,
+    },
+    GuyEnvEdit {
+        selected_entry: usize,
+        editor: Option<GuyEnvEditor>,
+        entries: Vec<(String, String)>,
+    },
+    GuyEnvList {
+        selected_entry: usize,
+        entries: Vec<(String, String)>,
     },
 }
 
 pub enum SetupEditor {
     Provider(ProviderEdit),
     Field(FieldEdit),
+}
+
+pub struct GuyEnvEditor {
+    pub original_key: Option<String>,
+    pub key_input: String,
+    pub key_cursor: usize,
+    pub value_input: String,
+    pub value_cursor: usize,
+    pub focus: GuyEnvEditorFocus,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum GuyEnvEditorFocus {
+    Key,
+    Value,
 }
 
 pub struct ProviderEdit {
@@ -62,6 +88,7 @@ pub struct FrontendApp {
     history_draft: String,
     mode: Mode,
     pending_chat: bool,
+    pending_setup_save: Option<String>,
     thinking_frame: usize,
 }
 
@@ -77,6 +104,7 @@ impl FrontendApp {
             history_draft: String::new(),
             mode: Mode::Chat,
             pending_chat: false,
+            pending_setup_save: None,
             thinking_frame: 0,
         };
         app.push_system("TUI chat started. Type / for command suggestions.");
@@ -104,7 +132,10 @@ impl FrontendApp {
     }
 
     pub fn is_setup_mode(&self) -> bool {
-        matches!(self.mode, Mode::Setup { .. })
+        matches!(
+            self.mode,
+            Mode::Setup { .. } | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. }
+        )
     }
 
     pub fn pending_chat_text(&self) -> Option<String> {
@@ -119,6 +150,14 @@ impl FrontendApp {
             _ => "",
         };
         Some(format!("thinking{dots}"))
+    }
+
+    pub fn pending_setup_save_text(&self) -> Option<&str> {
+        self.pending_setup_save.as_deref()
+    }
+
+    pub fn is_setup_save_pending(&self) -> bool {
+        self.pending_setup_save.is_some()
     }
 
     pub fn command_suggestions(&self) -> Vec<&'static str> {
@@ -260,6 +299,14 @@ impl FrontendApp {
             self.enter_setup(rpc)?;
             return Ok(SubmitOutcome::None);
         }
+        if message == "/set-guy-env" {
+            self.enter_guy_env_edit(rpc)?;
+            return Ok(SubmitOutcome::None);
+        }
+        if message == "/list-guy-env" {
+            self.enter_guy_env_list(rpc)?;
+            return Ok(SubmitOutcome::None);
+        }
         if message == "/restart-server" {
             self.push_user(&message);
             match rpc.restart_server() {
@@ -270,6 +317,11 @@ impl FrontendApp {
         }
         if message == "/new" {
             self.start_new_chat_session()?;
+            return Ok(SubmitOutcome::None);
+        }
+        if let Some(argument) = message.strip_prefix("/set-guy-env ") {
+            self.push_user(&message);
+            self.handle_set_guy_env(rpc, argument)?;
             return Ok(SubmitOutcome::None);
         }
 
@@ -286,6 +338,7 @@ impl FrontendApp {
             selected_field: 0,
             selected_provider,
             editor: None,
+            original_work_dir: config.work_dir.clone(),
             config,
         };
         self.input.clear();
@@ -300,19 +353,107 @@ impl FrontendApp {
         self.push_system("Setup canceled.");
     }
 
-    pub fn save_setup<R: FrontendRpc>(&mut self, rpc: &mut R) -> io::Result<()> {
-        let config = match &self.mode {
-            Mode::Setup { config, .. } => config.clone(),
-            Mode::Chat => return Ok(()),
+    pub fn enter_guy_env_edit<R: FrontendRpc>(&mut self, rpc: &mut R) -> io::Result<()> {
+        let entries = rpc.list_guy_env()?;
+        self.mode = Mode::GuyEnvEdit {
+            selected_entry: 0,
+            editor: None,
+            entries,
         };
+        self.input.clear();
+        self.input_cursor = 0;
+        Ok(())
+    }
 
-        let result = rpc.save_setup(&config)?;
+    pub fn enter_guy_env_list<R: FrontendRpc>(&mut self, rpc: &mut R) -> io::Result<()> {
+        let entries = rpc.list_guy_env()?;
+        self.mode = Mode::GuyEnvList {
+            selected_entry: 0,
+            entries,
+        };
+        self.input.clear();
+        self.input_cursor = 0;
+        Ok(())
+    }
+
+    pub fn refresh_guy_env<R: FrontendRpc>(&mut self, rpc: &mut R) -> io::Result<()> {
+        let entries = rpc.list_guy_env()?;
+        match &mut self.mode {
+            Mode::GuyEnvEdit {
+                selected_entry,
+                entries: saved_entries,
+                ..
+            } => {
+                *saved_entries = entries;
+                let max_index = saved_entries.len();
+                *selected_entry = (*selected_entry).min(max_index);
+            }
+            Mode::GuyEnvList {
+                selected_entry,
+                entries: saved_entries,
+            } => {
+                *saved_entries = entries;
+                let max_index = saved_entries.len().saturating_sub(1);
+                *selected_entry = (*selected_entry).min(max_index);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn close_panel(&mut self) {
         self.mode = Mode::Chat;
         self.input.clear();
         self.input_cursor = 0;
-        self.push_system(&format!("Setup saved to {}", result.config_path.display()));
-        self.push_restart_status(result);
-        Ok(())
+    }
+
+    pub fn begin_setup_save(&mut self) -> Option<SetupConfig> {
+        if self.pending_setup_save.is_some() {
+            return None;
+        }
+
+        let (config, original_work_dir) = match &self.mode {
+            Mode::Setup {
+                config,
+                original_work_dir,
+                ..
+            } => (config.clone(), original_work_dir.clone()),
+            Mode::Chat | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. } => return None,
+        };
+
+        let previous = botty_paths::resolve_work_dir_input(&original_work_dir);
+        let next = botty_paths::resolve_work_dir_input(&config.work_dir);
+        self.pending_setup_save = Some(if previous != next {
+            "正在迁移 work dir...".to_string()
+        } else {
+            "正在保存 setup...".to_string()
+        });
+        Some(config)
+    }
+
+    pub fn finish_setup_save(&mut self, result: io::Result<SaveSetupResult>) {
+        self.pending_setup_save = None;
+        match result {
+            Ok(result) => {
+                self.mode = Mode::Chat;
+                self.input.clear();
+                self.input_cursor = 0;
+                self.push_system(&format!("Setup saved to {}", result.config_path.display()));
+                self.push_system(&format!(
+                    "Shared work dir config saved to {}",
+                    result.work_dir_config_path.display()
+                ));
+                if let Some((from, to)) = result.migrated_work_dir.as_ref() {
+                    self.push_system(&format!(
+                        "Work dir migrated: {} -> {}",
+                        from.display(),
+                        to.display()
+                    ));
+                }
+                self.push_restart_status(result);
+            }
+            Err(err) => self.push_system(&format!("save setup failed: {err}")),
+        }
     }
 
     pub fn setup_prev_field(&mut self) {
@@ -355,6 +496,7 @@ impl FrontendApp {
             selected_provider,
             editor,
             config,
+            ..
         } = &mut self.mode
         else {
             return;
@@ -400,165 +542,394 @@ impl FrontendApp {
         }
     }
 
-    pub fn editor_cancel(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        *editor = None;
-    }
-
-    pub fn editor_backspace(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                delete_previous_char(&mut provider.input, &mut provider.cursor);
+    pub fn guy_env_prev_entry(&mut self) {
+        match &mut self.mode {
+            Mode::GuyEnvEdit {
+                selected_entry,
+                entries,
+                ..
+            } => {
+                let len = entries.len() + 1;
+                if len == 0 {
+                    return;
+                }
+                if *selected_entry == 0 {
+                    *selected_entry = len - 1;
+                } else {
+                    *selected_entry -= 1;
+                }
             }
-            Some(SetupEditor::Field(field)) => {
-                delete_previous_char(&mut field.input, &mut field.cursor);
+            Mode::GuyEnvList {
+                selected_entry,
+                entries,
+            } => {
+                if entries.is_empty() {
+                    return;
+                }
+                if *selected_entry == 0 {
+                    *selected_entry = entries.len() - 1;
+                } else {
+                    *selected_entry -= 1;
+                }
             }
-            None => {}
+            _ => {}
         }
     }
 
-    pub fn editor_delete(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                delete_current_char(&mut provider.input, provider.cursor);
+    pub fn guy_env_next_entry(&mut self) {
+        match &mut self.mode {
+            Mode::GuyEnvEdit {
+                selected_entry,
+                entries,
+                ..
+            } => {
+                let len = entries.len() + 1;
+                if len == 0 {
+                    return;
+                }
+                *selected_entry = (*selected_entry + 1) % len;
             }
-            Some(SetupEditor::Field(field)) => {
-                delete_current_char(&mut field.input, field.cursor);
+            Mode::GuyEnvList {
+                selected_entry,
+                entries,
+            } => {
+                if entries.is_empty() {
+                    return;
+                }
+                *selected_entry = (*selected_entry + 1) % entries.len();
             }
-            None => {}
+            _ => {}
         }
     }
 
-    pub fn editor_insert(&mut self, c: char) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                provider.input.insert(provider.cursor, c);
-                provider.cursor += c.len_utf8();
-            }
-            Some(SetupEditor::Field(field)) => {
-                field.input.insert(field.cursor, c);
-                field.cursor += c.len_utf8();
-            }
-            None => {}
-        }
-    }
-
-    pub fn editor_move_left(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                provider.cursor = previous_char_boundary(&provider.input, provider.cursor);
-            }
-            Some(SetupEditor::Field(field)) => {
-                field.cursor = previous_char_boundary(&field.input, field.cursor);
-            }
-            None => {}
-        }
-    }
-
-    pub fn editor_move_right(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                provider.cursor = next_char_boundary(&provider.input, provider.cursor);
-            }
-            Some(SetupEditor::Field(field)) => {
-                field.cursor = next_char_boundary(&field.input, field.cursor);
-            }
-            None => {}
-        }
-    }
-
-    pub fn editor_move_home(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => provider.cursor = 0,
-            Some(SetupEditor::Field(field)) => field.cursor = 0,
-            None => {}
-        }
-    }
-
-    pub fn editor_move_end(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => provider.cursor = provider.input.len(),
-            Some(SetupEditor::Field(field)) => field.cursor = field.input.len(),
-            None => {}
-        }
-    }
-
-    pub fn editor_clear(&mut self) {
-        let Mode::Setup { editor, .. } = &mut self.mode else {
-            return;
-        };
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                provider.input.clear();
-                provider.cursor = 0;
-            }
-            Some(SetupEditor::Field(field)) => {
-                field.input.clear();
-                field.cursor = 0;
-            }
-            None => {}
-        }
-    }
-
-    pub fn editor_submit(&mut self) {
-        let Mode::Setup {
-            selected_provider,
+    pub fn open_guy_env_editor(&mut self) {
+        let Mode::GuyEnvEdit {
+            selected_entry,
             editor,
-            config,
-            ..
+            entries,
         } = &mut self.mode
         else {
             return;
         };
 
-        let mut close_editor = false;
-        match editor.as_mut() {
-            Some(SetupEditor::Provider(provider)) => {
-                let value = provider.input.trim().to_string();
-                if !value.is_empty() {
-                    config.set_provider_apikey(provider.selected_provider, &value);
-                }
-                *selected_provider = provider.selected_provider;
-                config.chatbot_provider = crate::frontend::frontend_service::CHATBOT_PROVIDERS
-                    [*selected_provider]
-                    .to_string();
-                close_editor = true;
+        let new_editor = if *selected_entry < entries.len() {
+            let (key, value) = entries[*selected_entry].clone();
+            GuyEnvEditor {
+                original_key: Some(key.clone()),
+                key_input: key,
+                key_cursor: entries[*selected_entry].0.len(),
+                value_input: value,
+                value_cursor: entries[*selected_entry].1.len(),
+                focus: GuyEnvEditorFocus::Value,
             }
-            Some(SetupEditor::Field(field)) => {
-                let value = field.input.trim().to_string();
-                if !value.is_empty() {
-                    config.set_field(field.selected_field, &value);
-                }
-                close_editor = true;
+        } else {
+            GuyEnvEditor {
+                original_key: None,
+                key_input: String::new(),
+                key_cursor: 0,
+                value_input: String::new(),
+                value_cursor: 0,
+                focus: GuyEnvEditorFocus::Key,
             }
-            None => {}
-        }
+        };
+        *editor = Some(new_editor);
+    }
 
-        if close_editor {
-            *editor = None;
+    pub fn editor_cancel(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => *editor = None,
+            Mode::GuyEnvEdit { editor, .. } => *editor = None,
+            _ => {}
+        }
+    }
+
+    pub fn editor_backspace(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => {
+                    delete_previous_char(&mut provider.input, &mut provider.cursor);
+                }
+                Some(SetupEditor::Field(field)) => {
+                    delete_previous_char(&mut field.input, &mut field.cursor);
+                }
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => {
+                            delete_previous_char(&mut editor.key_input, &mut editor.key_cursor)
+                        }
+                        GuyEnvEditorFocus::Value => {
+                            delete_previous_char(&mut editor.value_input, &mut editor.value_cursor)
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_delete(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => {
+                    delete_current_char(&mut provider.input, provider.cursor);
+                }
+                Some(SetupEditor::Field(field)) => {
+                    delete_current_char(&mut field.input, field.cursor);
+                }
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => {
+                            delete_current_char(&mut editor.key_input, editor.key_cursor)
+                        }
+                        GuyEnvEditorFocus::Value => {
+                            delete_current_char(&mut editor.value_input, editor.value_cursor)
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_insert(&mut self, c: char) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => {
+                    provider.input.insert(provider.cursor, c);
+                    provider.cursor += c.len_utf8();
+                }
+                Some(SetupEditor::Field(field)) => {
+                    field.input.insert(field.cursor, c);
+                    field.cursor += c.len_utf8();
+                }
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => {
+                            editor.key_input.insert(editor.key_cursor, c);
+                            editor.key_cursor += c.len_utf8();
+                        }
+                        GuyEnvEditorFocus::Value => {
+                            editor.value_input.insert(editor.value_cursor, c);
+                            editor.value_cursor += c.len_utf8();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_move_left(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => {
+                    provider.cursor = previous_char_boundary(&provider.input, provider.cursor);
+                }
+                Some(SetupEditor::Field(field)) => {
+                    field.cursor = previous_char_boundary(&field.input, field.cursor);
+                }
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => {
+                            editor.key_cursor =
+                                previous_char_boundary(&editor.key_input, editor.key_cursor);
+                        }
+                        GuyEnvEditorFocus::Value => {
+                            editor.value_cursor =
+                                previous_char_boundary(&editor.value_input, editor.value_cursor);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_move_right(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => {
+                    provider.cursor = next_char_boundary(&provider.input, provider.cursor);
+                }
+                Some(SetupEditor::Field(field)) => {
+                    field.cursor = next_char_boundary(&field.input, field.cursor);
+                }
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => {
+                            editor.key_cursor =
+                                next_char_boundary(&editor.key_input, editor.key_cursor);
+                        }
+                        GuyEnvEditorFocus::Value => {
+                            editor.value_cursor =
+                                next_char_boundary(&editor.value_input, editor.value_cursor);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_move_home(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => provider.cursor = 0,
+                Some(SetupEditor::Field(field)) => field.cursor = 0,
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => editor.key_cursor = 0,
+                        GuyEnvEditorFocus::Value => editor.value_cursor = 0,
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_move_end(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => provider.cursor = provider.input.len(),
+                Some(SetupEditor::Field(field)) => field.cursor = field.input.len(),
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => editor.key_cursor = editor.key_input.len(),
+                        GuyEnvEditorFocus::Value => editor.value_cursor = editor.value_input.len(),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_clear(&mut self) {
+        match &mut self.mode {
+            Mode::Setup { editor, .. } => match editor.as_mut() {
+                Some(SetupEditor::Provider(provider)) => {
+                    provider.input.clear();
+                    provider.cursor = 0;
+                }
+                Some(SetupEditor::Field(field)) => {
+                    field.input.clear();
+                    field.cursor = 0;
+                }
+                None => {}
+            },
+            Mode::GuyEnvEdit { editor, .. } => {
+                if let Some(editor) = editor.as_mut() {
+                    match editor.focus {
+                        GuyEnvEditorFocus::Key => {
+                            editor.key_input.clear();
+                            editor.key_cursor = 0;
+                        }
+                        GuyEnvEditorFocus::Value => {
+                            editor.value_input.clear();
+                            editor.value_cursor = 0;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn editor_submit<R: FrontendRpc>(&mut self, rpc: &mut R) {
+        match &mut self.mode {
+            Mode::Setup {
+                selected_provider,
+                editor,
+                config,
+                ..
+            } => {
+                let mut close_editor = false;
+                match editor.as_mut() {
+                    Some(SetupEditor::Provider(provider)) => {
+                        let value = provider.input.trim().to_string();
+                        if !value.is_empty() {
+                            config.set_provider_apikey(provider.selected_provider, &value);
+                        }
+                        *selected_provider = provider.selected_provider;
+                        config.chatbot_provider =
+                            crate::frontend::frontend_service::CHATBOT_PROVIDERS
+                                [*selected_provider]
+                                .to_string();
+                        close_editor = true;
+                    }
+                    Some(SetupEditor::Field(field)) => {
+                        let value = field.input.trim().to_string();
+                        if !value.is_empty() || field.selected_field == SetupFieldId::WorkDir {
+                            config.set_field(field.selected_field, &value);
+                        }
+                        close_editor = true;
+                    }
+                    None => {}
+                }
+
+                if close_editor {
+                    *editor = None;
+                }
+            }
+            Mode::GuyEnvEdit {
+                selected_entry,
+                editor,
+                entries,
+            } => {
+                let Some(editor_state) = editor.take() else {
+                    return;
+                };
+
+                let key = editor_state.key_input.trim().to_string();
+                let value = editor_state.value_input.trim().to_string();
+                if key.is_empty() {
+                    self.push_system("Guy env key cannot be empty.");
+                    return;
+                }
+
+                match rpc.set_guy_env(&key, &value) {
+                    Ok(result) => {
+                        if let Some(original_key) = editor_state.original_key {
+                            entries.retain(|(saved_key, _)| saved_key != &original_key);
+                        }
+                        if let Some((_, saved_value)) =
+                            entries.iter_mut().find(|(saved_key, _)| saved_key == &key)
+                        {
+                            *saved_value = value.clone();
+                        } else {
+                            entries.push((key.clone(), value.clone()));
+                        }
+                        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                        *selected_entry = entries
+                            .iter()
+                            .position(|(saved_key, _)| saved_key == &key)
+                            .unwrap_or(entries.len());
+                        self.push_guy_env_set_status(result);
+                    }
+                    Err(err) => self.push_system(&format!("set guy env failed: {err}")),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -648,6 +1019,18 @@ impl FrontendApp {
         self.push_restart_status_lines(result.restart_status);
     }
 
+    fn push_guy_env_set_status(&mut self, result: GuyEnvSetResult) {
+        self.push_system(&format!(
+            "Guy env saved to {}",
+            result.config_path.display()
+        ));
+        if result.applied_live {
+            self.push_system("Applied to the running guy process.");
+        } else {
+            self.push_system("Saved, but live apply failed. It will be used next time guy starts.");
+        }
+    }
+
     fn push_restart_status_lines(&mut self, status: RestartStatus) {
         match status {
             RestartStatus::Success(message) | RestartStatus::Failed(message) => {
@@ -655,6 +1038,73 @@ impl FrontendApp {
                     self.push_system(line);
                 }
             }
+        }
+    }
+
+    fn handle_set_guy_env<R: FrontendRpc>(
+        &mut self,
+        rpc: &mut R,
+        argument: &str,
+    ) -> io::Result<()> {
+        let Some((key, value)) = argument.split_once('=') else {
+            self.push_system("Usage: /set-guy-env KEY=VALUE");
+            return Ok(());
+        };
+
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            self.push_system("Usage: /set-guy-env KEY=VALUE");
+            return Ok(());
+        }
+
+        match rpc.set_guy_env(key, value) {
+            Ok(result) => {
+                self.push_system(&format!("Set guy env {key}={value}"));
+                self.push_guy_env_set_status(result);
+            }
+            Err(err) => self.push_system(&format!("set guy env failed: {err}")),
+        }
+        Ok(())
+    }
+
+    pub fn guy_env_editor(&self) -> Option<&GuyEnvEditor> {
+        match &self.mode {
+            Mode::GuyEnvEdit { editor, .. } => editor.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn guy_env_edit_state(&self) -> Option<(usize, &[(String, String)])> {
+        match &self.mode {
+            Mode::GuyEnvEdit {
+                selected_entry,
+                entries,
+                ..
+            } => Some((*selected_entry, entries)),
+            _ => None,
+        }
+    }
+
+    pub fn guy_env_list_state(&self) -> Option<(usize, &[(String, String)])> {
+        match &self.mode {
+            Mode::GuyEnvList {
+                selected_entry,
+                entries,
+            } => Some((*selected_entry, entries)),
+            _ => None,
+        }
+    }
+
+    pub fn toggle_guy_env_editor_focus(&mut self) {
+        let Mode::GuyEnvEdit { editor, .. } = &mut self.mode else {
+            return;
+        };
+        if let Some(editor) = editor.as_mut() {
+            editor.focus = match editor.focus {
+                GuyEnvEditorFocus::Key => GuyEnvEditorFocus::Value,
+                GuyEnvEditorFocus::Value => GuyEnvEditorFocus::Key,
+            };
         }
     }
 }
@@ -711,7 +1161,7 @@ fn write_new_session_marker() -> io::Result<()> {
 }
 
 fn botty_root_dir() -> PathBuf {
-    env::var_os("HOME")
+    std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".mylittlebotty")

@@ -27,6 +27,7 @@ const INSTALL_SCRIPT_URL: &str = env!("BOTTY_INSTALL_SCRIPT_URL");
 const CURL_MAX_TIME_SECONDS: &str = "60";
 const GUY_DEFAULT_ROLE: &str = "leader";
 const CHAT_META_PREFIX: &str = "__botty_meta__";
+const CONTROL_PREFIX: &str = "__botty_control__";
 
 pub fn start_daemon() -> io::Result<()> {
     if is_boss_running()? {
@@ -100,6 +101,29 @@ pub fn ensure_chat_ready() -> io::Result<()> {
         start_daemon()?;
     }
     wait_for_chat_socket(Duration::from_secs(5))
+}
+
+pub fn load_guy_env_map() -> io::Result<Vec<(String, String)>> {
+    read_guy_env_entries(&guy_env_config_file())
+}
+
+pub fn save_guy_env_map(entries: &[(String, String)]) -> io::Result<()> {
+    let path = guy_env_config_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut sorted = entries.to_vec();
+    sorted.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+
+    let mut content = String::new();
+    for (key, value) in sorted {
+        content.push_str(&key);
+        content.push('=');
+        content.push_str(&value);
+        content.push('\n');
+    }
+    fs::write(path, content)
 }
 
 pub fn is_boss_running() -> io::Result<bool> {
@@ -659,13 +683,18 @@ struct GuyBridge {
 impl GuyBridge {
     fn spawn() -> io::Result<Self> {
         let exe = env::current_exe()?;
-        let mut child = Command::new(exe)
-            .arg0(guy_process_name())
+        let mut cmd = Command::new(exe);
+        cmd.arg0(guy_process_name())
             .arg("--guy")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+
+        for (key, value) in load_guy_env_map()? {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn()?;
 
         let child_pid = i32::try_from(child.id())
             .map_err(|_| io::Error::other("failed to convert guy pid to i32"))?;
@@ -709,6 +738,11 @@ impl GuyBridge {
 
         let decoded = decode_ipc_line(response.trim_end())?;
         decode_assistant_reply(&decoded)
+    }
+
+    fn set_env(&mut self, key: &str, value: &str) -> io::Result<()> {
+        let control = format!("{CONTROL_PREFIX}set-env|{key}|{value}");
+        self.ask(&control).map(|_| ())
     }
 }
 
@@ -824,6 +858,12 @@ fn guy_role_config_file() -> PathBuf {
         .join(format!("guy-role-map{}.conf", runtime_suffix()))
 }
 
+fn guy_env_config_file() -> PathBuf {
+    botty_root_dir()
+        .join("config")
+        .join(format!("guy-env{}.conf", runtime_suffix()))
+}
+
 fn persist_guy_role(pid: i32, role: &str) -> io::Result<()> {
     let path = guy_role_config_file();
     if let Some(parent) = path.parent() {
@@ -872,6 +912,33 @@ fn read_guy_role_entries(path: &PathBuf) -> io::Result<Vec<(i32, String)>> {
     Ok(entries)
 }
 
+fn read_guy_env_entries(path: &PathBuf) -> io::Result<Vec<(String, String)>> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some((key_part, value_part)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key_part.trim();
+        if key.is_empty() {
+            continue;
+        }
+        entries.push((key.to_string(), value_part.to_string()));
+    }
+
+    Ok(entries)
+}
+
 impl Drop for GuyBridge {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -902,12 +969,14 @@ fn handle_chat_client(stream: UnixStream, chat_tx: Sender<QueuedChatRequest>) ->
             continue;
         }
 
-        let _ = persist_chat_message(
-            "user",
-            &incoming.source,
-            &incoming.user_id,
-            &incoming.message,
-        );
+        if !is_control_message(&incoming.message) {
+            let _ = persist_chat_message(
+                "user",
+                &incoming.source,
+                &incoming.user_id,
+                &incoming.message,
+            );
+        }
 
         let (reply_tx, reply_rx) = mpsc::channel();
         chat_tx
@@ -947,6 +1016,12 @@ fn run_chat_worker(chat_rx: Receiver<QueuedChatRequest>) {
     };
 
     while let Ok(request) = chat_rx.recv() {
+        if let Some((key, value)) = parse_set_env_control(&request.incoming.message) {
+            let response = guy_bridge.set_env(&key, &value).map(|_| "ok".to_string());
+            let _ = request.reply_tx.send(response);
+            continue;
+        }
+
         let leader_message = leader_message_for_source(&request.incoming);
         let response = match guy_bridge.ask(&leader_message) {
             Ok(response) => Ok(response),
@@ -999,6 +1074,22 @@ fn leader_message_for_source(incoming: &IncomingChatMessage) -> String {
     } else {
         format!("{prefix}{}", incoming.message)
     }
+}
+
+fn is_control_message(message: &str) -> bool {
+    message.starts_with(CONTROL_PREFIX)
+}
+
+fn parse_set_env_control(message: &str) -> Option<(String, String)> {
+    let payload = message.strip_prefix(CONTROL_PREFIX)?;
+    let payload = payload.strip_prefix("set-env|")?;
+    let mut parts = payload.splitn(2, '|');
+    let key = parts.next()?.trim();
+    let value = parts.next()?.to_string();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), value))
 }
 
 fn take_interrupt_flag() -> bool {

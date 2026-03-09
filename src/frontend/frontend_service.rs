@@ -1,7 +1,7 @@
 use crate::botty_boss;
+use crate::botty_paths;
 use crate::io::transport::TransportPlugin;
 use serde_json;
-use std::env;
 use std::fs;
 use std::io;
 use std::io::BufRead;
@@ -11,16 +11,19 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-pub const COMMANDS: [&str; 6] = [
+pub const COMMANDS: [&str; 8] = [
     "/setup",
     "/restart-server",
     "/new",
     "/remember",
+    "/set-guy-env",
+    "/list-guy-env",
     "/exit",
     "/quit",
 ];
 pub const CHATBOT_PROVIDERS: [&str; 2] = ["telegram", "feishu"];
 const CHAT_META_PREFIX: &str = "__botty_meta__";
+const CONTROL_PREFIX: &str = "__botty_control__";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupFieldId {
@@ -28,6 +31,7 @@ pub enum SetupFieldId {
     AiProviderApikey,
     AiProviderModel,
     AiProviderDebug,
+    WorkDir,
     ChatbotProvider,
     TelegramEnabled,
     FeishuEnabled,
@@ -37,11 +41,12 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 10] = [
+    pub const ALL: [SetupFieldId; 11] = [
         SetupFieldId::AiProviderEndpoint,
         SetupFieldId::AiProviderApikey,
         SetupFieldId::AiProviderModel,
         SetupFieldId::AiProviderDebug,
+        SetupFieldId::WorkDir,
         SetupFieldId::ChatbotProvider,
         SetupFieldId::TelegramEnabled,
         SetupFieldId::FeishuEnabled,
@@ -63,6 +68,7 @@ impl SetupFieldId {
             SetupFieldId::AiProviderApikey => "AI provider apikey",
             SetupFieldId::AiProviderModel => "AI provider model",
             SetupFieldId::AiProviderDebug => "AI provider debug",
+            SetupFieldId::WorkDir => "work dir",
             SetupFieldId::ChatbotProvider => "chatbot provider",
             SetupFieldId::TelegramEnabled => "telegram enabled",
             SetupFieldId::FeishuEnabled => "feishu enabled",
@@ -99,6 +105,7 @@ pub struct SetupConfig {
     pub ai_provider_apikey: String,
     pub ai_provider_model: String,
     pub ai_provider_debug: bool,
+    pub work_dir: String,
     pub chatbot_provider: String,
     pub chatbot_telegram_api_base: String,
     pub chatbot_telegram_apikey: String,
@@ -119,6 +126,7 @@ impl Default for SetupConfig {
             ai_provider_apikey: String::new(),
             ai_provider_model: "MiniMax-M2.1".to_string(),
             ai_provider_debug: false,
+            work_dir: botty_paths::default_work_dir_display(),
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
             chatbot_telegram_apikey: String::new(),
@@ -166,6 +174,7 @@ impl SetupConfig {
                     "[ ] false".to_string()
                 }
             }
+            SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramEnabled => {
                 if self.chatbot_telegram_enabled {
@@ -197,6 +206,7 @@ impl SetupConfig {
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey.clone(),
             SetupFieldId::AiProviderModel => self.ai_provider_model.clone(),
             SetupFieldId::AiProviderDebug => String::new(),
+            SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramPollSeconds => {
                 self.chatbot_telegram_poll_interval_seconds.to_string()
@@ -215,6 +225,9 @@ impl SetupConfig {
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey = value.to_string(),
             SetupFieldId::AiProviderModel => self.ai_provider_model = value.to_string(),
             SetupFieldId::AiProviderDebug => {}
+            SetupFieldId::WorkDir => {
+                self.work_dir = botty_paths::normalize_work_dir_input(value);
+            }
             SetupFieldId::ChatbotProvider => self.chatbot_provider = value.to_string(),
             SetupFieldId::TelegramPollSeconds => {
                 if let Ok(seconds) = value.trim().parse::<u64>() {
@@ -288,6 +301,8 @@ pub enum FrontendRequest {
     LoadSetup,
     RestartServer,
     SaveSetup { config: SetupConfig },
+    SetGuyEnv { key: String, value: String },
+    ListGuyEnv,
 }
 
 pub enum FrontendResponse {
@@ -295,11 +310,20 @@ pub enum FrontendResponse {
     SetupLoaded { config: SetupConfig },
     ServerRestarted { status: RestartStatus },
     SetupSaved { result: SaveSetupResult },
+    GuyEnvSet { result: GuyEnvSetResult },
+    GuyEnvListed { entries: Vec<(String, String)> },
 }
 
 pub struct SaveSetupResult {
     pub config_path: PathBuf,
+    pub work_dir_config_path: PathBuf,
+    pub migrated_work_dir: Option<(PathBuf, PathBuf)>,
     pub restart_status: RestartStatus,
+}
+
+pub struct GuyEnvSetResult {
+    pub config_path: PathBuf,
+    pub applied_live: bool,
 }
 
 pub trait FrontendRpc {
@@ -348,6 +372,29 @@ pub trait FrontendRpc {
             )),
         }
     }
+
+    fn set_guy_env(&mut self, key: &str, value: &str) -> io::Result<GuyEnvSetResult> {
+        match self.call(FrontendRequest::SetGuyEnv {
+            key: key.to_string(),
+            value: value.to_string(),
+        })? {
+            FrontendResponse::GuyEnvSet { result } => Ok(result),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for SetGuyEnv",
+            )),
+        }
+    }
+
+    fn list_guy_env(&mut self) -> io::Result<Vec<(String, String)>> {
+        match self.call(FrontendRequest::ListGuyEnv)? {
+            FrontendResponse::GuyEnvListed { entries } => Ok(entries),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected response for ListGuyEnv",
+            )),
+        }
+    }
 }
 
 pub struct LocalFrontendRpc {
@@ -385,7 +432,15 @@ impl FrontendRpc for LocalFrontendRpc {
             }
             FrontendRequest::SaveSetup { config } => {
                 let path = setup_config_file();
+                let previous_work_dir = botty_paths::effective_work_dir()?;
+                let next_work_dir = botty_paths::resolve_work_dir_input(&config.work_dir);
                 save_setup_config(&config)?;
+                if previous_work_dir != next_work_dir {
+                    migrate_work_dir_contents(&previous_work_dir, &next_work_dir)?;
+                } else {
+                    fs::create_dir_all(&next_work_dir)?;
+                }
+                let work_dir_config_path = botty_paths::save_work_dir_setting(&config.work_dir)?;
                 let restart_status = match botty_boss::restart_all_report() {
                     Ok(lines) => RestartStatus::Success(lines.join("\n")),
                     Err(err) => RestartStatus::Failed(format!("Auto restart failed: {err}")),
@@ -394,10 +449,35 @@ impl FrontendRpc for LocalFrontendRpc {
                 Ok(FrontendResponse::SetupSaved {
                     result: SaveSetupResult {
                         config_path: path,
+                        work_dir_config_path,
+                        migrated_work_dir: if previous_work_dir != next_work_dir {
+                            Some((previous_work_dir, next_work_dir))
+                        } else {
+                            None
+                        },
                         restart_status,
                     },
                 })
             }
+            FrontendRequest::SetGuyEnv { key, value } => {
+                let path = guy_env_config_file();
+                save_guy_env_entry(&key, &value)?;
+                let applied_live = request_with_reconnect(
+                    &mut self.transport,
+                    &self.socket_path,
+                    &format!("{CONTROL_PREFIX}set-env|{key}|{value}"),
+                )
+                .is_ok();
+                Ok(FrontendResponse::GuyEnvSet {
+                    result: GuyEnvSetResult {
+                        config_path: path,
+                        applied_live,
+                    },
+                })
+            }
+            FrontendRequest::ListGuyEnv => Ok(FrontendResponse::GuyEnvListed {
+                entries: botty_boss::load_guy_env_map()?,
+            }),
         }
     }
 }
@@ -498,13 +578,14 @@ fn decode_ipc_line(value: &str) -> io::Result<String> {
 
 fn load_setup_config() -> io::Result<SetupConfig> {
     let path = setup_config_file();
+    let mut config = SetupConfig::default();
+    config.work_dir = botty_paths::load_work_dir_setting()?;
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SetupConfig::default()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(config),
         Err(err) => return Err(err),
     };
 
-    let mut config = SetupConfig::default();
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -586,6 +667,44 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     fs::write(path, content)
 }
 
+fn save_guy_env_entry(key: &str, value: &str) -> io::Result<()> {
+    validate_env_key(key)?;
+
+    let mut entries = botty_boss::load_guy_env_map()?;
+    if let Some((_, saved_value)) = entries.iter_mut().find(|(saved_key, _)| saved_key == key) {
+        *saved_value = value.to_string();
+    } else {
+        entries.push((key.to_string(), value.to_string()));
+    }
+    botty_boss::save_guy_env_map(&entries)
+}
+
+fn validate_env_key(key: &str) -> io::Result<()> {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "env key cannot be empty",
+        ));
+    };
+
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "env key must start with A-Z, a-z, or _",
+        ));
+    }
+
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "env key may only contain A-Z, a-z, 0-9, or _",
+        ));
+    }
+
+    Ok(())
+}
+
 fn parse_bool(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "yes" | "on")
 }
@@ -633,11 +752,14 @@ fn setup_config_file() -> PathBuf {
         .join(format!("setup{}.conf", runtime_suffix()))
 }
 
+fn guy_env_config_file() -> PathBuf {
+    botty_root_dir()
+        .join("config")
+        .join(format!("guy-env{}.conf", runtime_suffix()))
+}
+
 fn botty_root_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".mylittlebotty")
+    botty_paths::config_root_dir()
 }
 
 fn runtime_suffix() -> &'static str {
@@ -646,4 +768,110 @@ fn runtime_suffix() -> &'static str {
     } else {
         ""
     }
+}
+
+fn migrate_work_dir_contents(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
+    if !from.exists() || from == to {
+        fs::create_dir_all(to)?;
+        return Ok(());
+    }
+
+    if botty_paths::paths_overlap(from, to) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "work dir migration does not support nested paths: {} -> {}",
+                from.display(),
+                to.display()
+            ),
+        ));
+    }
+
+    fs::create_dir_all(to)?;
+    move_dir_contents(from, to)?;
+    remove_empty_dir_tree(from)
+}
+
+fn move_dir_contents(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        move_path(&entry.path(), &target)?;
+    }
+    Ok(())
+}
+
+fn move_path(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(from)?;
+    if metadata.is_dir() {
+        if to.exists() {
+            let target_metadata = fs::symlink_metadata(to)?;
+            if !target_metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("migration target already exists: {}", to.display()),
+                ));
+            }
+            fs::create_dir_all(to)?;
+            move_dir_contents(from, to)?;
+            fs::remove_dir(from)?;
+            return Ok(());
+        }
+
+        match fs::rename(from, to) {
+            Ok(()) => Ok(()),
+            Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
+                copy_dir_recursive(from, to)?;
+                fs::remove_dir_all(from)
+            }
+            Err(err) => Err(err),
+        }
+    } else {
+        if to.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("migration target already exists: {}", to.display()),
+            ));
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::rename(from, to) {
+            Ok(()) => Ok(()),
+            Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
+                fs::copy(from, to)?;
+                fs::remove_file(from)
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn copy_dir_recursive(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source)?;
+        if metadata.is_dir() {
+            copy_dir_recursive(&source, &target)?;
+        } else {
+            if target.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("migration target already exists: {}", target.display()),
+                ));
+            }
+            fs::copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_empty_dir_tree(path: &PathBuf) -> io::Result<()> {
+    if path.exists() {
+        fs::remove_dir(path)?;
+    }
+    Ok(())
 }

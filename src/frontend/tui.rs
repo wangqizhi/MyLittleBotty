@@ -1,5 +1,6 @@
 use crate::frontend::frontend_app::{
-    FieldEdit, FrontendApp, Mode, ProviderEdit, Role, SetupEditor, SubmitOutcome,
+    FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode, ProviderEdit, Role, SetupEditor,
+    SubmitOutcome,
 };
 use crate::frontend::frontend_service::{
     mask_secret, FrontendRpc, LocalFrontendRpc, SetupConfig, CHATBOT_PROVIDERS,
@@ -25,6 +26,8 @@ pub fn run() -> io::Result<()> {
     let mut rpc = LocalFrontendRpc::connect()?;
     let mut app = FrontendApp::new();
     let mut pending_reply: Option<Receiver<io::Result<String>>> = None;
+    let mut pending_setup_save: Option<Receiver<io::Result<crate::frontend::frontend_service::SaveSetupResult>>> =
+        None;
 
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -34,6 +37,12 @@ pub fn run() -> io::Result<()> {
             if let Ok(result) = receiver.try_recv() {
                 app.finish_chat_request(result);
                 pending_reply = None;
+            }
+        }
+        if let Some(receiver) = pending_setup_save.as_ref() {
+            if let Ok(result) = receiver.try_recv() {
+                app.finish_setup_save(result);
+                pending_setup_save = None;
             }
         }
 
@@ -53,7 +62,9 @@ pub fn run() -> io::Result<()> {
         }
 
         if app.is_setup_mode() {
-            handle_setup_key(&mut app, &mut rpc, key)?;
+            if let Some(receiver) = handle_panel_key(&mut app, &mut rpc, key)? {
+                pending_setup_save = Some(receiver);
+            }
             continue;
         }
 
@@ -171,14 +182,24 @@ fn handle_chat_key<R: FrontendRpc>(
     }
 }
 
-fn handle_setup_key<R: FrontendRpc>(
+fn handle_panel_key<R: FrontendRpc>(
     app: &mut FrontendApp,
     rpc: &mut R,
     key: KeyEvent,
-) -> io::Result<()> {
+) -> io::Result<Option<Receiver<io::Result<crate::frontend::frontend_service::SaveSetupResult>>>> {
+    if app.is_setup_save_pending() {
+        return Ok(None);
+    }
+
     let editor_open = matches!(
         app.mode(),
         Mode::Setup {
+            editor: Some(_),
+            ..
+        }
+    ) || matches!(
+        app.mode(),
+        Mode::GuyEnvEdit {
             editor: Some(_),
             ..
         }
@@ -189,9 +210,10 @@ fn handle_setup_key<R: FrontendRpc>(
             match key.code {
                 KeyCode::Char('a') | KeyCode::Char('A') => app.editor_move_home(),
                 KeyCode::Char('c') | KeyCode::Char('C') => app.editor_clear(),
+                KeyCode::Char('s') | KeyCode::Char('S') => app.editor_submit(rpc),
                 _ => {}
             }
-            return Ok(());
+            return Ok(None);
         }
 
         match key.code {
@@ -202,33 +224,65 @@ fn handle_setup_key<R: FrontendRpc>(
             KeyCode::End => app.editor_move_end(),
             KeyCode::Backspace => app.editor_backspace(),
             KeyCode::Delete => app.editor_delete(),
-            KeyCode::Enter => app.editor_submit(),
+            KeyCode::Tab => app.toggle_guy_env_editor_focus(),
+            KeyCode::BackTab => app.toggle_guy_env_editor_focus(),
+            KeyCode::Enter => app.editor_submit(rpc),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.editor_insert(c)
             }
             _ => {}
         }
-        return Ok(());
+        return Ok(None);
     }
 
-    match key.code {
-        KeyCode::Esc => app.cancel_setup(),
-        KeyCode::Char(c)
-            if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') =>
-        {
-            app.save_setup(rpc)?;
-        }
-        KeyCode::Up => app.setup_prev_field(),
-        KeyCode::Down | KeyCode::Tab => app.setup_next_field(),
-        KeyCode::BackTab => app.setup_prev_field(),
-        KeyCode::Left => app.setup_cycle_provider(-1),
-        KeyCode::Right => app.setup_cycle_provider(1),
-        KeyCode::Enter => app.setup_activate(),
-        KeyCode::Char(' ') => app.setup_toggle_selected(),
-        _ => {}
+    match app.mode() {
+        Mode::Setup { .. } => match key.code {
+            KeyCode::Esc => app.cancel_setup(),
+            KeyCode::Char(c)
+                if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') =>
+            {
+                if let Some(config) = app.begin_setup_save() {
+                    return Ok(Some(spawn_setup_save_request(config)));
+                }
+            }
+            KeyCode::Up => app.setup_prev_field(),
+            KeyCode::Down | KeyCode::Tab => app.setup_next_field(),
+            KeyCode::BackTab => app.setup_prev_field(),
+            KeyCode::Left => app.setup_cycle_provider(-1),
+            KeyCode::Right => app.setup_cycle_provider(1),
+            KeyCode::Enter => app.setup_activate(),
+            KeyCode::Char(' ') => app.setup_toggle_selected(),
+            _ => {}
+        },
+        Mode::GuyEnvEdit { .. } => match key.code {
+            KeyCode::Esc => app.close_panel(),
+            KeyCode::Up => app.guy_env_prev_entry(),
+            KeyCode::Down | KeyCode::Tab => app.guy_env_next_entry(),
+            KeyCode::BackTab => app.guy_env_prev_entry(),
+            KeyCode::Enter => app.open_guy_env_editor(),
+            KeyCode::Char(c)
+                if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'r' || c == 'R') =>
+            {
+                app.refresh_guy_env(rpc)?;
+            }
+            _ => {}
+        },
+        Mode::GuyEnvList { .. } => match key.code {
+            KeyCode::Esc => app.close_panel(),
+            KeyCode::Up => app.guy_env_prev_entry(),
+            KeyCode::Down | KeyCode::Tab => app.guy_env_next_entry(),
+            KeyCode::BackTab => app.guy_env_prev_entry(),
+            KeyCode::Char(c)
+                if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'r' || c == 'R') =>
+            {
+                app.refresh_guy_env(rpc)?;
+            }
+            _ => {}
+        },
+        Mode::Chat => {}
     }
 
-    Ok(())
+    Ok(None)
 }
 
 fn render(app: &FrontendApp, frame: &mut Frame) {
@@ -239,13 +293,17 @@ fn render(app: &FrontendApp, frame: &mut Frame) {
             selected_provider,
             editor,
             config,
+            ..
         } => render_setup_page(
             frame,
             *selected_field,
             *selected_provider,
             editor.as_ref(),
             config,
+            app.pending_setup_save_text(),
         ),
+        Mode::GuyEnvEdit { .. } => render_guy_env_edit_page(app, frame),
+        Mode::GuyEnvList { .. } => render_guy_env_list_page(app, frame),
     }
 }
 
@@ -372,12 +430,24 @@ fn spawn_chat_request(message: String) -> Receiver<io::Result<String>> {
     receiver
 }
 
+fn spawn_setup_save_request(
+    config: SetupConfig,
+) -> Receiver<io::Result<crate::frontend::frontend_service::SaveSetupResult>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = LocalFrontendRpc::connect().and_then(|mut rpc| rpc.save_setup(&config));
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
 fn render_setup_page(
     frame: &mut Frame,
     selected_field: usize,
     selected_provider: usize,
     editor: Option<&SetupEditor>,
     config: &SetupConfig,
+    pending_message: Option<&str>,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -427,6 +497,10 @@ fn render_setup_page(
         Line::raw("- Esc: Cancel"),
         Line::raw("- Tab / Shift+Tab: Next/Prev field"),
         Line::raw(""),
+        Line::raw("Work dir:"),
+        Line::raw("- default: ~/.mylittlebotty/work-dir/"),
+        Line::raw("- changing it migrates current work-dir contents"),
+        Line::raw(""),
         Line::raw("Chatbot provider:"),
         Line::raw(format!("- {}", CHATBOT_PROVIDERS.join(", "))),
         Line::raw(format!("- current: {selected}")),
@@ -439,9 +513,13 @@ fn render_setup_page(
     frame.render_widget(side, top[1]);
 
     let footer = Paragraph::new(Line::raw(
-        "Enter edits field in a modal. Toggle fields support Enter/Space.",
+        pending_message.unwrap_or("Enter edits field in a modal. Toggle fields support Enter/Space."),
     ))
-    .style(Style::default().fg(Color::Black).bg(Color::Green));
+    .style(if pending_message.is_some() {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Black).bg(Color::Green)
+    });
     frame.render_widget(footer, layout[1]);
 
     if let Some(editor) = editor {
@@ -538,6 +616,221 @@ fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {
         parts[1],
         text_display_width_at(editor.input.as_str(), editor.cursor),
     );
+}
+
+fn render_guy_env_edit_page(app: &FrontendApp, frame: &mut Frame) {
+    let Some((selected_entry, entries)) = app.guy_env_edit_state() else {
+        return;
+    };
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(frame.area());
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(layout[0]);
+
+    let mut items = Vec::new();
+    for (idx, (key, value)) in entries.iter().enumerate() {
+        let style = if idx == selected_entry {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(Line::raw(format!("{key}={value}"))).style(style));
+    }
+    let new_idx = entries.len();
+    let new_style = if selected_entry == new_idx {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    items.push(ListItem::new(Line::raw("[Add new env]")).style(new_style));
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Guy Env Editor (Up/Down select, Enter edit/add)"),
+    );
+    frame.render_widget(list, top[0]);
+
+    let selected_text = if selected_entry < entries.len() {
+        format!(
+            "Current:\n{}={}",
+            entries[selected_entry].0, entries[selected_entry].1
+        )
+    } else {
+        "Current:\n[Add new env]".to_string()
+    };
+    let help = Paragraph::new(Text::from(vec![
+        Line::raw("Actions:"),
+        Line::raw("- Enter: edit selected item"),
+        Line::raw("- Esc: back to chat"),
+        Line::raw("- Ctrl+R: reload env list"),
+        Line::raw(""),
+        Line::raw(selected_text),
+    ]))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().borders(Borders::ALL).title("Help"));
+    frame.render_widget(help, top[1]);
+
+    let footer = Paragraph::new(Line::raw(
+        "This page edits guy env locally. Saving applies to the running guy process.",
+    ))
+    .style(Style::default().fg(Color::Black).bg(Color::Green));
+    frame.render_widget(footer, layout[1]);
+
+    if let Some(editor) = app.guy_env_editor() {
+        render_guy_env_editor(frame, editor);
+    }
+}
+
+fn render_guy_env_list_page(app: &FrontendApp, frame: &mut Frame) {
+    let Some((selected_entry, entries)) = app.guy_env_list_state() else {
+        return;
+    };
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(frame.area());
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+
+    let items: Vec<ListItem> = if entries.is_empty() {
+        vec![ListItem::new(Line::raw("No env vars configured"))]
+    } else {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(idx, (key, value))| {
+                let style = if idx == selected_entry {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::raw(format!("{key}={value}"))).style(style)
+            })
+            .collect()
+    };
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Guy Env"));
+    frame.render_widget(list, top[0]);
+
+    let preview = if entries.is_empty() {
+        "No env vars configured.".to_string()
+    } else {
+        let (key, value) = &entries[selected_entry.min(entries.len() - 1)];
+        format!("Selected:\n{key}={value}")
+    };
+    let help = Paragraph::new(Text::from(vec![
+        Line::raw("Actions:"),
+        Line::raw("- Esc: back to chat"),
+        Line::raw("- Ctrl+R: reload env list"),
+        Line::raw(""),
+        Line::raw(preview),
+    ]))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().borders(Borders::ALL).title("Details"));
+    frame.render_widget(help, top[1]);
+
+    let footer = Paragraph::new(Line::raw(
+        "Read-only guy env page. Use /set-guy-env to edit values.",
+    ))
+    .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    frame.render_widget(footer, layout[1]);
+}
+
+fn render_guy_env_editor(frame: &mut Frame, editor: &GuyEnvEditor) {
+    let area = centered_rect(frame.area(), 76, 34);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Edit Guy Env | Tab switch field | Enter save");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let mode = if editor.original_key.is_some() {
+        "Editing existing env"
+    } else {
+        "Creating new env"
+    };
+    let hint = Paragraph::new(Text::from(vec![
+        Line::raw(mode),
+        Line::raw("Tab / Shift+Tab: switch between key and value"),
+        Line::raw("Ctrl+A: line start | Ctrl+C: clear current field"),
+        Line::raw("Esc: cancel | Enter / Ctrl+S: save"),
+    ]))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(hint, parts[0]);
+
+    let key_title = if editor.focus == GuyEnvEditorFocus::Key {
+        "Key (active)"
+    } else {
+        "Key"
+    };
+    let value_title = if editor.focus == GuyEnvEditorFocus::Value {
+        "Value (active)"
+    } else {
+        "Value"
+    };
+    let key_input = Paragraph::new(editor.key_input.as_str())
+        .block(Block::default().borders(Borders::ALL).title(key_title));
+    let value_input = Paragraph::new(editor.value_input.as_str())
+        .block(Block::default().borders(Borders::ALL).title(value_title));
+    frame.render_widget(key_input, parts[1]);
+    frame.render_widget(value_input, parts[2]);
+
+    let note = Paragraph::new(Text::from(vec![
+        Line::raw("Env key rules:"),
+        Line::raw("- start with letter or _"),
+        Line::raw("- only letters, digits, _"),
+    ]))
+    .wrap(Wrap { trim: false })
+    .block(Block::default().borders(Borders::ALL).title("Validation"));
+    frame.render_widget(note, parts[3]);
+
+    match editor.focus {
+        GuyEnvEditorFocus::Key => place_cursor(
+            frame,
+            parts[1],
+            text_display_width_at(editor.key_input.as_str(), editor.key_cursor),
+        ),
+        GuyEnvEditorFocus::Value => place_cursor(
+            frame,
+            parts[2],
+            text_display_width_at(editor.value_input.as_str(), editor.value_cursor),
+        ),
+    }
 }
 
 fn text_display_width(text: &str) -> u16 {

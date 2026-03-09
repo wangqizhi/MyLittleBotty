@@ -24,6 +24,9 @@ TUI 内置命令：
 - `/restart-server`：重启本地 Botty 后台服务。
 - `/new`：开始新会话。
 - `/remember`：触发长期记忆摘要整理。
+- `/set-guy-env`：打开 `Botty-Guy` 持久化环境变量的 TUI 编辑页。
+- `/set-guy-env KEY=VALUE`：校验变量名后落盘，并尝试热更新到当前运行中的 `Botty-Guy` 进程。
+- `/list-guy-env`：打开 `Botty-Guy` 已持久化环境变量的只读列表页。
 - `/exit`：退出 TUI。
 - `/quit`：退出 TUI。
 
@@ -51,10 +54,11 @@ TUI 内置命令：
 
 ### 4. 本地工具能力
 
-当前 Botty 已接入两个内置工具：
+当前 Botty 已接入三个内置工具：
 
-- `watch`：读取本地文本文件内容，适合“查看某个文件”的请求。
-- `crond`：查询、创建、编辑提醒任务。
+- `list`：列出本地目录内容，目录会追加 `/`，符号链接会追加 `@`。可通过 `~/.mylittlebotty/config/list.conf` 中的 `list.blacklist=...` 配置访问黑名单，默认禁止访问 `~/.mylittlebotty/`。
+- `watch`：读取本地文件内容。文本文件最多返回 16 KiB，大于 500 KiB 的大文件只返回最近一段尾部内容，二进制文件返回可打印片段预览。可通过 `~/.mylittlebotty/config/watch.conf` 中的 `watch.blacklist=...` 配置访问黑名单。
+- `crond`：查询、创建、编辑保存在 `~/.mylittlebotty/reminder.rec` 中的提醒任务。
 
 ### 5. 定时提醒
 
@@ -157,6 +161,8 @@ mylittlebotty tui
 
 - 直接输入消息聊天
 - 输入 `/setup` 配置 AI 和聊天渠道
+- 输入 `/set-guy-env` 打开环境变量编辑页，或用 `/set-guy-env KEY=VALUE` 直接修改单个变量
+- 输入 `/list-guy-env` 查看已持久化的 `Botty-Guy` 环境变量
 - 输入 `/remember` 整理长期记忆
 - 输入 `/quit` 或 `/exit` 退出
 
@@ -307,6 +313,9 @@ chatbot.feishu.chat_id=
 
 - `~/.mylittlebotty/bin`：安装后的可执行文件
 - `~/.mylittlebotty/config/setup.conf`：主配置文件
+- `~/.mylittlebotty/config/guy-env.conf`：注入到 `Botty-Guy` 的持久化环境变量
+- `~/.mylittlebotty/config/list.conf`：`list` 内置工具的可选黑名单配置
+- `~/.mylittlebotty/config/watch.conf`：`watch` 内置工具的可选黑名单配置
 - `~/.mylittlebotty/log/`：日志目录
 - `~/.mylittlebotty/run/`：pid、socket、flag 等运行时文件
 - `~/.mylittlebotty/reminder.rec`：提醒任务记录
