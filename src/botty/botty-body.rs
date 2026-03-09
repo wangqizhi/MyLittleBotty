@@ -3,6 +3,7 @@ use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
 };
 use crate::skill::buildin_crond::BuildinCrondSkill;
+use crate::skill::buildin_list::BuildinListSkill;
 use crate::skill::buildin_watch::BuildinWatchSkill;
 use crate::skill::BottySkill;
 use serde_json::Value;
@@ -12,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const TOOL_SYSTEM_PROMPT: &str = "You are Botty. You can use local tools. Use watch when the user asks to inspect, open, read, or show a file. Use crond when the user asks to query, create, or edit reminders or scheduled tasks. For crond create/edit, always provide schedule_at in exact local format YYYY-MM-DD HH:MM:SS and choose task_type precisely. Only use crond for scheduling-related requests. If you use a tool, rely on the tool result to answer the user. Do not describe a tool call to the user.";
+const TOOL_SYSTEM_PROMPT: &str = "You are Botty. You can use local tools. Use list when the user asks to list directory contents. Use watch when the user asks to inspect, open, read, or show a file. Use crond when the user asks to query, create, or edit reminders or scheduled tasks. Preserve user-provided paths exactly when calling list or watch. Do not guess usernames, do not replace ~ with /root or any other home path, and do not rewrite relative or absolute paths unless the user explicitly asked for a different path. The tools themselves resolve ~ and relative paths. For crond create/edit, always provide schedule_at in exact local format YYYY-MM-DD HH:MM:SS and choose task_type precisely. Only use crond for scheduling-related requests. If you use a tool, rely on the tool result to answer the user. Do not describe a tool call to the user.";
 const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
 const REMEMBER_SYSTEM_PROMPT: &str = "You maintain long-term memory for Botty. Output Markdown only. Keep the final remember.md within 100 lines. Focus only on key events, the user's recent important requests, and what has been solved, is pending, or changed. Omit trivial chat. Compress aggressively and prefer recent, actionable context. When needed, forget older low-value details.";
@@ -34,6 +35,7 @@ impl BottyBody {
         Ok(Self {
             brain: BottyBrain::from_setup()?,
             skills: vec![
+                Box::new(BuildinListSkill::new()),
                 Box::new(BuildinWatchSkill::new()),
                 Box::new(BuildinCrondSkill::new()),
             ],

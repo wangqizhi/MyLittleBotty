@@ -1,5 +1,7 @@
 #[path = "buildin-crond.rs"]
 pub mod buildin_crond;
+#[path = "buildin-list.rs"]
+pub mod buildin_list;
 #[path = "buildin-watch.rs"]
 pub mod buildin_watch;
 
