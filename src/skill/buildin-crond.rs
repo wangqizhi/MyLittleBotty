@@ -19,7 +19,20 @@ const CROND_TOOL_SCHEMA_JSON: &str = r#"{
     },
     "schedule_at": {
       "type": "string",
-      "description": "Local time in YYYY-MM-DD HH:MM:SS format"
+      "description": "Anchor local time in YYYY-MM-DD HH:MM:SS format"
+    },
+    "repeat": {
+      "type": "string",
+      "enum": ["once", "every_minute", "every_hour", "every_day", "every_week", "every_month"],
+      "description": "Run once or repeat by minute/hour/day/week/month"
+    },
+    "window_start": {
+      "type": "string",
+      "description": "Optional activation start in YYYY-MM-DD HH:MM:SS format"
+    },
+    "window_end": {
+      "type": "string",
+      "description": "Optional activation end in YYYY-MM-DD HH:MM:SS format"
     },
     "task_type": {
       "type": "string",
@@ -61,7 +74,7 @@ impl BottySkill for BuildinCrondSkill {
     }
 
     fn description(&self) -> &'static str {
-        "Query, create, or edit local second-level reminders stored in ~/.mylittlebotty/reminder.rec"
+        "Query, create, or edit local reminders with one-time or recurring schedules stored in ~/.mylittlebotty/reminder.rec"
     }
 
     fn input_schema_json(&self) -> &'static str {
@@ -97,12 +110,12 @@ fn query_reminders() -> io::Result<String> {
     let mut lines = Vec::new();
     for reminder in reminders {
         lines.push(format!(
-            "- id={} time={} type={} enabled={} status={} task={}",
+            "- id={} schedule={} enabled={} status={} last_run={} task={}",
             reminder.id,
-            reminder.schedule_at,
-            reminder.task_type,
+            reminder.schedule_summary(),
             reminder.enabled,
             reminder.status,
+            display_optional(&reminder.last_run_at),
             reminder.task_summary()
         ));
     }
@@ -112,9 +125,17 @@ fn query_reminders() -> io::Result<String> {
 fn create_reminder(input: &Value) -> io::Result<String> {
     let mut reminders = load_reminders()?;
     let next_id = next_reminder_id(&reminders);
+    let schedule_at = required_string(input, "schedule_at")?.to_string();
     let reminder = ReminderRecord {
         id: format!("r{next_id:04}"),
-        schedule_at: required_string(input, "schedule_at")?.to_string(),
+        schedule_at: schedule_at.clone(),
+        repeat: optional_string(input, "repeat").unwrap_or("once").to_string(),
+        window_start: optional_string(input, "window_start")
+            .unwrap_or(schedule_at.as_str())
+            .to_string(),
+        window_end: optional_string(input, "window_end")
+            .unwrap_or_default()
+            .to_string(),
         task_type: required_string(input, "task_type")?.to_string(),
         task_text: optional_string(input, "task_text")
             .unwrap_or_default()
@@ -137,9 +158,9 @@ fn create_reminder(input: &Value) -> io::Result<String> {
     save_reminders(&reminders)?;
 
     Ok(format!(
-        "Created reminder {} at {} for {}.",
+        "Created reminder {} with {} for {}.",
         reminder.id,
-        reminder.schedule_at,
+        reminder.schedule_summary(),
         reminder.task_summary()
     ))
 }
@@ -156,6 +177,22 @@ fn edit_reminder(input: &Value) -> io::Result<String> {
 
     if let Some(schedule_at) = optional_string(input, "schedule_at") {
         reminder.schedule_at = schedule_at.to_string();
+        if reminder.window_start.is_empty() {
+            reminder.window_start = schedule_at.to_string();
+        }
+    }
+    if let Some(repeat) = optional_string(input, "repeat") {
+        reminder.repeat = repeat.to_string();
+    }
+    if input.get("window_start").is_some() {
+        reminder.window_start = optional_string(input, "window_start")
+            .unwrap_or_default()
+            .to_string();
+    }
+    if input.get("window_end").is_some() {
+        reminder.window_end = optional_string(input, "window_end")
+            .unwrap_or_default()
+            .to_string();
     }
     if let Some(task_type) = optional_string(input, "task_type") {
         reminder.task_type = task_type.to_string();
@@ -174,15 +211,13 @@ fn edit_reminder(input: &Value) -> io::Result<String> {
     }
     if reminder.status == "done" {
         reminder.status = "pending".to_string();
-        reminder.last_run_at.clear();
     }
     reminder.updated_at = local_time_string()?;
     validate_reminder(reminder)?;
     let summary = format!(
-        "Updated reminder {} to time={} type={} enabled={} task={}.",
+        "Updated reminder {} to {} enabled={} task={}.",
         reminder.id,
-        reminder.schedule_at,
-        reminder.task_type,
+        reminder.schedule_summary(),
         reminder.enabled,
         reminder.task_summary()
     );
@@ -195,6 +230,9 @@ fn edit_reminder(input: &Value) -> io::Result<String> {
 struct ReminderRecord {
     id: String,
     schedule_at: String,
+    repeat: String,
+    window_start: String,
+    window_end: String,
     task_type: String,
     task_text: String,
     script_path: String,
@@ -221,10 +259,24 @@ impl ReminderRecord {
         }
     }
 
+    fn schedule_summary(&self) -> String {
+        let mut summary = format!("repeat={} anchor={}", self.repeat, self.schedule_at);
+        if !self.window_start.is_empty() {
+            summary.push_str(&format!(" window_start={}", self.window_start));
+        }
+        if !self.window_end.is_empty() {
+            summary.push_str(&format!(" window_end={}", self.window_end));
+        }
+        summary
+    }
+
     fn to_json_line(&self) -> String {
         serde_json::json!({
             "id": self.id,
             "schedule_at": self.schedule_at,
+            "repeat": self.repeat,
+            "window_start": self.window_start,
+            "window_end": self.window_end,
             "task_type": self.task_type,
             "task_text": self.task_text,
             "script_path": self.script_path,
@@ -239,9 +291,25 @@ impl ReminderRecord {
     }
 
     fn from_value(value: Value) -> Option<Self> {
+        let schedule_at = value.get("schedule_at")?.as_str()?.to_string();
         Some(Self {
             id: value.get("id")?.as_str()?.to_string(),
-            schedule_at: value.get("schedule_at")?.as_str()?.to_string(),
+            schedule_at: schedule_at.clone(),
+            repeat: value
+                .get("repeat")
+                .and_then(Value::as_str)
+                .unwrap_or("once")
+                .to_string(),
+            window_start: value
+                .get("window_start")
+                .and_then(Value::as_str)
+                .unwrap_or(schedule_at.as_str())
+                .to_string(),
+            window_end: value
+                .get("window_end")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             task_type: value.get("task_type")?.as_str()?.to_string(),
             task_text: value
                 .get("task_text")
@@ -333,7 +401,24 @@ fn save_reminders(reminders: &[ReminderRecord]) -> io::Result<()> {
 }
 
 fn validate_reminder(reminder: &ReminderRecord) -> io::Result<()> {
+    validate_repeat(&reminder.repeat)?;
     validate_schedule_at(&reminder.schedule_at)?;
+    validate_schedule_at(&reminder.window_start)?;
+    if !reminder.window_end.is_empty() {
+        validate_schedule_at(&reminder.window_end)?;
+        if reminder.window_end < reminder.window_start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "window_end must be >= window_start",
+            ));
+        }
+    }
+    if reminder.schedule_at < reminder.window_start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "schedule_at must be >= window_start",
+        ));
+    }
     match reminder.task_type.as_str() {
         "ask_guy" => {
             if reminder.task_text.trim().is_empty() {
@@ -361,14 +446,39 @@ fn validate_reminder(reminder: &ReminderRecord) -> io::Result<()> {
     Ok(())
 }
 
+fn validate_repeat(repeat: &str) -> io::Result<()> {
+    match repeat {
+        "once" | "every_minute" | "every_hour" | "every_day" | "every_week" | "every_month" => {
+            Ok(())
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported repeat: {other}"),
+        )),
+    }
+}
+
 fn validate_schedule_at(schedule_at: &str) -> io::Result<()> {
-    if schedule_at.len() != 19 {
+    let parts = parse_local_datetime(schedule_at)?;
+    let ts = parts.to_timestamp()?;
+    let roundtrip = DateTimeParts::from_timestamp(ts)?.to_string();
+    if roundtrip != schedule_at {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "schedule_at must use YYYY-MM-DD HH:MM:SS",
+            "schedule fields must be valid local time",
         ));
     }
-    let bytes = schedule_at.as_bytes();
+    Ok(())
+}
+
+fn parse_local_datetime(value: &str) -> io::Result<DateTimeParts> {
+    if value.len() != 19 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "schedule fields must use YYYY-MM-DD HH:MM:SS",
+        ));
+    }
+    let bytes = value.as_bytes();
     let expected = [
         (4usize, b'-'),
         (7usize, b'-'),
@@ -380,11 +490,153 @@ fn validate_schedule_at(schedule_at: &str) -> io::Result<()> {
         if bytes.get(index).copied() != Some(marker) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "schedule_at must use YYYY-MM-DD HH:MM:SS",
+                "schedule fields must use YYYY-MM-DD HH:MM:SS",
             ));
         }
     }
-    Ok(())
+
+    let parse_u32 = |start: usize, end: usize| -> io::Result<u32> {
+        value[start..end].parse::<u32>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must use YYYY-MM-DD HH:MM:SS",
+            )
+        })
+    };
+
+    Ok(DateTimeParts {
+        year: value[0..4].parse::<i32>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must use YYYY-MM-DD HH:MM:SS",
+            )
+        })?,
+        month: parse_u32(5, 7)?,
+        day: parse_u32(8, 10)?,
+        hour: parse_u32(11, 13)?,
+        minute: parse_u32(14, 16)?,
+        second: parse_u32(17, 19)?,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct DateTimeParts {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+}
+
+impl DateTimeParts {
+    fn to_timestamp(self) -> io::Result<i64> {
+        if self.month == 0
+            || self.month > 12
+            || self.day == 0
+            || self.day > 31
+            || self.hour > 23
+            || self.minute > 59
+            || self.second > 59
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must be valid local time",
+            ));
+        }
+        let mut tm = libc::tm {
+            tm_sec: self.second as i32,
+            tm_min: self.minute as i32,
+            tm_hour: self.hour as i32,
+            tm_mday: self.day as i32,
+            tm_mon: self.month as i32 - 1,
+            tm_year: self.year - 1900,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: -1,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_gmtoff: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_zone: std::ptr::null_mut(),
+        };
+        let timestamp = unsafe { libc::mktime(&mut tm) };
+        if timestamp < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must be valid local time",
+            ));
+        }
+        Ok(timestamp as i64)
+    }
+
+    fn from_timestamp(timestamp: i64) -> io::Result<Self> {
+        let mut secs = timestamp as libc::time_t;
+        let mut tm = libc::tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_gmtoff: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_zone: std::ptr::null_mut(),
+        };
+        let rc = unsafe { libc::localtime_r(&mut secs, &mut tm) };
+        if rc.is_null() {
+            return Err(io::Error::other("failed to convert local time"));
+        }
+        Ok(Self {
+            year: tm.tm_year + 1900,
+            month: (tm.tm_mon + 1) as u32,
+            day: tm.tm_mday as u32,
+            hour: tm.tm_hour as u32,
+            minute: tm.tm_min as u32,
+            second: tm.tm_sec as u32,
+        })
+    }
+}
+
+impl std::fmt::Display for DateTimeParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
 }
 
 fn next_reminder_id(reminders: &[ReminderRecord]) -> u32 {
@@ -428,6 +680,14 @@ fn optional_string_array(value: &Value, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn display_optional(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 fn local_time_string() -> io::Result<String> {

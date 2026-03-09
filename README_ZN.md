@@ -92,9 +92,11 @@ TUI 内置命令：
 
 - 提醒数据保存在 `~/.mylittlebotty/reminder.rec`。
 - `Botty-crond` 会轮询到期提醒并执行。
+- 提醒支持 `once`、`every_minute`、`every_hour`、`every_day`、`every_week`、`every_month`。
+- 重复提醒支持 `window_start` / `window_end` 生效时间窗，例如“2026 年内每天执行”或“1 个月内每小时执行”。
 - 当前已真正实现的任务类型是 `ask_guy`。
 - `run_script` 目前仅保留字段，尚未真正执行脚本。
-- 执行完成后会把提醒状态改为 `done`。
+- 单次提醒执行后会变成 `done`；重复提醒会持续生效，直到超出生效时间窗后再变成 `done`。
 - 如果启用了 Telegram/飞书推送，提醒结果会回发到对应聊天渠道。
 
 ### 7. Telegram / 飞书接入

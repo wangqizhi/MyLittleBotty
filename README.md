@@ -94,9 +94,11 @@ Botty currently exposes six built-in tools, though role access differs:
 
 - Reminder data is stored in `~/.mylittlebotty/reminder.rec`.
 - `Botty-crond` polls and executes due reminders.
+- Reminders support `once`, `every_minute`, `every_hour`, `every_day`, `every_week`, and `every_month`.
+- Recurring reminders can be limited with `window_start` / `window_end`, for example "every day during 2026" or "every hour for one month".
 - The only actually implemented task type is `ask_guy`.
 - `run_script` is currently only a reserved task shape and does not execute scripts yet.
-- Completed reminders are marked as `done`.
+- One-time reminders are marked as `done` after execution. Recurring reminders stay active until their time window ends, then are marked as `done`.
 - If Telegram or Feishu output is enabled, reminder results are pushed back to those channels.
 
 ### 7. Telegram / Feishu integration

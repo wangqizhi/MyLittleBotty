@@ -43,26 +43,39 @@ pub fn run() {
 
 fn tick() -> io::Result<()> {
     let now = local_time_string()?;
+    let now_ts = parse_local_datetime(&now)?.to_timestamp()?;
     let mut reminders = load_reminders()?;
     let mut dirty = false;
 
     for reminder in &mut reminders {
-        if !reminder.enabled || reminder.status == "done" {
+        if !reminder.enabled {
             continue;
         }
-        if reminder.schedule_at.as_str() > now.as_str() {
-            continue;
-        }
+        let due_at = match reminder.next_due_at(now_ts)? {
+            Some(due_at) => due_at,
+            None => {
+                if reminder.should_mark_done(now_ts)? && reminder.status != "done" {
+                    reminder.status = "done".to_string();
+                    reminder.updated_at = now.clone();
+                    dirty = true;
+                }
+                continue;
+            }
+        };
 
-        let (status, output) = match execute_reminder(reminder, &now) {
+        let (status, output) = match execute_reminder(reminder, &due_at, &now) {
             Ok(output) => ("ok".to_string(), output),
             Err(err) => ("error".to_string(), err.to_string()),
         };
 
         append_result_line(&now, &status, &format!("{} {}", reminder.id, output))?;
         let _ = push_result_notifications(reminder, &status, &output, &now);
-        reminder.status = "done".to_string();
-        reminder.last_run_at = now.clone();
+        reminder.last_run_at = due_at;
+        reminder.status = if reminder.repeat == "once" {
+            "done".to_string()
+        } else {
+            "pending".to_string()
+        };
         reminder.updated_at = now.clone();
         dirty = true;
     }
@@ -74,20 +87,22 @@ fn tick() -> io::Result<()> {
     Ok(())
 }
 
-fn execute_reminder(reminder: &ReminderRecord, now: &str) -> io::Result<String> {
+fn execute_reminder(reminder: &ReminderRecord, due_at: &str, now: &str) -> io::Result<String> {
     match reminder.task_type.as_str() {
         "ask_guy" => {
             let payload = serde_json::json!({
                 "original_request": reminder.task_text,
-                "scheduled_at": reminder.schedule_at,
+                "schedule_anchor": reminder.schedule_at,
+                "scheduled_at": due_at,
                 "current_time": now,
+                "repeat": reminder.repeat,
             })
             .to_string();
             let reply = ask_leader_guy("crond", "scheduler", &format!("/reminder-now {payload}"))?;
-            Ok(format!("executed at {now}: {reply}"))
+            Ok(format!("scheduled {due_at}, executed at {now}: {reply}"))
         }
         "run_script" => Ok(format!(
-            "executed at {now}: run_script is reserved and not implemented yet for {}",
+            "scheduled {due_at}, executed at {now}: run_script is reserved and not implemented yet for {}",
             reminder.script_path
         )),
         other => Err(io::Error::new(
@@ -140,6 +155,9 @@ fn push_result_notifications(
 struct ReminderRecord {
     id: String,
     schedule_at: String,
+    repeat: String,
+    window_start: String,
+    window_end: String,
     task_type: String,
     task_text: String,
     script_path: String,
@@ -162,10 +180,116 @@ impl Drop for CrondPidGuard {
 }
 
 impl ReminderRecord {
+    fn next_due_at(&self, now_ts: i64) -> io::Result<Option<String>> {
+        if !self.enabled || self.status == "done" {
+            return Ok(None);
+        }
+        let upper_bound = self.window_end_timestamp()?.map_or(now_ts, |end| end.min(now_ts));
+        let window_start = self.window_start_timestamp()?;
+        if upper_bound < window_start {
+            return Ok(None);
+        }
+        let reference = if self.last_run_at.is_empty() {
+            window_start.saturating_sub(1)
+        } else {
+            parse_local_datetime(&self.last_run_at)?.to_timestamp()?
+        };
+        let due = self.next_occurrence_after(reference)?;
+        if let Some(due_ts) = due {
+            if due_ts >= window_start && due_ts <= upper_bound {
+                return Ok(Some(DateTimeParts::from_timestamp(due_ts)?.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn should_mark_done(&self, now_ts: i64) -> io::Result<bool> {
+        if self.status == "done" {
+            return Ok(false);
+        }
+        if self.repeat == "once" {
+            let anchor_ts = parse_local_datetime(&self.schedule_at)?.to_timestamp()?;
+            return Ok(!self.last_run_at.is_empty() || now_ts >= anchor_ts);
+        }
+        if let Some(window_end) = self.window_end_timestamp()? {
+            if now_ts < window_end {
+                return Ok(false);
+            }
+            return Ok(self.next_due_at(now_ts)?.is_none());
+        }
+        Ok(false)
+    }
+
+    fn next_occurrence_after(&self, reference_ts: i64) -> io::Result<Option<i64>> {
+        let anchor = parse_local_datetime(&self.schedule_at)?;
+        let anchor_ts = anchor.to_timestamp()?;
+        if reference_ts < anchor_ts.saturating_sub(1) {
+            return Ok(Some(anchor_ts));
+        }
+
+        let candidate = match self.repeat.as_str() {
+            "once" => {
+                if anchor_ts > reference_ts {
+                    Some(anchor_ts)
+                } else {
+                    None
+                }
+            }
+            "every_minute" => next_minutely_occurrence(anchor, reference_ts)?,
+            "every_hour" => next_hourly_occurrence(anchor, reference_ts)?,
+            "every_day" => next_daily_occurrence(anchor, reference_ts)?,
+            "every_week" => next_weekly_occurrence(anchor, reference_ts)?,
+            "every_month" => next_monthly_occurrence(anchor, reference_ts)?,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported repeat: {other}"),
+                ));
+            }
+        };
+        Ok(candidate)
+    }
+
+    fn window_start_timestamp(&self) -> io::Result<i64> {
+        parse_local_datetime(&self.window_start_or_anchor())?.to_timestamp()
+    }
+
+    fn window_end_timestamp(&self) -> io::Result<Option<i64>> {
+        if self.window_end.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(parse_local_datetime(&self.window_end)?.to_timestamp()?))
+        }
+    }
+
+    fn window_start_or_anchor(&self) -> String {
+        if self.window_start.is_empty() {
+            self.schedule_at.clone()
+        } else {
+            self.window_start.clone()
+        }
+    }
+
     fn from_value(value: Value) -> Option<Self> {
+        let schedule_at = value.get("schedule_at")?.as_str()?.to_string();
         Some(Self {
             id: value.get("id")?.as_str()?.to_string(),
-            schedule_at: value.get("schedule_at")?.as_str()?.to_string(),
+            schedule_at: schedule_at.clone(),
+            repeat: value
+                .get("repeat")
+                .and_then(Value::as_str)
+                .unwrap_or("once")
+                .to_string(),
+            window_start: value
+                .get("window_start")
+                .and_then(Value::as_str)
+                .unwrap_or(schedule_at.as_str())
+                .to_string(),
+            window_end: value
+                .get("window_end")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             task_type: value.get("task_type")?.as_str()?.to_string(),
             task_text: value
                 .get("task_text")
@@ -219,6 +343,9 @@ impl ReminderRecord {
         serde_json::json!({
             "id": self.id,
             "schedule_at": self.schedule_at,
+            "repeat": self.repeat,
+            "window_start": self.window_start,
+            "window_end": self.window_end,
             "task_type": self.task_type,
             "task_text": self.task_text,
             "script_path": self.script_path,
@@ -591,4 +718,373 @@ fn escape_json_string(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+fn next_minutely_occurrence(anchor: DateTimeParts, reference_ts: i64) -> io::Result<Option<i64>> {
+    let reference = DateTimeParts::from_timestamp(reference_ts + 1)?;
+    let candidate = normalize_local_parts(DateTimeParts {
+        year: reference.year,
+        month: reference.month,
+        day: reference.day,
+        hour: reference.hour,
+        minute: reference.minute,
+        second: anchor.second,
+    })?;
+    let candidate_ts = candidate.to_timestamp()?;
+    if candidate_ts > reference_ts {
+        Ok(Some(candidate_ts))
+    } else {
+        Ok(Some(add_seconds(candidate_ts, 60)?))
+    }
+}
+
+fn next_hourly_occurrence(anchor: DateTimeParts, reference_ts: i64) -> io::Result<Option<i64>> {
+    let reference = DateTimeParts::from_timestamp(reference_ts + 1)?;
+    let candidate = normalize_local_parts(DateTimeParts {
+        year: reference.year,
+        month: reference.month,
+        day: reference.day,
+        hour: reference.hour,
+        minute: anchor.minute,
+        second: anchor.second,
+    })?;
+    let candidate_ts = candidate.to_timestamp()?;
+    if candidate_ts > reference_ts {
+        Ok(Some(candidate_ts))
+    } else {
+        Ok(Some(add_seconds(candidate_ts, 3600)?))
+    }
+}
+
+fn next_daily_occurrence(anchor: DateTimeParts, reference_ts: i64) -> io::Result<Option<i64>> {
+    let reference = DateTimeParts::from_timestamp(reference_ts + 1)?;
+    let candidate = normalize_local_parts(DateTimeParts {
+        year: reference.year,
+        month: reference.month,
+        day: reference.day,
+        hour: anchor.hour,
+        minute: anchor.minute,
+        second: anchor.second,
+    })?;
+    let candidate_ts = candidate.to_timestamp()?;
+    if candidate_ts > reference_ts {
+        Ok(Some(candidate_ts))
+    } else {
+        Ok(Some(add_seconds(candidate_ts, 86_400)?))
+    }
+}
+
+fn next_weekly_occurrence(anchor: DateTimeParts, reference_ts: i64) -> io::Result<Option<i64>> {
+    let reference = DateTimeParts::from_timestamp(reference_ts + 1)?;
+    let target_weekday = anchor.weekday_number()?;
+    let current_weekday = reference.weekday_number()?;
+    let mut days_ahead = (target_weekday + 7 - current_weekday) % 7;
+    let candidate = normalize_local_parts(DateTimeParts {
+        year: reference.year,
+        month: reference.month,
+        day: reference.day + days_ahead,
+        hour: anchor.hour,
+        minute: anchor.minute,
+        second: anchor.second,
+    })?;
+    let candidate_ts = candidate.to_timestamp()?;
+    if candidate_ts <= reference_ts {
+        days_ahead += 7;
+        let next_candidate = normalize_local_parts(DateTimeParts {
+            year: reference.year,
+            month: reference.month,
+            day: reference.day + days_ahead,
+            hour: anchor.hour,
+            minute: anchor.minute,
+            second: anchor.second,
+        })?;
+        Ok(Some(next_candidate.to_timestamp()?))
+    } else {
+        Ok(Some(candidate_ts))
+    }
+}
+
+fn next_monthly_occurrence(anchor: DateTimeParts, reference_ts: i64) -> io::Result<Option<i64>> {
+    let mut cursor = DateTimeParts::from_timestamp(reference_ts + 1)?;
+    cursor.day = 1;
+    cursor.hour = anchor.hour;
+    cursor.minute = anchor.minute;
+    cursor.second = anchor.second;
+    let mut month_offset = 0i32;
+    loop {
+        let month_start = add_months(cursor, month_offset)?;
+        if let Some(candidate) = with_day_if_valid(month_start, anchor.day)? {
+            let candidate_ts = candidate.to_timestamp()?;
+            if candidate_ts > reference_ts {
+                return Ok(Some(candidate_ts));
+            }
+        }
+        month_offset += 1;
+    }
+}
+
+fn with_day_if_valid(base: DateTimeParts, day: u32) -> io::Result<Option<DateTimeParts>> {
+    if day == 0 || day > days_in_month(base.year, base.month) {
+        return Ok(None);
+    }
+    Ok(Some(DateTimeParts {
+        year: base.year,
+        month: base.month,
+        day,
+        hour: base.hour,
+        minute: base.minute,
+        second: base.second,
+    }))
+}
+
+fn add_seconds(timestamp: i64, seconds: i64) -> io::Result<i64> {
+    let target = timestamp.saturating_add(seconds);
+    let _ = DateTimeParts::from_timestamp(target)?;
+    Ok(target)
+}
+
+fn add_months(parts: DateTimeParts, months: i32) -> io::Result<DateTimeParts> {
+    let total_months = parts.year * 12 + parts.month as i32 - 1 + months;
+    let year = total_months.div_euclid(12);
+    let month = total_months.rem_euclid(12) + 1;
+    normalize_local_parts(DateTimeParts {
+        year,
+        month: month as u32,
+        day: 1,
+        hour: parts.hour,
+        minute: parts.minute,
+        second: parts.second,
+    })
+}
+
+fn normalize_local_parts(parts: DateTimeParts) -> io::Result<DateTimeParts> {
+    DateTimeParts::from_timestamp(parts.to_timestamp()?)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn parse_local_datetime(value: &str) -> io::Result<DateTimeParts> {
+    if value.len() != 19 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "schedule fields must use YYYY-MM-DD HH:MM:SS",
+        ));
+    }
+    let bytes = value.as_bytes();
+    let expected = [
+        (4usize, b'-'),
+        (7usize, b'-'),
+        (10usize, b' '),
+        (13usize, b':'),
+        (16usize, b':'),
+    ];
+    for (index, marker) in expected {
+        if bytes.get(index).copied() != Some(marker) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must use YYYY-MM-DD HH:MM:SS",
+            ));
+        }
+    }
+
+    let parse_u32 = |start: usize, end: usize| -> io::Result<u32> {
+        value[start..end].parse::<u32>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must use YYYY-MM-DD HH:MM:SS",
+            )
+        })
+    };
+
+    Ok(DateTimeParts {
+        year: value[0..4].parse::<i32>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must use YYYY-MM-DD HH:MM:SS",
+            )
+        })?,
+        month: parse_u32(5, 7)?,
+        day: parse_u32(8, 10)?,
+        hour: parse_u32(11, 13)?,
+        minute: parse_u32(14, 16)?,
+        second: parse_u32(17, 19)?,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct DateTimeParts {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+}
+
+impl DateTimeParts {
+    fn to_timestamp(self) -> io::Result<i64> {
+        if self.month == 0
+            || self.month > 12
+            || self.day == 0
+            || self.day > 31
+            || self.hour > 23
+            || self.minute > 59
+            || self.second > 59
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must be valid local time",
+            ));
+        }
+        let mut tm = libc::tm {
+            tm_sec: self.second as i32,
+            tm_min: self.minute as i32,
+            tm_hour: self.hour as i32,
+            tm_mday: self.day as i32,
+            tm_mon: self.month as i32 - 1,
+            tm_year: self.year - 1900,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: -1,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_gmtoff: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_zone: std::ptr::null_mut(),
+        };
+        let timestamp = unsafe { libc::mktime(&mut tm) };
+        if timestamp < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "schedule fields must be valid local time",
+            ));
+        }
+        Ok(timestamp as i64)
+    }
+
+    fn from_timestamp(timestamp: i64) -> io::Result<Self> {
+        let mut secs = timestamp as libc::time_t;
+        let mut tm = libc::tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_gmtoff: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_zone: std::ptr::null_mut(),
+        };
+        let rc = unsafe { libc::localtime_r(&mut secs, &mut tm) };
+        if rc.is_null() {
+            return Err(io::Error::other("failed to convert local time"));
+        }
+        Ok(Self {
+            year: tm.tm_year + 1900,
+            month: (tm.tm_mon + 1) as u32,
+            day: tm.tm_mday as u32,
+            hour: tm.tm_hour as u32,
+            minute: tm.tm_min as u32,
+            second: tm.tm_sec as u32,
+        })
+    }
+
+    fn weekday_number(self) -> io::Result<u32> {
+        let mut secs = self.to_timestamp()? as libc::time_t;
+        let mut tm = libc::tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_gmtoff: 0,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            tm_zone: std::ptr::null_mut(),
+        };
+        let rc = unsafe { libc::localtime_r(&mut secs, &mut tm) };
+        if rc.is_null() {
+            return Err(io::Error::other("failed to convert local time"));
+        }
+        Ok(match tm.tm_wday {
+            0 => 7,
+            value => value as u32,
+        })
+    }
+}
+
+impl std::fmt::Display for DateTimeParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
 }
