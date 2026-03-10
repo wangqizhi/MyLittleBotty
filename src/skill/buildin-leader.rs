@@ -28,7 +28,7 @@ impl BuildinLeaderSkill {
             role_list.join("\\n")
         );
         format!(
-            r#"{{"type":"object","properties":{{"role":{{"type":"string","description":"{role_desc}"}},"task":{{"type":"string","description":"Delegated task for the target role"}},"necessary_info":{{"type":"string","description":"Only the minimal context the target role needs. Do not include old chat history or summaries."}}}},"required":["role","task"]}}"#,
+            r#"{{"type":"object","properties":{{"role":{{"type":"string","description":"{role_desc}"}},"task":{{"type":"string","description":"Delegated task for the target role"}},"necessary_info":{{"type":"string","description":"Only the minimal context the target role needs. Do not include old chat history or summaries."}},"handoff_message":{{"type":"string","description":"Optional short natural-language message to send the user when this delegation starts. Keep it brief and conversational."}}}},"required":["role","task"]}}"#,
         )
     }
 }
@@ -69,11 +69,16 @@ impl BottySkill for BuildinLeaderSkill {
 
         let task = required_string(&input, "task")?;
         let necessary_info = optional_string(&input, "necessary_info").unwrap_or_default();
-        run_delegated_guy(role, &delegated_task_prompt(role, task, necessary_info))
+        let handoff_message = optional_string(&input, "handoff_message");
+        run_delegated_guy(
+            role,
+            &delegated_task_prompt(role, task, necessary_info),
+            handoff_message,
+        )
     }
 }
 
-fn run_delegated_guy(role: &str, prompt: &str) -> io::Result<String> {
+fn run_delegated_guy(role: &str, prompt: &str, handoff_message: Option<&str>) -> io::Result<String> {
     let parent_message_id = env::var("BOTTY_CURRENT_JOB_ID")
         .ok()
         .map(|value| value.trim().to_string())
@@ -113,6 +118,7 @@ fn run_delegated_guy(role: &str, prompt: &str) -> io::Result<String> {
     let payload = serde_json::json!({
         "child_role": role,
         "child_message_id": decoded,
+        "handoff_message": handoff_message,
     });
     Ok(format!("{ASYNC_DELEGATION_PREFIX}{payload}"))
 }

@@ -2,6 +2,7 @@ pub(crate) const TOOL_SYSTEM_PROMPT: &str = include_str!("tool-system.md");
 pub(crate) const ROLE_LEADER_SYSTEM_PROMPT: &str = include_str!("role-leader-system.md");
 pub(crate) const ROLE_PAPERWORK_SYSTEM_PROMPT: &str = include_str!("role-paperwork-system.md");
 pub(crate) const ROLE_ALL_IN_ONE_SYSTEM_PROMPT: &str = include_str!("role-all-in-one-system.md");
+pub(crate) const ROLE_CODER_SYSTEM_PROMPT: &str = include_str!("role-coder-system.md");
 pub(crate) const REMEMBER_SYSTEM_PROMPT: &str = include_str!("remember-system.md");
 pub(crate) const REMEMBER_UPDATE_PROMPT: &str = include_str!("remember-update.md");
 pub(crate) const REMEMBER_INIT_PROMPT: &str = include_str!("remember-init.md");

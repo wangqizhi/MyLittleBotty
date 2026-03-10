@@ -33,6 +33,9 @@ pub enum SetupFieldId {
     AiProviderApikey,
     AiProviderModel,
     AiProviderDebug,
+    AgentProvider,
+    AgentCodexCommand,
+    AgentClaudeCommand,
     WorkDir,
     ChatbotProvider,
     TelegramEnabled,
@@ -43,11 +46,14 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 11] = [
+    pub const ALL: [SetupFieldId; 14] = [
         SetupFieldId::AiProviderEndpoint,
         SetupFieldId::AiProviderApikey,
         SetupFieldId::AiProviderModel,
         SetupFieldId::AiProviderDebug,
+        SetupFieldId::AgentProvider,
+        SetupFieldId::AgentCodexCommand,
+        SetupFieldId::AgentClaudeCommand,
         SetupFieldId::WorkDir,
         SetupFieldId::ChatbotProvider,
         SetupFieldId::TelegramEnabled,
@@ -70,6 +76,9 @@ impl SetupFieldId {
             SetupFieldId::AiProviderApikey => "AI provider apikey",
             SetupFieldId::AiProviderModel => "AI provider model",
             SetupFieldId::AiProviderDebug => "AI provider debug",
+            SetupFieldId::AgentProvider => "agent provider",
+            SetupFieldId::AgentCodexCommand => "codex command",
+            SetupFieldId::AgentClaudeCommand => "claude command",
             SetupFieldId::WorkDir => "work dir",
             SetupFieldId::ChatbotProvider => "chatbot provider",
             SetupFieldId::TelegramEnabled => "telegram enabled",
@@ -107,6 +116,9 @@ pub struct SetupConfig {
     pub ai_provider_apikey: String,
     pub ai_provider_model: String,
     pub ai_provider_debug: bool,
+    pub agent_provider: String,
+    pub agent_codex_command: String,
+    pub agent_claude_command: String,
     pub work_dir: String,
     pub chatbot_provider: String,
     pub chatbot_telegram_api_base: String,
@@ -128,6 +140,9 @@ impl Default for SetupConfig {
             ai_provider_apikey: String::new(),
             ai_provider_model: "MiniMax-M2.1".to_string(),
             ai_provider_debug: false,
+            agent_provider: "codex".to_string(),
+            agent_codex_command: "codex".to_string(),
+            agent_claude_command: "claude".to_string(),
             work_dir: botty_io::default_work_dir_display(),
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
@@ -176,6 +191,9 @@ impl SetupConfig {
                     "[ ] false".to_string()
                 }
             }
+            SetupFieldId::AgentProvider => self.agent_provider.clone(),
+            SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
+            SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramEnabled => {
@@ -208,6 +226,9 @@ impl SetupConfig {
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey.clone(),
             SetupFieldId::AiProviderModel => self.ai_provider_model.clone(),
             SetupFieldId::AiProviderDebug => String::new(),
+            SetupFieldId::AgentProvider => self.agent_provider.clone(),
+            SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
+            SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramPollSeconds => {
@@ -227,6 +248,9 @@ impl SetupConfig {
             SetupFieldId::AiProviderApikey => self.ai_provider_apikey = value.to_string(),
             SetupFieldId::AiProviderModel => self.ai_provider_model = value.to_string(),
             SetupFieldId::AiProviderDebug => {}
+            SetupFieldId::AgentProvider => self.agent_provider = value.trim().to_ascii_lowercase(),
+            SetupFieldId::AgentCodexCommand => self.agent_codex_command = value.to_string(),
+            SetupFieldId::AgentClaudeCommand => self.agent_claude_command = value.to_string(),
             SetupFieldId::WorkDir => {
                 self.work_dir = botty_io::normalize_work_dir_input(value);
             }
@@ -602,6 +626,9 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "ai.provider.apikey" => config.ai_provider_apikey = value.to_string(),
             "ai.provider.model" => config.ai_provider_model = value.to_string(),
             "ai.provider.debug" => config.ai_provider_debug = parse_bool(value),
+            "agent.provider" => config.agent_provider = value.to_ascii_lowercase(),
+            "agent.codex.command" => config.agent_codex_command = value.to_string(),
+            "agent.claude.command" => config.agent_claude_command = value.to_string(),
             "provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
             "provider.apikey" => config.ai_provider_apikey = value.to_string(),
             "provider.model" => config.ai_provider_model = value.to_string(),
@@ -648,11 +675,14 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nagent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_endpoint,
         config.ai_provider_apikey,
         config.ai_provider_model,
         config.ai_provider_debug,
+        config.agent_provider,
+        config.agent_codex_command,
+        config.agent_claude_command,
         enabled_provider_list(config),
         config.chatbot_telegram_api_base,
         config.chatbot_telegram_apikey,

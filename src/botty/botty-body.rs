@@ -34,6 +34,7 @@ pub enum AssistantControl {
         child_role: String,
         child_message_id: String,
         continuation_payload: String,
+        handoff_message: Option<String>,
     },
 }
 
@@ -46,6 +47,7 @@ struct ContinuationState {
 struct AsyncDelegationResult {
     child_role: String,
     child_message_id: String,
+    handoff_message: Option<String>,
 }
 
 enum RoleInfo {
@@ -229,6 +231,7 @@ impl BottyBody {
                         child_role: async_delegation.child_role,
                         child_message_id: async_delegation.child_message_id,
                         continuation_payload,
+                        handoff_message: async_delegation.handoff_message,
                     }),
                 });
             }
@@ -263,9 +266,14 @@ impl BottyBody {
             }
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unknown tool: {name}"),
+        let available = self
+            .skills
+            .iter()
+            .map(|skill| skill.name().to_string())
+            .collect::<Vec<_>>();
+        Ok(format!(
+            "Tool `{name}` is not available in this role. Available tools: {}. Use one of those tools instead.",
+            available.join(", ")
         ))
     }
 
@@ -529,6 +537,15 @@ fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> 
             ("role_name", role_spec.role),
             ("role_description", role_spec.description),
             ("role_instruction", role_spec.system_instruction_prompt),
+            (
+                "tool_usage_guidance",
+                &render_tool_usage_guidance(
+                    &expand_role_skill_names(role_spec)
+                        .into_iter()
+                        .map(|name| name.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+            ),
             ("remember_section", &remember_section),
             ("memory_section", &memory_section),
             ("current_local_time", &current_local_time),
@@ -551,11 +568,51 @@ fn build_system_prompt_for_custom_role(
             ("role_name", &config.name),
             ("role_description", &config.description),
             ("role_instruction", &instruction),
+            (
+                "tool_usage_guidance",
+                &render_tool_usage_guidance(&expand_custom_role_skill_names(config)),
+            ),
             ("remember_section", ""),
             ("memory_section", ""),
             ("current_local_time", &current_local_time),
         ],
     ))
+}
+
+fn render_tool_usage_guidance(skills: &[String]) -> String {
+    if skills.is_empty() {
+        return "No tools are available in this role.".to_string();
+    }
+
+    let mut lines = vec![format!(
+        "Only these tools are available in this role: {}.",
+        skills.join(", ")
+    )];
+
+    if skills.iter().any(|skill| skill == "terminal") {
+        lines.push("Use `terminal` for coding and repository execution through the terminal app. For a new delegated coding task, prefer a single `execute_task` call so the tool can manage the PTY session, polling, transcript parsing, and completion detection internally.".to_string());
+        lines.push("Use `continue_session`, `status`, `transcript`, `interrupt`, or `terminate` only when you truly need direct session control. If there is no blocker and no missing requirement, keep driving the coding session yourself. Do not hand work back to leader just because the task is long-running.".to_string());
+    }
+    if skills.iter().any(|skill| skill == "list") {
+        lines.push("Use `list` when the user asks to list directory contents.".to_string());
+    }
+    if skills.iter().any(|skill| skill == "watch") {
+        lines.push("Use `watch` when the user asks to inspect, open, read, or show a file.".to_string());
+    }
+    if skills.iter().any(|skill| skill == "write") {
+        lines.push("Use `write` when the user asks to save, write, note, record, or persist text into a local file. Preserve the user's filename intent, but remember that write always remaps paths under the configured work dir.".to_string());
+    }
+    if skills.iter().any(|skill| skill == "crond") {
+        lines.push("Use `crond` only for reminder and scheduling requests. For create or edit actions, always provide exact local `schedule_at` in `YYYY-MM-DD HH:MM:SS`.".to_string());
+    }
+    if skills.iter().any(|skill| skill == "remember") {
+        lines.push("Use `remember` only when the current topic may depend on older conversation memory not already covered by the provided summaries.".to_string());
+    }
+    if skills.iter().any(|skill| skill == "leader") {
+        lines.push("Use `leader` to delegate to a specialized role when this role is responsible for routing.".to_string());
+    }
+
+    lines.join(" ")
 }
 
 fn load_recent_deep_memory_transcript(rounds: usize) -> io::Result<String> {

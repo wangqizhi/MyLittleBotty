@@ -62,6 +62,7 @@ pub struct QueueJob {
     pub continuation_payload: Option<String>,
     pub awaiting_message_id: Option<String>,
     pub continuation_result: Option<String>,
+    pub pending_user_notice: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +122,7 @@ pub fn new_external_job(
         continuation_payload: None,
         awaiting_message_id: None,
         continuation_result: None,
+        pending_user_notice: None,
     }
 }
 
@@ -177,6 +179,7 @@ pub fn new_delegated_job(
         continuation_payload: None,
         awaiting_message_id: None,
         continuation_result: None,
+        pending_user_notice: None,
     })
 }
 

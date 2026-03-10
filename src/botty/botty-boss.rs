@@ -289,6 +289,16 @@ pub fn render_watchjobs() -> io::Result<String> {
     Ok(output)
 }
 
+pub fn render_watchapp(name: &str) -> io::Result<String> {
+    match name {
+        "terminal" => render_watch_terminal_app(),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported app name: {other}. currently only `terminal` is supported"),
+        )),
+    }
+}
+
 pub fn interrupt_active_request() -> io::Result<()> {
     let flag = interrupt_flag_file();
     if let Some(parent) = flag.parent() {
@@ -823,21 +833,42 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
         } else {
             job.payload.clone()
         };
+        let _ = append_guy_role_log(
+            &role,
+            "request",
+            &format!("job_id={} payload={}", job.message_id, sanitize_log_value(&request_message)),
+        );
         let response = bridge
             .as_mut()
             .expect("worker bridge must exist")
             .ask(&request_message);
         match response {
             Ok(reply) => {
+                let _ = append_guy_role_log(
+                    &role,
+                    "response",
+                    &format!(
+                        "job_id={} text={} control={}",
+                        job.message_id,
+                        sanitize_log_value(&reply.text),
+                        reply
+                            .control
+                            .as_ref()
+                            .map(|control| sanitize_log_value(&format!("{control:?}")))
+                            .unwrap_or_else(|| "-".to_string())
+                    ),
+                );
                 if let Some(crate::botty_body::AssistantControl::AwaitDelegation {
                     child_message_id,
                     continuation_payload,
+                    handoff_message,
                     ..
                 }) = reply.control
                 {
                     job.continuation_payload = Some(continuation_payload);
                     job.awaiting_message_id = Some(child_message_id);
                     job.continuation_result = None;
+                    job.pending_user_notice = handoff_message.filter(|text| !text.trim().is_empty());
                     job.result_text = None;
                     job.completed_at_ms = None;
                     let _ =
@@ -853,6 +884,11 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
                 }
             }
             Err(err) => {
+                let _ = append_guy_role_log(
+                    &role,
+                    "error",
+                    &format!("job_id={} {}", job.message_id, sanitize_log_value(&err.to_string())),
+                );
                 job.last_error = Some(err.to_string());
                 job.completed_at_ms = Some(botty_jobs::now_ms());
                 let _ = update_job_state(&root, &role, JobState::Running, JobState::Failed, &mut job);
@@ -910,6 +946,7 @@ fn try_resume_parent_job(
 
     parent.awaiting_message_id = None;
     parent.continuation_result = Some(tool_result);
+    parent.pending_user_notice = None;
     parent.completed_at_ms = None;
     update_job_state(root, &child_job.from_role, JobState::Waiting, JobState::Queued, &mut parent)?;
     dispatch_tx
@@ -1134,6 +1171,119 @@ fn guy_env_config_file() -> PathBuf {
     botty_root_dir()
         .join("config")
         .join(format!("guy-env{}.conf", runtime_suffix()))
+}
+
+fn guy_role_log_file(role: &str) -> PathBuf {
+    botty_root_dir()
+        .join("log")
+        .join(format!("guy-role-{}{}.log", sanitize_role_for_filename(role), runtime_suffix()))
+}
+
+fn render_watch_terminal_app() -> io::Result<String> {
+    let root = botty_root_dir().join("app").join("terminal").join("sessions");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(format!(
+                "Watching app `terminal`\nroot={}\n\nNo terminal session transcripts yet.\n",
+                root.display()
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+
+    let mut latest_running: Option<(u64, PathBuf)> = None;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let meta_path = entry.path().join("session.json");
+        let meta_content = match fs::read_to_string(&meta_path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let meta: serde_json::Value = match serde_json::from_str(&meta_content) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.get("state").and_then(serde_json::Value::as_str) != Some("running") {
+            continue;
+        }
+        let updated_at_ms = meta
+            .get("updated_at_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let transcript_path = match meta
+            .get("transcript_path")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+        {
+            Some(path) => path,
+            None => continue,
+        };
+        match &latest_running {
+            Some((saved_updated_at_ms, _)) if updated_at_ms <= *saved_updated_at_ms => {}
+            _ => latest_running = Some((updated_at_ms, transcript_path)),
+        }
+    }
+
+    let Some((_, path)) = latest_running else {
+        return Ok(format!(
+            "Watching app `terminal`\nroot={}\n\nNo terminal session transcripts yet.\n",
+            root.display()
+        ));
+    };
+
+    let body = match fs::read_to_string(&path) {
+        Ok(content) => tail_text(&content, 16 * 1024),
+        Err(err) => return Err(err),
+    };
+
+    Ok(format!(
+        "Watching app `terminal`\nroot={}\ntranscript_path={}\n\n{}",
+        root.display(),
+        path.display(),
+        body
+    ))
+}
+
+fn append_guy_role_log(role: &str, direction: &str, message: &str) -> io::Result<()> {
+    let path = guy_role_log_file(role);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "[{timestamp}] {direction}: {message}")?;
+    Ok(())
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn sanitize_role_for_filename(role: &str) -> String {
+    role.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn tail_text(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+    let mut start = content.len() - max_bytes;
+    while !content.is_char_boundary(start) && start < content.len() {
+        start += 1;
+    }
+    content[start..].to_string()
 }
 
 fn persist_guy_role(pid: i32, role: &str) -> io::Result<()> {

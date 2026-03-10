@@ -64,6 +64,14 @@ const ALL_IN_ONE_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     skills: &["remember", "crond"],
     include_memory_context: false,
 };
+const CODER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
+    role: "coder",
+    description: "Handle coding and repository tasks by controlling a terminal coding agent.",
+    system_instruction_prompt: prompt::ROLE_CODER_SYSTEM_PROMPT,
+    skill_groups: &[],
+    skills: &["terminal"],
+    include_memory_context: false,
+};
 
 pub fn run() {
     set_process_name(guy_process_name());
@@ -196,6 +204,7 @@ pub(crate) fn resolve_role_spec(role: &str) -> Option<&'static BottyGuyRoleSpec>
         "" | BOTTY_GUY_DEFAULT_ROLE => Some(&LEADER_ROLE_SPEC),
         "paperwork" => Some(&PAPERWORK_ROLE_SPEC),
         "all-in-one" => Some(&ALL_IN_ONE_ROLE_SPEC),
+        "coder" => Some(&CODER_ROLE_SPEC),
         _ => None,
     }
 }
@@ -255,6 +264,7 @@ pub(crate) fn expand_custom_role_skill_names(config: &CustomRoleConfig) -> Vec<S
 
 pub(crate) fn delegated_role_names() -> Vec<String> {
     let mut names: Vec<String> = vec![
+        CODER_ROLE_SPEC.role.to_string(),
         PAPERWORK_ROLE_SPEC.role.to_string(),
         ALL_IN_ONE_ROLE_SPEC.role.to_string(),
     ];
@@ -272,6 +282,10 @@ pub(crate) fn delegated_role_exists(role: &str) -> bool {
 
 pub(crate) fn delegated_role_descriptions() -> Vec<(String, String)> {
     let mut result = vec![
+        (
+            CODER_ROLE_SPEC.role.to_string(),
+            CODER_ROLE_SPEC.description.to_string(),
+        ),
         (
             PAPERWORK_ROLE_SPEC.role.to_string(),
             PAPERWORK_ROLE_SPEC.description.to_string(),
@@ -383,6 +397,7 @@ struct PendingLeaderReply {
     target: String,
     user_id: String,
     job_message_id: String,
+    notice_sent: bool,
 }
 
 trait ChatbotProviderPlugin {
@@ -454,14 +469,6 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
             }
             let prefixed = format!("{}: {normalized}", plugin.provider_name());
 
-            match plugin.send_reply(&message.target, "已经将任务交给小弟执行") {
-                Ok(Some(sent_id)) => {
-                    let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
-                }
-                Ok(None) => {}
-                Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
-            }
-
             let job_message_id =
                 match enqueue_leader_guy(plugin.provider_name(), user_id, &message.target, &prefixed)
                 {
@@ -495,6 +502,7 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
                 target: message.target.clone(),
                 user_id: user_id.to_string(),
                 job_message_id,
+                notice_sent: false,
             });
         }
 
@@ -511,6 +519,37 @@ fn flush_pending_leader_replies(
 ) {
     let mut index = 0usize;
     while index < pending_replies.len() {
+        if !pending_replies[index].notice_sent {
+            match try_load_leader_job_notice(&pending_replies[index].job_message_id) {
+                Ok(Some(notice)) => {
+                    if !notice.trim().is_empty() {
+                        match plugin.send_reply(&pending_replies[index].target, &notice) {
+                            Ok(Some(sent_id)) => {
+                                let _ = remember_message_id(seen, seen_order, &sent_id);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                eprintln!("{} send message failed: {err}", plugin.provider_name());
+                                index += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    pending_replies[index].notice_sent = true;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!(
+                        "{} load leader notice {} failed: {err}",
+                        plugin.provider_name(),
+                        pending_replies[index].job_message_id
+                    );
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
         let outcome = match try_load_leader_job_outcome(&pending_replies[index].job_message_id) {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -541,6 +580,15 @@ fn flush_pending_leader_replies(
             Ok(None) => {}
             Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
         }
+    }
+}
+
+fn try_load_leader_job_notice(message_id: &str) -> io::Result<Option<String>> {
+    let root = botty_root_dir();
+    match botty_jobs::load_job(&root, BOTTY_GUY_DEFAULT_ROLE, JobState::Waiting, message_id) {
+        Ok(job) => Ok(job.pending_user_notice.filter(|text| !text.trim().is_empty())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
     }
 }
 

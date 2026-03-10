@@ -11,7 +11,9 @@ mod botty_crond;
 #[path = "botty/botty-guy.rs"]
 mod botty_guy;
 mod cli;
+mod acp;
 mod frontend;
+mod infra;
 mod io;
 mod llm_provider;
 mod prompt;
