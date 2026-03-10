@@ -4,6 +4,9 @@ MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 
 
 ## 最近更新
 
+- `2026-03-10`：新增基于队列的委派任务恢复机制。父任务在工具委派后可以进入等待态，子任务完成后自动恢复，并可通过 `mylittlebotty watchjobs` 观察队列状态。
+- `2026-03-10`：新增内置 `terminal` skill、`coder` 角色、ACP 终端会话管理，以及基于 PTY 的编码代理执行能力，执行目录受当前 work dir 限制。
+- `2026-03-10`：新增 `mylittlebotty watchapp -n terminal`，可直接查看最新运行中的 terminal 会话输出。
 - `2026-03-09`：发布 `0.0.9`。
 - `2026-03-09`：新增基于角色的 `Botty-Guy` 运行方式。默认 `leader` 角色可以把任务分派给 `paperwork` 和 `all-in-one` 子角色，并尽量缩小传递上下文。
 - `2026-03-09`：新增内置 `leader` skill 与角色专用系统提示词，任务分派和各角色职责变成显式机制。
@@ -67,6 +70,7 @@ TUI 内置命令：
 - `leader`：默认角色，保留记忆上下文，负责提醒协调和任务分派。
 - `paperwork`：面向文书类任务的轻量角色，使用更小的上下文执行。
 - `all-in-one`：兜底执行角色，可以直接使用通用内置工具。
+- `coder`：面向代码和仓库任务的角色，通过内置 `terminal` skill 驱动外部终端编码代理执行实际工作。
 
 分派能力由内置 `leader` skill 实现：
 
@@ -79,7 +83,7 @@ TUI 内置命令：
 
 ### 5. 本地工具能力
 
-当前 Botty 已接入六个内置工具，但不同角色可用的工具不同：
+当前 Botty 已接入七个内置工具，但不同角色可用的工具不同：
 
 - `list`：列出本地目录内容，目录会追加 `/`，符号链接会追加 `@`。可通过 `~/.mylittlebotty/config/list.conf` 中的 `list.blacklist=...` 配置访问黑名单，默认禁止访问 `~/.mylittlebotty/`。
 - `watch`：读取本地文件内容。文本文件最多返回 16 KiB，大于 500 KiB 的大文件只返回最近一段尾部内容，二进制文件返回可打印片段预览。可通过 `~/.mylittlebotty/config/watch.conf` 中的 `watch.blacklist=...` 配置访问黑名单。
@@ -87,8 +91,18 @@ TUI 内置命令：
 - `remember`：当 `memory/summary/remember.md` 和最近对话上下文都不够时，Botty 会先让模型从当前用户话题里提炼少量高信号关键词，再对 `~/.mylittlebotty/memory/deep` 做本地文本搜索，并把命中行及其上下文返回给模型继续判断。
 - `crond`：查询、创建、编辑保存在 `~/.mylittlebotty/reminder.rec` 中的提醒任务。
 - `leader`：仅 `leader` 角色可用，用于把任务转交给其它角色专用的 `Botty-Guy` 子进程执行。
+- `terminal`：供 `coder` 角色和绑定它的自定义角色使用，可启动或继续一个基于 PTY 的编码代理会话，也可查询状态、读取 transcript、发送中断、终止、重启、列出活跃会话。
 
-### 6. 定时提醒
+### 6. 委派任务队列与恢复
+
+- 委派任务现在会按角色持久化为本地队列，而不只是停留在内存里。
+- 父角色在等待子角色执行时会进入 `waiting` 状态。
+- 子任务完成或失败后，Botty 会把结果或错误文本自动回填给父任务，并恢复原来的工具调用流程。
+- `mylittlebotty watchjobs` 会打印一次当前队列快照。
+- `mylittlebotty watchjobs -f` 会每秒刷新一次队列视图。
+- 输出中会展示每个角色的 `queued`、`running`、`waiting`、`done`、`failed` 数量，以及当前任务和最多 5 个排队任务。
+
+### 7. 定时提醒
 
 - 提醒数据保存在 `~/.mylittlebotty/reminder.rec`。
 - `Botty-crond` 会轮询到期提醒并执行。
@@ -99,7 +113,7 @@ TUI 内置命令：
 - 单次提醒执行后会变成 `done`；重复提醒会持续生效，直到超出生效时间窗后再变成 `done`。
 - 如果启用了 Telegram/飞书推送，提醒结果会回发到对应聊天渠道。
 
-### 7. Telegram / 飞书接入
+### 8. Telegram / 飞书接入
 
 当前实现了两个输入通道：
 
@@ -118,7 +132,7 @@ TUI 内置命令：
 - 飞书 chat_id 指定
 - 接收到外部消息后转发给本地 `Botty-Guy` 处理
 
-### 8. 长期记忆摘要
+### 9. 长期记忆摘要
 
 - 通过 `/remember` 触发整理长期记忆。
 - 摘要结果写入 `~/.mylittlebotty/memory/summary/remember.md`。
@@ -126,7 +140,16 @@ TUI 内置命令：
 - 正常对话时，Botty 会优先使用 `memory/summary/remember.md` 和最近对话历史。
 - 如果当前话题在这些内容里没有出现，内置 `remember` 工具会先让模型提炼搜索关键词，再在本地搜索 `~/.mylittlebotty/memory/deep`，并返回命中片段及其上下文。
 
-### 9. 自更新
+### 10. Terminal 编码代理集成
+
+- `terminal` skill 会把会话运行在 `~/.mylittlebotty/app/terminal/sessions/<session_id>/` 下。
+- 每个会话会保存 `session.json` 元数据和 `transcript.log` 输出日志。
+- 默认 terminal provider 是 `codex`；`claude` 已预留配置项，但目前除了进程启动入口外还没有完整接入工作流。
+- 使用 `codex` provider 前，需要先确保 `codex login status` 成功。
+- Codex 会话会以 `workspace-write` sandbox、`never` approval，并附带 `-C <work_dir>` 启动，因此执行范围限定在当前配置的工作目录内。
+- `mylittlebotty watchapp -n terminal` 会持续渲染最新一个运行中 terminal 会话的 transcript 尾部。
+
+### 11. 自更新
 
 - `mylittlebotty update` 会检查 GitHub 最新 release。
 - 如果发现新版本，会提示确认后下载并替换本地二进制。
@@ -269,6 +292,30 @@ mylittlebotty log -f
 
 这个命令会汇总最近的 debug 与 boss 日志。现在 debug 输出里会带 `role=...`，方便区分 leader 和被分派角色的流量。
 
+### 9. 查看委派任务队列
+
+单次查看：
+
+```bash
+mylittlebotty watchjobs
+```
+
+持续刷新：
+
+```bash
+mylittlebotty watchjobs -f
+```
+
+当 leader 正在把任务委派给 `paperwork`、`all-in-one`、`coder` 或自定义子角色时，这个视图尤其有用。
+
+### 10. 查看 terminal 编码会话
+
+```bash
+mylittlebotty watchapp -n terminal
+```
+
+这个命令会持续显示最新运行中的 terminal 代理会话输出尾部。
+
 ## 配置方法
 
 最简单的方式是进入 TUI 后执行：
@@ -290,6 +337,9 @@ ai.provider.endpoint=
 ai.provider.apikey=
 ai.provider.model=MiniMax-M2.1
 ai.provider.debug=false
+agent.provider=codex
+agent.codex.command=codex
+agent.claude.command=claude
 work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
@@ -310,6 +360,9 @@ chatbot.feishu.chat_id=
 - `ai.provider.apikey`：模型 API Key
 - `ai.provider.model`：模型名
 - `ai.provider.debug`：是否记录调试日志
+- `agent.provider`：`terminal` skill 使用的终端代理提供方，当前默认是 `codex`
+- `agent.codex.command`：Codex CLI 的可执行文件名或路径
+- `agent.claude.command`：预留给 Claude 终端代理的可执行文件名或路径
 - `work_dir`：`write` 工具使用的根目录；在 TUI 中修改时会迁移旧工作目录内容
 - `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道
@@ -331,6 +384,8 @@ chatbot.feishu.chat_id=
 | `mylittlebotty help` | 显示 CLI 帮助 | `mylittlebotty help` |
 | `mylittlebotty version` | 输出版本号 | `mylittlebotty version` |
 | `mylittlebotty log` | 查看最近运行日志和调试日志 | `mylittlebotty log` |
+| `mylittlebotty watchjobs` | 查看各角色的委派任务队列 | `mylittlebotty watchjobs` |
+| `mylittlebotty watchapp` | 查看 app 输出，当前仅支持 terminal 会话 | `mylittlebotty watchapp -n terminal` |
 | `mylittlebotty status` | 查看后台服务状态和 PID 信息 | `mylittlebotty status` |
 | `mylittlebotty stop` | 停止 Botty 相关进程 | `mylittlebotty stop` |
 | `mylittlebotty restart` | 重启后台服务 | `mylittlebotty restart` |
@@ -365,9 +420,11 @@ chatbot.feishu.chat_id=
 - `~/.mylittlebotty/config/guy-env.conf`：注入到 `Botty-Guy` 的持久化环境变量
 - `~/.mylittlebotty/config/list.conf`：`list` 内置工具的可选黑名单配置
 - `~/.mylittlebotty/config/watch.conf`：`watch` 内置工具的可选黑名单配置
+- `~/.mylittlebotty/app/terminal/sessions/`：terminal 代理会话的元数据和 transcript
 - `~/.mylittlebotty/log/`：日志目录
 - `~/.mylittlebotty/run/`：pid、socket、flag 等运行时文件
 - `~/.mylittlebotty/run/guy-role-map*.conf`：运行中的 `Botty-Guy` 进程与角色映射文件
+- `~/.mylittlebotty/run/jobs/`：按角色保存的委派任务队列和 worker 状态
 - `~/.mylittlebotty/reminder.rec`：提醒任务记录
 - `~/.mylittlebotty/memory/summary/remember.md`：长期记忆摘要
 

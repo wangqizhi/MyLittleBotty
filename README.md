@@ -6,6 +6,9 @@ MyLittleBotty is a local AI assistant that runs as a background service. Its cur
 
 ## Recent Updates
 
+- `2026-03-10`: added queue-based delegated task recovery. Parent jobs can now pause on tool delegation, resume after child completion, and be inspected with `mylittlebotty watchjobs`.
+- `2026-03-10`: added the built-in `terminal` skill, `coder` role, ACP terminal session management, and PTY-backed coding-agent execution inside the configured work dir.
+- `2026-03-10`: added `mylittlebotty watchapp -n terminal` to inspect live terminal-agent transcripts from the newest running terminal session.
 - `2026-03-09`: released `0.0.9`.
 - `2026-03-09`: added role-based `Botty-Guy` execution. The default `leader` role can delegate focused tasks to `paperwork` and `all-in-one` subprocess roles with reduced context.
 - `2026-03-09`: added the built-in `leader` skill and role-specific system prompts, so task routing and role behavior are now explicit instead of implicit.
@@ -69,6 +72,7 @@ When `ai.provider.debug=true`, request and response payloads are written to the 
 - `leader`: default role. Keeps memory context, handles reminder coordination, and can delegate work to other roles.
 - `paperwork`: a focused role for document-style tasks with reduced context.
 - `all-in-one`: a fallback execution role that can use the general built-in tools directly.
+- `coder`: a coding-focused role that delegates repository execution to the built-in `terminal` skill and an external terminal agent such as Codex CLI.
 
 The delegation flow is implemented through a built-in `leader` skill:
 
@@ -81,7 +85,7 @@ Additional design notes are documented in `doc/role-agent.md`.
 
 ### 5. Local tool usage
 
-Botty currently exposes six built-in tools, though role access differs:
+Botty currently exposes seven built-in tools, though role access differs:
 
 - `list`: list the content of a local directory. Directories are suffixed with `/`, symlinks with `@`, and access can be restricted with `~/.mylittlebotty/config/list.conf` via `list.blacklist=...`. The default blacklist blocks `~/.mylittlebotty/`.
 - `watch`: read a local file. Text files are truncated to at most 16 KiB, large files over 500 KiB return only the recent tail, binary files return a printable preview, and access can be restricted with `~/.mylittlebotty/config/watch.conf` via `watch.blacklist=...`.
@@ -89,8 +93,18 @@ Botty currently exposes six built-in tools, though role access differs:
 - `remember`: when `memory/summary/remember.md` and the recent conversation context are not enough, Botty first asks the model to extract a few high-signal search keywords from the current user topic, then searches `~/.mylittlebotty/memory/deep` with local text search and returns matching lines with surrounding context for the model to continue reasoning.
 - `crond`: query, create, and edit reminder records stored in `~/.mylittlebotty/reminder.rec`.
 - `leader`: available to the `leader` role only. It delegates a task to another role-specific `Botty-Guy` subprocess with minimal context.
+- `terminal`: available to the `coder` role and custom roles that bind it. It can start or continue a PTY-backed coding-agent session, inspect status/transcripts, interrupt, terminate, restart, or list active sessions.
 
-### 6. Scheduled reminders
+### 6. Delegated task queues and recovery
+
+- Delegated work is now persisted as queue jobs per role instead of only in memory.
+- A parent role can enter a waiting state while a delegated child role runs.
+- When the child finishes, Botty resumes the parent's pending tool call automatically with the child's result or error text.
+- `mylittlebotty watchjobs` prints the current queue snapshot once.
+- `mylittlebotty watchjobs -f` clears and refreshes the queue view once per second.
+- Queue output shows per-role counts for `queued`, `running`, `waiting`, `done`, and `failed`, plus the current job and up to five queued jobs.
+
+### 7. Scheduled reminders
 
 - Reminder data is stored in `~/.mylittlebotty/reminder.rec`.
 - `Botty-crond` polls and executes due reminders.
@@ -101,7 +115,7 @@ Botty currently exposes six built-in tools, though role access differs:
 - One-time reminders are marked as `done` after execution. Recurring reminders stay active until their time window ends, then are marked as `done`.
 - If Telegram or Feishu output is enabled, reminder results are pushed back to those channels.
 
-### 7. Telegram / Feishu integration
+### 8. Telegram / Feishu integration
 
 Two input channels are currently implemented:
 
@@ -120,7 +134,7 @@ Supported behavior:
 - Feishu `chat_id` targeting
 - Incoming external messages are forwarded to local `Botty-Guy`
 
-### 8. Long-term memory summary
+### 9. Long-term memory summary
 
 - `/remember` triggers long-term memory summarization.
 - The summary is written to `~/.mylittlebotty/memory/summary/remember.md`.
@@ -128,7 +142,16 @@ Supported behavior:
 - During normal chat, Botty first relies on `memory/summary/remember.md` and recent conversation history.
 - If the current topic does not appear there, the built-in `remember` tool may extract search keywords with the model and then search `~/.mylittlebotty/memory/deep` locally, returning matching snippets with surrounding context.
 
-### 9. Self-update
+### 10. Terminal coding agent integration
+
+- The `terminal` skill starts a PTY session under `~/.mylittlebotty/app/terminal/sessions/<session_id>/`.
+- Each session stores a `session.json` metadata file and a `transcript.log` output log.
+- The default terminal agent provider is `codex`; `claude` is reserved in config but not yet wired into the workflow beyond process spawning.
+- Before using the `codex` provider, `codex login status` must succeed.
+- Codex sessions are started with sandbox mode `workspace-write`, approval mode `never`, and `-C <work_dir>`, so the agent works inside Botty's configured work dir.
+- `mylittlebotty watchapp -n terminal` continuously renders the latest running terminal session transcript.
+
+### 11. Self-update
 
 - `mylittlebotty update` checks the latest GitHub release.
 - If a newer version exists, it prompts for confirmation, downloads it, and replaces the local binary.
@@ -271,6 +294,30 @@ mylittlebotty log -f
 
 This command summarizes recent debug and boss logs. Debug output now includes `role=...`, so delegated role traffic can be distinguished from leader traffic.
 
+### 9. Inspect delegated job queues
+
+One-shot snapshot:
+
+```bash
+mylittlebotty watchjobs
+```
+
+Continuous refresh:
+
+```bash
+mylittlebotty watchjobs -f
+```
+
+This view is useful when the leader is delegating to `paperwork`, `all-in-one`, `coder`, or custom sub-agents.
+
+### 10. Inspect terminal coding sessions
+
+```bash
+mylittlebotty watchapp -n terminal
+```
+
+This continuously shows the transcript tail of the newest running terminal-agent session.
+
 ## Configuration
 
 The simplest way to configure the app is from the TUI:
@@ -292,6 +339,9 @@ ai.provider.endpoint=
 ai.provider.apikey=
 ai.provider.model=MiniMax-M2.1
 ai.provider.debug=false
+agent.provider=codex
+agent.codex.command=codex
+agent.claude.command=claude
 work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
@@ -312,6 +362,9 @@ Common meanings:
 - `ai.provider.apikey`: model API key
 - `ai.provider.model`: model name
 - `ai.provider.debug`: enable request/response debug logging
+- `agent.provider`: terminal-agent provider used by the `terminal` skill, currently `codex` by default
+- `agent.codex.command`: executable name or path for Codex CLI
+- `agent.claude.command`: executable name or path reserved for a Claude terminal agent
 - `work_dir`: root directory used by the `write` tool; changing it from the TUI migrates existing work dir content
 - `chatbot.provider`: selected chatbot provider, currently `telegram` or `feishu`
 - `chatbot.telegram.enabled`: enable Telegram input worker
@@ -333,6 +386,8 @@ The table below reflects everything currently implemented in `src/main.rs`.
 | `mylittlebotty help` | Show CLI help | `mylittlebotty help` |
 | `mylittlebotty version` | Print the current version | `mylittlebotty version` |
 | `mylittlebotty log` | Show recent runtime and debug logs | `mylittlebotty log` |
+| `mylittlebotty watchjobs` | Inspect delegated role job queues | `mylittlebotty watchjobs` |
+| `mylittlebotty watchapp` | Inspect app output, currently terminal sessions only | `mylittlebotty watchapp -n terminal` |
 | `mylittlebotty status` | Show service status and PID information | `mylittlebotty status` |
 | `mylittlebotty stop` | Stop Botty-related processes | `mylittlebotty stop` |
 | `mylittlebotty restart` | Restart background services | `mylittlebotty restart` |
@@ -367,9 +422,11 @@ The program uses these paths by default:
 - `~/.mylittlebotty/config/guy-env.conf`: persisted environment variables injected into `Botty-Guy`
 - `~/.mylittlebotty/config/list.conf`: optional blacklist config for the `list` tool
 - `~/.mylittlebotty/config/watch.conf`: optional blacklist config for the `watch` tool
+- `~/.mylittlebotty/app/terminal/sessions/`: PTY-backed terminal agent session metadata and transcripts
 - `~/.mylittlebotty/log/`: log directory
 - `~/.mylittlebotty/run/`: runtime files such as pid, socket, and interrupt flags
 - `~/.mylittlebotty/run/guy-role-map*.conf`: runtime mapping from spawned `Botty-Guy` pid to role
+- `~/.mylittlebotty/run/jobs/`: persisted delegated job queues and worker state by role
 - `~/.mylittlebotty/reminder.rec`: reminder records
 - `~/.mylittlebotty/memory/summary/remember.md`: long-term memory summary
 
