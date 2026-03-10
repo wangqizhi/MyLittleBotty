@@ -2,6 +2,8 @@
 mod botty_body;
 #[path = "botty/botty-boss.rs"]
 mod botty_boss;
+#[path = "botty/botty-jobs.rs"]
+mod botty_jobs;
 #[path = "botty/botty-brain.rs"]
 mod botty_brain;
 #[path = "botty/botty-crond.rs"]

@@ -1,4 +1,5 @@
 use crate::botty_body::{AssistantReply, BottyBody};
+use crate::botty_jobs::{self, JobState};
 use crate::prompt;
 use serde_json::{self, json, Value};
 use std::collections::HashSet;
@@ -99,6 +100,7 @@ pub fn run() {
             let reply = AssistantReply {
                 text: format!("set env ok: {key}"),
                 thinking: None,
+                control: None,
             };
             let encoded_reply = match encode_ipc_line(&encode_assistant_reply(&reply)) {
                 Ok(reply) => reply,
@@ -118,6 +120,38 @@ pub fn run() {
             continue;
         }
 
+        if let Some((continuation_payload, tool_result)) = parse_resume_control(message) {
+            let reply = match BottyBody::from_setup(requested_role().as_str())
+                .and_then(|body| body.resume_tool_call(&continuation_payload, &tool_result))
+            {
+                Ok(reply) => reply,
+                Err(err) => {
+                    eprintln!("Botty-Guy failed to resume tool call: {err}");
+                    AssistantReply {
+                        text: err.to_string(),
+                        thinking: None,
+                        control: None,
+                    }
+                }
+            };
+            let encoded_reply = match encode_ipc_line(&encode_assistant_reply(&reply)) {
+                Ok(reply) => reply,
+                Err(err) => {
+                    eprintln!("Botty-Guy failed to encode resume output: {err}");
+                    break;
+                }
+            };
+            if let Err(err) = writeln!(stdout, "{encoded_reply}") {
+                eprintln!("Botty-Guy failed to write resume output: {err}");
+                break;
+            }
+            if let Err(err) = stdout.flush() {
+                eprintln!("Botty-Guy failed to flush resume output: {err}");
+                break;
+            }
+            continue;
+        }
+
         // Rebuild the body for each message so skill/config/env changes take effect
         // without requiring a worker restart.
         let reply = match BottyBody::from_setup(requested_role().as_str()).and_then(|body| body.think(message)) {
@@ -127,6 +161,7 @@ pub fn run() {
                 AssistantReply {
                     text: err.to_string(),
                     thinking: None,
+                    control: None,
                 }
             }
         };
@@ -344,6 +379,12 @@ struct InboundMessage {
     text: String,
 }
 
+struct PendingLeaderReply {
+    target: String,
+    user_id: String,
+    job_message_id: String,
+}
+
 trait ChatbotProviderPlugin {
     fn provider_name(&self) -> &'static str;
     fn poll_interval(&self) -> Duration;
@@ -358,9 +399,12 @@ trait ChatbotProviderPlugin {
 fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
     let mut seen = HashSet::new();
     let mut seen_order = VecDeque::new();
+    let mut pending_replies = Vec::new();
     let mut initialized = false;
 
     loop {
+        flush_pending_leader_replies(plugin, &mut pending_replies, &mut seen, &mut seen_order);
+
         let messages = match plugin.fetch_messages() {
             Ok(messages) => messages,
             Err(err) => {
@@ -410,48 +454,148 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
             }
             let prefixed = format!("{}: {normalized}", plugin.provider_name());
 
-            if plugin.provider_name() == "telegram" {
-                match plugin.send_reply(&message.target, "Get ur order!") {
-                    Ok(Some(sent_id)) => {
-                        let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
-                    }
-                    Ok(None) => {}
-                    Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
+            match plugin.send_reply(&message.target, "已经将任务交给小弟执行") {
+                Ok(Some(sent_id)) => {
+                    let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
                 }
+                Ok(None) => {}
+                Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
             }
 
-            let reply = match ask_leader_guy(plugin.provider_name(), user_id, &prefixed) {
-                Ok(reply) => reply,
-                Err(err) => {
-                    eprintln!("{} ask leader failed: {err}", plugin.provider_name());
-                    err.to_string()
-                }
-            };
-            if plugin.provider_name() == "telegram" {
-                if !reply.trim().is_empty() {
-                    match plugin.send_reply(&message.target, &reply) {
-                        Ok(Some(sent_id)) => {
-                            let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
+            let job_message_id =
+                match enqueue_leader_guy(plugin.provider_name(), user_id, &message.target, &prefixed)
+                {
+                    Ok(job_message_id) => job_message_id,
+                    Err(err) => {
+                        eprintln!("{} enqueue leader failed: {err}", plugin.provider_name());
+                        let reply = err.to_string();
+                        let _ = persist_chat_message(
+                            "assistant",
+                            plugin.provider_name(),
+                            user_id,
+                            &reply,
+                        );
+                        if !reply.trim().is_empty() {
+                            match plugin.send_reply(&message.target, &reply) {
+                                Ok(Some(sent_id)) => {
+                                    let _ =
+                                        remember_message_id(&mut seen, &mut seen_order, &sent_id);
+                                }
+                                Ok(None) => {}
+                                Err(err) => eprintln!(
+                                    "{} send message failed: {err}",
+                                    plugin.provider_name()
+                                ),
+                            }
                         }
-                        Ok(None) => {}
-                        Err(err) => {
-                            eprintln!("{} send message failed: {err}", plugin.provider_name())
-                        }
+                        continue;
                     }
-                }
-            } else {
-                match plugin.send_reply(&message.target, &reply) {
-                    Ok(Some(sent_id)) => {
-                        let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
-                    }
-                    Ok(None) => {}
-                    Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
-                }
-            }
+                };
+            pending_replies.push(PendingLeaderReply {
+                target: message.target.clone(),
+                user_id: user_id.to_string(),
+                job_message_id,
+            });
         }
 
+        flush_pending_leader_replies(plugin, &mut pending_replies, &mut seen, &mut seen_order);
         thread::sleep(plugin.poll_interval());
     }
+}
+
+fn flush_pending_leader_replies(
+    plugin: &mut impl ChatbotProviderPlugin,
+    pending_replies: &mut Vec<PendingLeaderReply>,
+    seen: &mut HashSet<String>,
+    seen_order: &mut VecDeque<String>,
+) {
+    let mut index = 0usize;
+    while index < pending_replies.len() {
+        let outcome = match try_load_leader_job_outcome(&pending_replies[index].job_message_id) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                eprintln!(
+                    "{} load leader job {} failed: {err}",
+                    plugin.provider_name(),
+                    pending_replies[index].job_message_id
+                );
+                index += 1;
+                continue;
+            }
+        };
+
+        let Some(reply) = outcome else {
+            index += 1;
+            continue;
+        };
+
+        let pending = pending_replies.remove(index);
+        let _ = persist_chat_message("assistant", plugin.provider_name(), &pending.user_id, &reply);
+        if reply.trim().is_empty() {
+            continue;
+        }
+        match plugin.send_reply(&pending.target, &reply) {
+            Ok(Some(sent_id)) => {
+                let _ = remember_message_id(seen, seen_order, &sent_id);
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
+        }
+    }
+}
+
+fn try_load_leader_job_outcome(message_id: &str) -> io::Result<Option<String>> {
+    let root = botty_root_dir();
+    match botty_jobs::load_job(&root, BOTTY_GUY_DEFAULT_ROLE, JobState::Done, message_id) {
+        Ok(job) => return Ok(Some(job.result_text.unwrap_or_default())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+
+    match botty_jobs::load_job(&root, BOTTY_GUY_DEFAULT_ROLE, JobState::Failed, message_id) {
+        Ok(job) => Ok(Some(
+            job.last_error
+                .unwrap_or_else(|| "leader job failed".to_string()),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn enqueue_leader_guy(
+    source: &str,
+    user_id: &str,
+    target: &str,
+    message: &str,
+) -> io::Result<String> {
+    let stream = UnixStream::connect(crate::botty_boss::chat_socket_path())?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut writer = BufWriter::new(stream);
+    let payload = json!({
+        "source": source,
+        "user_id": user_id,
+        "target": target,
+        "message": message,
+    })
+    .to_string();
+    let control = format!("{CONTROL_PREFIX}enqueue-external|{payload}");
+    writeln!(
+        writer,
+        "{}",
+        encode_ipc_line(&encode_meta_message(source, user_id, &control))?
+    )?;
+    writer.flush()?;
+
+    let mut reply = String::new();
+    let bytes = reader.read_line(&mut reply)?;
+    if bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "Botty-Boss closed socket",
+        ));
+    }
+    let decoded = decode_ipc_line(reply.trim_end())?;
+    Ok(decoded)
 }
 
 struct TelegramProviderPlugin {
@@ -875,33 +1019,11 @@ fn send_feishu_message(
     Ok(parse_string_field(&body, "\"message_id\""))
 }
 
-fn ask_leader_guy(source: &str, user_id: &str, message: &str) -> io::Result<String> {
-    let stream = UnixStream::connect(crate::botty_boss::chat_socket_path())?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = BufWriter::new(stream);
-    writeln!(
-        writer,
-        "{}",
-        encode_ipc_line(&encode_meta_message(source, user_id, message))?
-    )?;
-    writer.flush()?;
-
-    let mut reply = String::new();
-    let bytes = reader.read_line(&mut reply)?;
-    if bytes == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "Botty-Boss closed socket",
-        ));
-    }
-    let decoded = decode_ipc_line(reply.trim_end())?;
-    Ok(decoded)
-}
-
 fn encode_assistant_reply(reply: &AssistantReply) -> String {
     json!({
         "text": reply.text,
         "thinking": reply.thinking,
+        "control": reply.control,
     })
     .to_string()
 }
@@ -920,6 +1042,16 @@ fn parse_set_env_control(message: &str) -> Option<(String, String)> {
         return None;
     }
     Some((key.to_string(), value))
+}
+
+fn parse_resume_control(message: &str) -> Option<(String, String)> {
+    let payload = message.strip_prefix(CONTROL_PREFIX)?;
+    let payload = payload.strip_prefix("resume|")?;
+    let value: Value = serde_json::from_str(payload).ok()?;
+    Some((
+        value.get("continuation_payload")?.as_str()?.to_string(),
+        value.get("tool_result")?.as_str()?.to_string(),
+    ))
 }
 
 fn encode_ipc_line(value: &str) -> io::Result<String> {

@@ -8,6 +8,7 @@ use crate::llm_provider::{
 };
 use crate::prompt;
 use crate::skill::{build_skill, BottySkill};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -19,10 +20,32 @@ const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
 const MAX_TOOL_CALL_STEPS: usize = 8;
+const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
 
 pub struct AssistantReply {
     pub text: String,
     pub thinking: Option<String>,
+    pub control: Option<AssistantControl>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AssistantControl {
+    AwaitDelegation {
+        child_role: String,
+        child_message_id: String,
+        continuation_payload: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ContinuationState {
+    messages: Vec<ProviderMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AsyncDelegationResult {
+    child_role: String,
+    child_message_id: String,
 }
 
 enum RoleInfo {
@@ -89,18 +112,21 @@ impl BottyBody {
             return Ok(AssistantReply {
                 text: self.execute_tool(name, &argument)?,
                 thinking: None,
+                control: None,
             });
         }
         if let Some(payload) = parse_special_command_argument(input, REMINDER_TRIGGER_COMMAND) {
             return Ok(AssistantReply {
                 text: self.think_due_reminder(payload)?,
                 thinking: None,
+                control: None,
             });
         }
         if matches_special_command(input, "/remember") {
             return Ok(AssistantReply {
                 text: self.remember_deep_memory()?,
                 thinking: None,
+                control: None,
             });
         }
 
@@ -113,9 +139,23 @@ impl BottyBody {
             ProviderResponse::Text(reply) => Ok(AssistantReply {
                 text: reply.text,
                 thinking: reply.thinking,
+                control: None,
             }),
             ProviderResponse::ToolUse(tool_use) => self.complete_tool_call(input, &tools, tool_use),
         }
+    }
+
+    pub fn resume_tool_call(&self, continuation_payload: &str, tool_result: &str) -> io::Result<AssistantReply> {
+        let state: ContinuationState = serde_json::from_str(continuation_payload).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse continuation payload failed: {err}"),
+            )
+        })?;
+        let tools = self.tool_definitions();
+        let system_prompt = self.build_system_prompt()?;
+        let conversation = state.messages;
+        self.continue_tool_call(&system_prompt, &tools, conversation, tool_result.to_string())
     }
 
     fn complete_tool_call(
@@ -125,25 +165,84 @@ impl BottyBody {
         first_tool_use: ProviderToolUse,
     ) -> io::Result<AssistantReply> {
         let system_prompt = self.build_system_prompt()?;
-        let mut conversation = vec![ProviderMessage::UserText(input.to_string())];
-        let mut tool_use = first_tool_use;
+        let conversation = vec![ProviderMessage::UserText(input.to_string())];
+        self.run_tool_call_loop(&system_prompt, tools, conversation, first_tool_use)
+    }
 
+    fn continue_tool_call(
+        &self,
+        system_prompt: &str,
+        tools: &[ProviderToolDefinition],
+        mut conversation: Vec<ProviderMessage>,
+        tool_result: String,
+    ) -> io::Result<AssistantReply> {
+        let Some(ProviderMessage::AssistantToolUse { assistant_content_json }) = conversation.pop()
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "continuation payload missing trailing assistant tool use",
+            ));
+        };
+        let tool_use_id = extract_tool_use_id(&assistant_content_json)?;
+        conversation.push(ProviderMessage::AssistantToolUse {
+            assistant_content_json,
+        });
+        conversation.push(ProviderMessage::UserToolResult {
+            tool_use_id,
+            content: tool_result,
+        });
+
+        match self.brain.think(system_prompt, &conversation, tools)? {
+            ProviderResponse::Text(reply) => Ok(AssistantReply {
+                text: reply.text,
+                thinking: reply.thinking,
+                control: None,
+            }),
+            ProviderResponse::ToolUse(tool_use) => {
+                self.run_tool_call_loop(system_prompt, tools, conversation, tool_use)
+            }
+        }
+    }
+
+    fn run_tool_call_loop(
+        &self,
+        system_prompt: &str,
+        tools: &[ProviderToolDefinition],
+        mut conversation: Vec<ProviderMessage>,
+        mut tool_use: ProviderToolUse,
+    ) -> io::Result<AssistantReply> {
         for _ in 0..MAX_TOOL_CALL_STEPS {
             let tool_result =
                 self.execute_tool(tool_use.name.as_str(), tool_use.input_json.as_str())?;
             conversation.push(ProviderMessage::AssistantToolUse {
                 assistant_content_json: tool_use.assistant_content_json,
             });
+            if let Some(async_delegation) = parse_async_delegation_result(&tool_result)? {
+                let continuation_payload = serde_json::to_string(&ContinuationState {
+                    messages: conversation.clone(),
+                })
+                .map_err(|err| io::Error::other(format!("serialize continuation failed: {err}")))?;
+                return Ok(AssistantReply {
+                    text: String::new(),
+                    thinking: None,
+                    control: Some(AssistantControl::AwaitDelegation {
+                        child_role: async_delegation.child_role,
+                        child_message_id: async_delegation.child_message_id,
+                        continuation_payload,
+                    }),
+                });
+            }
             conversation.push(ProviderMessage::UserToolResult {
                 tool_use_id: tool_use.id,
                 content: tool_result,
             });
 
-            match self.brain.think(&system_prompt, &conversation, tools)? {
+            match self.brain.think(system_prompt, &conversation, tools)? {
                 ProviderResponse::Text(reply) => {
                     return Ok(AssistantReply {
                         text: reply.text,
                         thinking: reply.thinking,
+                        control: None,
                     });
                 }
                 ProviderResponse::ToolUse(next_tool_use) => {
@@ -315,6 +414,45 @@ fn parse_debug_tool_call(input: &str) -> Option<(&str, String)> {
         return None;
     }
     Some((name.trim(), argument.to_string()))
+}
+
+fn parse_async_delegation_result(value: &str) -> io::Result<Option<AsyncDelegationResult>> {
+    let payload = match value.strip_prefix(ASYNC_DELEGATION_PREFIX) {
+        Some(payload) => payload,
+        None => return Ok(None),
+    };
+    let parsed = serde_json::from_str(payload).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse async delegation payload failed: {err}"),
+        )
+    })?;
+    Ok(Some(parsed))
+}
+
+fn extract_tool_use_id(assistant_content_json: &str) -> io::Result<String> {
+    let value: Value = serde_json::from_str(assistant_content_json).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse assistant tool use content failed: {err}"),
+        )
+    })?;
+
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        return Ok(id.to_string());
+    }
+    if let Some(content) = value.as_array() {
+        for item in content {
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                return Ok(id.to_string());
+            }
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "assistant tool use content missing id",
+    ))
 }
 
 fn matches_special_command(input: &str, command: &str) -> bool {

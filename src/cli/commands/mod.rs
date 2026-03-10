@@ -8,4 +8,5 @@ pub mod stop;
 pub mod tui;
 pub mod update;
 pub mod version;
+pub mod watchjobs;
 pub mod webui;

@@ -1,13 +1,14 @@
 use crate::botty_guy::{
-    delegated_role_descriptions, delegated_role_exists, delegated_role_names,
-    delegated_task_prompt, BOTTY_GUY_ROLE_ENV,
+    delegated_role_descriptions, delegated_role_exists, delegated_role_names, delegated_task_prompt,
 };
 use crate::skill::BottySkill;
 use serde_json::Value;
 use std::env;
 use std::io;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::process::{Command, Stdio};
+use std::os::unix::net::UnixStream;
+
+const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
 
 pub struct BuildinLeaderSkill;
 
@@ -73,51 +74,47 @@ impl BottySkill for BuildinLeaderSkill {
 }
 
 fn run_delegated_guy(role: &str, prompt: &str) -> io::Result<String> {
-    let exe = env::current_exe()?;
-    let mut child = Command::new(exe)
-        .arg("--guy")
-        .env(BOTTY_GUY_ROLE_ENV, role)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+    let parent_message_id = env::var("BOTTY_CURRENT_JOB_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| io::Error::other("leader delegation missing BOTTY_CURRENT_JOB_ID"))?;
+    let source = env::var("BOTTY_CURRENT_JOB_SOURCE").unwrap_or_else(|_| "leader".to_string());
+    let user_id = env::var("BOTTY_CURRENT_JOB_USER_ID").unwrap_or_else(|_| "leader".to_string());
 
-    let mut stdin = BufWriter::new(
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("failed to capture delegated guy stdin"))?,
-    );
-    let mut stdout = BufReader::new(
-        child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("failed to capture delegated guy stdout"))?,
-    );
-
-    writeln!(stdin, "{}", encode_ipc_line(prompt)?)?;
+    let stream = UnixStream::connect(crate::botty_boss::chat_socket_path())?;
+    let read_stream = stream.try_clone()?;
+    let mut stdin = BufWriter::new(stream);
+    let mut stdout = BufReader::new(read_stream);
+    let control = serde_json::json!({
+        "parent_message_id": parent_message_id,
+        "role": role,
+        "payload": prompt,
+        "source": source,
+        "user_id": user_id,
+    });
+    writeln!(
+        stdin,
+        "{}",
+        encode_ipc_line(&format!("__botty_control__delegate|{}", control))?
+    )?;
     stdin.flush()?;
-    drop(stdin);
 
     let mut response = String::new();
     let bytes = stdout.read_line(&mut response)?;
     if bytes == 0 {
-        let status = child.wait()?;
         return Err(io::Error::new(
             io::ErrorKind::BrokenPipe,
-            format!("delegated guy exited before replying: {status}"),
+            "boss closed delegation socket before replying",
         ));
     }
 
     let decoded = decode_ipc_line(response.trim_end())?;
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "delegated guy exited with status {status}"
-        )));
-    }
-
-    parse_assistant_text(&decoded)
+    let payload = serde_json::json!({
+        "child_role": role,
+        "child_message_id": decoded,
+    });
+    Ok(format!("{ASYNC_DELEGATION_PREFIX}{payload}"))
 }
 
 fn required_string<'a>(input: &'a Value, key: &str) -> io::Result<&'a str> {
@@ -145,18 +142,4 @@ fn decode_ipc_line(value: &str) -> io::Result<String> {
             format!("decode ipc line failed: {err}"),
         )
     })
-}
-
-fn parse_assistant_text(decoded: &str) -> io::Result<String> {
-    let value: Value = serde_json::from_str(decoded).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("parse delegated guy reply failed: {err}"),
-        )
-    })?;
-    Ok(value
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string())
 }

@@ -1,5 +1,11 @@
-use serde_json::{self, json, Value};
+use crate::botty_jobs::{
+    self, enqueue_job, idle_timeout, job_age, list_roles, load_job, new_delegated_job,
+    new_external_job, read_worker_pid, role_snapshot, update_job_state, wait_job_terminal,
+    write_worker_state, JobState,
+};
+use serde_json::{self, Value};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::env;
 use std::ffi::CString;
 use std::fs;
@@ -18,8 +24,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const DOWNLOAD_URL: &str = env!("BOTTY_DOWNLOAD_URL");
 const LATEST_RELEASE_API_URL: &str = env!("BOTTY_LATEST_RELEASE_API_URL");
@@ -191,6 +196,7 @@ pub fn stop_all_report() -> io::Result<String> {
     let _ = fs::remove_file(chat_socket_path());
     let _ = fs::remove_file(guy_role_config_file());
     let _ = fs::remove_file(crond_pid_file());
+    let _ = fs::remove_dir_all(botty_jobs::jobs_root(&botty_root_dir()));
     if forced == 0 {
         Ok("Stopped Botty-Boss, Botty-Guy, and Botty-crond".to_string())
     } else {
@@ -217,6 +223,70 @@ pub fn print_status() -> io::Result<()> {
     println!("Crond process count: {}", snapshot.crond_pids.len());
     println!("Crond pids: {}", format_pid_list(&snapshot.crond_pids));
     Ok(())
+}
+
+pub fn print_watchjobs() -> io::Result<()> {
+    print!("{}", render_watchjobs()?);
+    Ok(())
+}
+
+pub fn render_watchjobs() -> io::Result<String> {
+    let root = botty_root_dir();
+    let mut roles = list_roles(&root)?;
+    if !roles.iter().any(|role| role == GUY_DEFAULT_ROLE) {
+        roles.insert(0, GUY_DEFAULT_ROLE.to_string());
+    }
+    let mut output = String::new();
+    if roles.is_empty() {
+        output.push_str("No job queues found\n");
+        return Ok(output);
+    }
+
+    let now = botty_jobs::now_ms();
+    for role in roles {
+        let worker_pid = read_worker_pid(&root, &role)?;
+        let snapshot = role_snapshot(&root, &role, worker_pid)?;
+        output.push_str(&format!(
+            "[role={}] queued={} running={} waiting={} done={} failed={} worker_pid={}",
+            snapshot.role,
+            snapshot.counts.queued,
+            snapshot.counts.running,
+            snapshot.counts.waiting,
+            snapshot.counts.done,
+            snapshot.counts.failed,
+            snapshot
+                .worker_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ));
+        output.push('\n');
+        if let Some(job) = snapshot.current_job {
+            output.push_str(&format!(
+                "  current message_id={} trace_id={} age={} from={} kind={}",
+                job.message_id,
+                job.trace_id,
+                botty_jobs::format_duration(job_age(now, &job)),
+                job.from_role,
+                job.kind
+            ));
+            output.push('\n');
+        }
+        for job in snapshot.queued_jobs.iter().take(5) {
+            output.push_str(&format!(
+                "  queued  message_id={} trace_id={} wait={} from={} kind={}",
+                job.message_id,
+                job.trace_id,
+                botty_jobs::format_duration(job_age(now, job)),
+                job.from_role,
+                job.kind
+            ));
+            output.push('\n');
+        }
+        if let Some(error) = snapshot.recent_error {
+            output.push_str(&format!("  recent_error {error}\n"));
+        }
+    }
+    Ok(output)
 }
 
 pub fn interrupt_active_request() -> io::Result<()> {
@@ -606,6 +676,10 @@ fn find_child_pids(parent_pid: i32) -> io::Result<Vec<i32>> {
     Ok(pids)
 }
 
+enum DispatcherCommand {
+    EnsureRole(String),
+}
+
 pub fn run_supervisor() {
     let _pid_guard = match acquire_boss_pid_guard() {
         Ok(Some(guard)) => guard,
@@ -630,8 +704,14 @@ pub fn run_supervisor() {
         }
     };
 
-    let (chat_tx, chat_rx) = mpsc::channel::<QueuedChatRequest>();
-    let _chat_worker = thread::spawn(move || run_chat_worker(chat_rx));
+    let root = botty_root_dir();
+    let jobs_root = botty_jobs::jobs_root(&root);
+    let _ = fs::create_dir_all(&jobs_root);
+    let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatcherCommand>();
+    let dispatch_root = root.clone();
+    let dispatch_loop_tx = dispatch_tx.clone();
+    let _dispatcher =
+        thread::spawn(move || run_dispatcher(dispatch_root, dispatch_rx, dispatch_loop_tx));
     let config = load_setup_config().unwrap_or_default();
     let _input_bridges = spawn_enabled_input_processes(&config);
     let _crond_bridge = spawn_crond_process();
@@ -639,9 +719,9 @@ pub fn run_supervisor() {
     loop {
         match _socket_guard.listener.accept() {
             Ok((stream, _)) => {
-                let chat_tx = chat_tx.clone();
+                let dispatch_tx = dispatch_tx.clone();
                 thread::spawn(move || {
-                    if let Err(err) = handle_chat_client(stream, chat_tx) {
+                    if let Err(err) = handle_chat_client(stream, dispatch_tx) {
                         boss_log_error(&format!("Botty-Boss failed to handle chat session: {err}"));
                     }
                 });
@@ -649,6 +729,193 @@ pub fn run_supervisor() {
             Err(err) => boss_log_error(&format!("Botty-Boss accept error: {err}")),
         }
     }
+}
+
+fn run_dispatcher(
+    root: PathBuf,
+    dispatch_rx: Receiver<DispatcherCommand>,
+    dispatch_tx: Sender<DispatcherCommand>,
+) {
+    let mut active_roles: HashMap<String, thread::JoinHandle<()>> = HashMap::new();
+    while let Ok(command) = dispatch_rx.recv() {
+        match command {
+            DispatcherCommand::EnsureRole(role) => {
+                let dead = active_roles
+                    .get(&role)
+                    .map(thread::JoinHandle::is_finished)
+                    .unwrap_or(false);
+                if dead {
+                    let _ = active_roles.remove(&role);
+                }
+                if active_roles.contains_key(&role) {
+                    continue;
+                }
+                let role_root = root.clone();
+                let role_name = role.clone();
+                let role_dispatch_tx = dispatch_tx.clone();
+                let handle =
+                    thread::spawn(move || run_role_processor(role_root, role_name, role_dispatch_tx));
+                active_roles.insert(role, handle);
+            }
+        }
+    }
+}
+
+fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<DispatcherCommand>) {
+    let mut bridge: Option<GuyBridge> = None;
+    let mut last_active = Instant::now();
+
+    loop {
+        let next_job = match botty_jobs::next_queued_job(&root, &role) {
+            Ok(job) => job,
+            Err(err) => {
+                boss_log_error(&format!("Botty-Boss failed to read queue for role {role}: {err}"));
+                thread::sleep(Duration::from_millis(300));
+                continue;
+            }
+        };
+
+        let Some(mut job) = next_job else {
+            if role != GUY_DEFAULT_ROLE && last_active.elapsed() >= idle_timeout() {
+                if let Some(live) = bridge.take() {
+                    let _ = write_worker_state(&root, &role, None, None, None);
+                    drop(live);
+                }
+                return;
+            }
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        };
+
+        if bridge.is_none() {
+            match GuyBridge::spawn(&role) {
+                Ok(live) => {
+                    let pid = i32::try_from(live.child.id()).ok();
+                    let _ = write_worker_state(&root, &role, pid, None, None);
+                    bridge = Some(live);
+                }
+                Err(err) => {
+                    job.last_error = Some(format!("spawn worker failed: {err}"));
+                    job.completed_at_ms = Some(botty_jobs::now_ms());
+                    let _ = update_job_state(&root, &role, JobState::Queued, JobState::Failed, &mut job);
+                    let _ = write_worker_state(&root, &role, None, None, job.last_error.as_deref());
+                    continue;
+                }
+            }
+        }
+
+        job.started_at_ms = Some(botty_jobs::now_ms());
+        let pid = bridge
+            .as_ref()
+            .and_then(|live| i32::try_from(live.child.id()).ok());
+        job.worker_pid = pid;
+        let _ = update_job_state(&root, &role, JobState::Queued, JobState::Running, &mut job);
+        let _ = write_worker_state(&root, &role, pid, Some(&job.message_id), None);
+
+        if let Some(live) = bridge.as_mut() {
+            let _ = live.set_env("BOTTY_CURRENT_JOB_ID", &job.message_id);
+            let _ = live.set_env("BOTTY_CURRENT_JOB_SOURCE", &job.source);
+            let _ = live.set_env("BOTTY_CURRENT_JOB_USER_ID", &job.user_id);
+        }
+
+        let request_message = if let Some(control) = build_resume_control_message(&job) {
+            control
+        } else {
+            job.payload.clone()
+        };
+        let response = bridge
+            .as_mut()
+            .expect("worker bridge must exist")
+            .ask(&request_message);
+        match response {
+            Ok(reply) => {
+                if let Some(crate::botty_body::AssistantControl::AwaitDelegation {
+                    child_message_id,
+                    continuation_payload,
+                    ..
+                }) = reply.control
+                {
+                    job.continuation_payload = Some(continuation_payload);
+                    job.awaiting_message_id = Some(child_message_id);
+                    job.continuation_result = None;
+                    job.result_text = None;
+                    job.completed_at_ms = None;
+                    let _ =
+                        update_job_state(&root, &role, JobState::Running, JobState::Waiting, &mut job);
+                    let _ = write_worker_state(&root, &role, pid, None, None);
+                } else {
+                    job.result_text = Some(reply.text.clone());
+                    job.completed_at_ms = Some(botty_jobs::now_ms());
+                    let _ =
+                        update_job_state(&root, &role, JobState::Running, JobState::Done, &mut job);
+                    let _ = write_worker_state(&root, &role, pid, None, None);
+                    let _ = try_resume_parent_job(&root, &job, &dispatch_tx);
+                }
+            }
+            Err(err) => {
+                job.last_error = Some(err.to_string());
+                job.completed_at_ms = Some(botty_jobs::now_ms());
+                let _ = update_job_state(&root, &role, JobState::Running, JobState::Failed, &mut job);
+                let _ = write_worker_state(&root, &role, None, None, job.last_error.as_deref());
+                let _ = try_resume_parent_job(&root, &job, &dispatch_tx);
+                bridge = None;
+            }
+        }
+        last_active = Instant::now();
+    }
+}
+
+fn build_resume_control_message(job: &crate::botty_jobs::QueueJob) -> Option<String> {
+    let continuation_payload = job.continuation_payload.as_ref()?;
+    let tool_result = job.continuation_result.as_ref()?;
+    if job.awaiting_message_id.is_some() {
+        return None;
+    }
+    Some(format!(
+        "{CONTROL_PREFIX}resume|{}",
+        serde_json::json!({
+            "continuation_payload": continuation_payload,
+            "tool_result": tool_result,
+        })
+    ))
+}
+
+fn try_resume_parent_job(
+    root: &PathBuf,
+    child_job: &crate::botty_jobs::QueueJob,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<()> {
+    let Some(parent_message_id) = child_job.parent_message_id.as_deref() else {
+        return Ok(());
+    };
+
+    let mut parent = match load_job(root, &child_job.from_role, JobState::Waiting, parent_message_id) {
+        Ok(job) => job,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    if parent.awaiting_message_id.as_deref() != Some(child_job.message_id.as_str()) {
+        return Ok(());
+    }
+
+    let tool_result = match child_job.state {
+        JobState::Done => child_job.result_text.clone().unwrap_or_default(),
+        JobState::Failed => child_job
+            .last_error
+            .clone()
+            .unwrap_or_else(|| format!("delegated job failed for role {}", child_job.to_role)),
+        _ => return Ok(()),
+    };
+
+    parent.awaiting_message_id = None;
+    parent.continuation_result = Some(tool_result);
+    parent.completed_at_ms = None;
+    update_job_state(root, &child_job.from_role, JobState::Waiting, JobState::Queued, &mut parent)?;
+    dispatch_tx
+        .send(DispatcherCommand::EnsureRole(child_job.from_role.clone()))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dispatcher is not available"))?;
+    Ok(())
 }
 
 struct ChatSocketGuard {
@@ -951,7 +1218,7 @@ impl Drop for GuyBridge {
     }
 }
 
-fn handle_chat_client(stream: UnixStream, chat_tx: Sender<QueuedChatRequest>) -> io::Result<()> {
+fn handle_chat_client(stream: UnixStream, dispatch_tx: Sender<DispatcherCommand>) -> io::Result<()> {
     let read_stream = stream.try_clone()?;
     let mut reader = BufReader::new(read_stream);
     let mut writer = BufWriter::new(stream);
@@ -974,94 +1241,38 @@ fn handle_chat_client(stream: UnixStream, chat_tx: Sender<QueuedChatRequest>) ->
             continue;
         }
 
-        if !is_control_message(&incoming.message) {
+        let response = if let Some((key, value)) = parse_set_env_control(&incoming.message) {
+            apply_set_env_control(&dispatch_tx, &key, &value)
+        } else if let Some(control) = parse_delegate_control(&incoming.message) {
+            handle_delegated_request(control, &dispatch_tx)
+        } else if let Some(control_incoming) =
+            parse_enqueue_external_control(&incoming.message, &incoming)
+        {
+            let _ = persist_chat_message(
+                "user",
+                &control_incoming.source,
+                &control_incoming.user_id,
+                &control_incoming.message,
+            );
+            enqueue_external_request(control_incoming, &dispatch_tx)
+        } else {
             let _ = persist_chat_message(
                 "user",
                 &incoming.source,
                 &incoming.user_id,
                 &incoming.message,
             );
-        }
-
-        let (reply_tx, reply_rx) = mpsc::channel();
-        chat_tx
-            .send(QueuedChatRequest { incoming, reply_tx })
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "chat worker is not available")
-            })?;
-        let response = reply_rx.recv().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "chat worker closed reply channel",
-            )
-        })??;
+            handle_external_request(incoming, &dispatch_tx)
+        }?;
 
         writeln!(writer, "{}", encode_ipc_line(&response)?)?;
         writer.flush()?;
     }
 }
 
-struct QueuedChatRequest {
-    incoming: IncomingChatMessage,
-    reply_tx: Sender<io::Result<String>>,
-}
-
 struct AssistantReply {
     text: String,
-    thinking: Option<String>,
-}
-
-fn run_chat_worker(chat_rx: Receiver<QueuedChatRequest>) {
-    let mut guy_bridge = match GuyBridge::spawn(GUY_DEFAULT_ROLE) {
-        Ok(bridge) => bridge,
-        Err(err) => {
-            boss_log_error(&format!("Botty-Boss failed to run Botty-Guy: {err}"));
-            return;
-        }
-    };
-
-    while let Ok(request) = chat_rx.recv() {
-        if let Some((key, value)) = parse_set_env_control(&request.incoming.message) {
-            let response = guy_bridge.set_env(&key, &value).map(|_| "ok".to_string());
-            let _ = request.reply_tx.send(response);
-            continue;
-        }
-
-        let leader_message = leader_message_for_source(&request.incoming);
-        let response = match guy_bridge.ask(&leader_message) {
-            Ok(response) => Ok(response),
-            Err(_) => {
-                if take_interrupt_flag() {
-                    let _ = request.reply_tx.send(Err(io::Error::new(
-                        io::ErrorKind::Interrupted,
-                        "Request interrupted.",
-                    )));
-                    if let Ok(bridge) = GuyBridge::spawn(GUY_DEFAULT_ROLE) {
-                        guy_bridge = bridge;
-                    }
-                    continue;
-                }
-                match GuyBridge::spawn(GUY_DEFAULT_ROLE).and_then(|bridge| {
-                    guy_bridge = bridge;
-                    guy_bridge.ask(&leader_message)
-                }) {
-                    Ok(response) => Ok(response),
-                    Err(err) => Err(err),
-                }
-            }
-        };
-
-        if let Ok(reply) = &response {
-            let _ = persist_chat_message(
-                "assistant",
-                &request.incoming.source,
-                &request.incoming.user_id,
-                &format_assistant_memory_message(reply),
-            );
-        }
-
-        let _ = request.reply_tx.send(response.map(|reply| reply.text));
-    }
+    control: Option<crate::botty_body::AssistantControl>,
 }
 
 const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
@@ -1069,7 +1280,116 @@ const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
 struct IncomingChatMessage {
     source: String,
     user_id: String,
+    target: Option<String>,
     message: String,
+}
+
+struct DelegatedControlRequest {
+    parent_message_id: String,
+    role: String,
+    payload: String,
+    source: String,
+    user_id: String,
+}
+
+fn apply_set_env_control(
+    dispatch_tx: &Sender<DispatcherCommand>,
+    key: &str,
+    value: &str,
+) -> io::Result<String> {
+    let mut entries = load_guy_env_map()?;
+    let mut updated = false;
+    for (saved_key, saved_value) in &mut entries {
+        if saved_key == key {
+            *saved_value = value.to_string();
+            updated = true;
+            break;
+        }
+    }
+    if !updated {
+        entries.push((key.to_string(), value.to_string()));
+    }
+    save_guy_env_map(&entries)?;
+    let _ = dispatch_tx.send(DispatcherCommand::EnsureRole(GUY_DEFAULT_ROLE.to_string()));
+    Ok("ok".to_string())
+}
+
+fn handle_external_request(
+    incoming: IncomingChatMessage,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<String> {
+    let root = botty_root_dir();
+    let leader_message = leader_message_for_source(&incoming);
+    let job = new_external_job(
+        &incoming.source,
+        &incoming.user_id,
+        incoming.target.clone(),
+        &leader_message,
+    );
+    enqueue_job(&root, &job)?;
+    dispatch_tx
+        .send(DispatcherCommand::EnsureRole(GUY_DEFAULT_ROLE.to_string()))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dispatcher is not available"))?;
+
+    let done_job = wait_job_terminal(&root, GUY_DEFAULT_ROLE, &job.message_id)?;
+    match done_job.state {
+        JobState::Done => {
+            let reply = done_job.result_text.unwrap_or_default();
+            let _ = persist_chat_message(
+                "assistant",
+                &incoming.source,
+                &incoming.user_id,
+                &reply,
+            );
+            Ok(reply)
+        }
+        JobState::Failed => Err(io::Error::other(
+            done_job
+                .last_error
+                .unwrap_or_else(|| "leader job failed".to_string()),
+        )),
+        _ => Err(io::Error::other("leader job did not reach a terminal state")),
+    }
+}
+
+fn enqueue_external_request(
+    incoming: IncomingChatMessage,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<String> {
+    let root = botty_root_dir();
+    let leader_message = leader_message_for_source(&incoming);
+    let job = new_external_job(
+        &incoming.source,
+        &incoming.user_id,
+        incoming.target,
+        &leader_message,
+    );
+    let message_id = job.message_id.clone();
+    enqueue_job(&root, &job)?;
+    dispatch_tx
+        .send(DispatcherCommand::EnsureRole(GUY_DEFAULT_ROLE.to_string()))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dispatcher is not available"))?;
+    Ok(message_id)
+}
+
+fn handle_delegated_request(
+    control: DelegatedControlRequest,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<String> {
+    let root = botty_root_dir();
+    let parent = load_job(&root, GUY_DEFAULT_ROLE, JobState::Running, &control.parent_message_id)?;
+    let job = new_delegated_job(
+        &parent,
+        &control.role,
+        &control.payload,
+        &control.source,
+        &control.user_id,
+    )?;
+    enqueue_job(&root, &job)?;
+    dispatch_tx
+        .send(DispatcherCommand::EnsureRole(control.role.clone()))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dispatcher is not available"))?;
+    Ok(job.message_id.clone())
 }
 
 fn leader_message_for_source(incoming: &IncomingChatMessage) -> String {
@@ -1079,10 +1399,6 @@ fn leader_message_for_source(incoming: &IncomingChatMessage) -> String {
     } else {
         format!("{prefix}{}", incoming.message)
     }
-}
-
-fn is_control_message(message: &str) -> bool {
-    message.starts_with(CONTROL_PREFIX)
 }
 
 fn parse_set_env_control(message: &str) -> Option<(String, String)> {
@@ -1097,19 +1413,32 @@ fn parse_set_env_control(message: &str) -> Option<(String, String)> {
     Some((key.to_string(), value))
 }
 
-fn take_interrupt_flag() -> bool {
-    let path = interrupt_flag_file();
-    if !path.exists() {
-        return false;
-    }
-    let _ = fs::remove_file(path);
-    true
+fn parse_delegate_control(message: &str) -> Option<DelegatedControlRequest> {
+    let payload = message.strip_prefix(CONTROL_PREFIX)?;
+    let payload = payload.strip_prefix("delegate|")?;
+    let value: Value = serde_json::from_str(payload).ok()?;
+    Some(DelegatedControlRequest {
+        parent_message_id: value.get("parent_message_id")?.as_str()?.to_string(),
+        role: value.get("role")?.as_str()?.to_string(),
+        payload: value.get("payload")?.as_str()?.to_string(),
+        source: value
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("leader")
+            .to_string(),
+        user_id: value
+            .get("user_id")
+            .and_then(Value::as_str)
+            .unwrap_or("leader")
+            .to_string(),
+    })
 }
 
 fn parse_chat_meta_message(raw: &str) -> IncomingChatMessage {
     let mut incoming = IncomingChatMessage {
         source: "unknown".to_string(),
         user_id: "unknown".to_string(),
+        target: None,
         message: raw.to_string(),
     };
 
@@ -1137,6 +1466,32 @@ fn parse_chat_meta_message(raw: &str) -> IncomingChatMessage {
     incoming
 }
 
+fn parse_enqueue_external_control(
+    message: &str,
+    defaults: &IncomingChatMessage,
+) -> Option<IncomingChatMessage> {
+    let payload = message.strip_prefix(CONTROL_PREFIX)?;
+    let payload = payload.strip_prefix("enqueue-external|")?;
+    let value: Value = serde_json::from_str(payload).ok()?;
+    Some(IncomingChatMessage {
+        source: value
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or(defaults.source.as_str())
+            .to_string(),
+        user_id: value
+            .get("user_id")
+            .and_then(Value::as_str)
+            .unwrap_or(defaults.user_id.as_str())
+            .to_string(),
+        target: value
+            .get("target")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        message: value.get("message")?.as_str()?.to_string(),
+    })
+}
+
 fn persist_chat_message(role: &str, source: &str, user_id: &str, message: &str) -> io::Result<()> {
     let year = local_time_format("%Y")?;
     let month_day = local_time_format("%m%d")?;
@@ -1151,15 +1506,6 @@ fn persist_chat_message(role: &str, source: &str, user_id: &str, message: &str) 
     let mut file = OpenOptions::new().create(true).append(true).open(target)?;
     file.write_all(line.as_bytes())?;
     Ok(())
-}
-
-fn format_assistant_memory_message(reply: &AssistantReply) -> String {
-    match reply.thinking.as_deref().map(str::trim) {
-        Some(thinking) if !thinking.is_empty() => {
-            format!("|{{'thinking': {}}} | {}", json!(thinking), reply.text)
-        }
-        _ => reply.text.clone(),
-    }
 }
 
 fn select_chat_memory_file(
@@ -1254,7 +1600,20 @@ fn decode_assistant_reply(raw: &str) -> io::Result<AssistantReply> {
         .get("thinking")
         .and_then(Value::as_str)
         .map(|value| value.to_string());
-    Ok(AssistantReply { text, thinking })
+    let control = match value.get("control") {
+        Some(Value::Null) | None => None,
+        Some(control_value) => Some(
+            serde_json::from_value::<crate::botty_body::AssistantControl>(control_value.clone())
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("decode assistant control failed: {err}"),
+                    )
+                })?,
+        ),
+    };
+    let _ = thinking;
+    Ok(AssistantReply { text, control })
 }
 
 fn runtime_suffix() -> &'static str {

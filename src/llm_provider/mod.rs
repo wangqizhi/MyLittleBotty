@@ -6,15 +6,18 @@ pub mod provider_minimax;
 pub mod provider_openai;
 
 use std::io;
+use serde::{Deserialize, Serialize};
 
 use crate::botty_brain::BrainConfig;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderToolDefinition {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema_json: &'static str,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderToolUse {
     pub id: String,
     pub name: String,
@@ -22,11 +25,13 @@ pub struct ProviderToolUse {
     pub assistant_content_json: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderTextResponse {
     pub text: String,
     pub thinking: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ProviderMessage {
     UserText(String),
     UserToolResult {
