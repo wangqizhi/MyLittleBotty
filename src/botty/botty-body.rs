@@ -1,7 +1,7 @@
 use crate::botty_brain::BottyBrain;
 use crate::botty_guy::{
-    expand_custom_role_skill_names, expand_role_skill_names,
-    resolve_role_spec_or_custom, BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
+    expand_custom_role_skill_names, expand_role_skill_names, resolve_role_spec_or_custom,
+    BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
 };
 use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
@@ -147,17 +147,27 @@ impl BottyBody {
         }
     }
 
-    pub fn resume_tool_call(&self, continuation_payload: &str, tool_result: &str) -> io::Result<AssistantReply> {
-        let state: ContinuationState = serde_json::from_str(continuation_payload).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("parse continuation payload failed: {err}"),
-            )
-        })?;
+    pub fn resume_tool_call(
+        &self,
+        continuation_payload: &str,
+        tool_result: &str,
+    ) -> io::Result<AssistantReply> {
+        let state: ContinuationState =
+            serde_json::from_str(continuation_payload).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("parse continuation payload failed: {err}"),
+                )
+            })?;
         let tools = self.tool_definitions();
         let system_prompt = self.build_system_prompt()?;
         let conversation = state.messages;
-        self.continue_tool_call(&system_prompt, &tools, conversation, tool_result.to_string())
+        self.continue_tool_call(
+            &system_prompt,
+            &tools,
+            conversation,
+            tool_result.to_string(),
+        )
     }
 
     fn complete_tool_call(
@@ -178,7 +188,9 @@ impl BottyBody {
         mut conversation: Vec<ProviderMessage>,
         tool_result: String,
     ) -> io::Result<AssistantReply> {
-        let Some(ProviderMessage::AssistantToolUse { assistant_content_json }) = conversation.pop()
+        let Some(ProviderMessage::AssistantToolUse {
+            assistant_content_json,
+        }) = conversation.pop()
         else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -597,7 +609,9 @@ fn render_tool_usage_guidance(skills: &[String]) -> String {
         lines.push("Use `list` when the user asks to list directory contents.".to_string());
     }
     if skills.iter().any(|skill| skill == "watch") {
-        lines.push("Use `watch` when the user asks to inspect, open, read, or show a file.".to_string());
+        lines.push(
+            "Use `watch` when the user asks to inspect, open, read, or show a file.".to_string(),
+        );
     }
     if skills.iter().any(|skill| skill == "write") {
         lines.push("Use `write` when the user asks to save, write, note, record, or persist text into a local file. Preserve the user's filename intent, but remember that write always remaps paths under the configured work dir.".to_string());

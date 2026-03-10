@@ -201,7 +201,12 @@ pub fn enqueue_job(root: &Path, job: &QueueJob) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub fn load_job(root: &Path, role: &str, state: JobState, message_id: &str) -> io::Result<QueueJob> {
+pub fn load_job(
+    root: &Path,
+    role: &str,
+    state: JobState,
+    message_id: &str,
+) -> io::Result<QueueJob> {
     read_job(&job_path(root, role, state, message_id))
 }
 

@@ -763,8 +763,9 @@ fn run_dispatcher(
                 let role_root = root.clone();
                 let role_name = role.clone();
                 let role_dispatch_tx = dispatch_tx.clone();
-                let handle =
-                    thread::spawn(move || run_role_processor(role_root, role_name, role_dispatch_tx));
+                let handle = thread::spawn(move || {
+                    run_role_processor(role_root, role_name, role_dispatch_tx)
+                });
                 active_roles.insert(role, handle);
             }
         }
@@ -779,7 +780,9 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
         let next_job = match botty_jobs::next_queued_job(&root, &role) {
             Ok(job) => job,
             Err(err) => {
-                boss_log_error(&format!("Botty-Boss failed to read queue for role {role}: {err}"));
+                boss_log_error(&format!(
+                    "Botty-Boss failed to read queue for role {role}: {err}"
+                ));
                 thread::sleep(Duration::from_millis(300));
                 continue;
             }
@@ -807,7 +810,13 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
                 Err(err) => {
                     job.last_error = Some(format!("spawn worker failed: {err}"));
                     job.completed_at_ms = Some(botty_jobs::now_ms());
-                    let _ = update_job_state(&root, &role, JobState::Queued, JobState::Failed, &mut job);
+                    let _ = update_job_state(
+                        &root,
+                        &role,
+                        JobState::Queued,
+                        JobState::Failed,
+                        &mut job,
+                    );
                     let _ = write_worker_state(&root, &role, None, None, job.last_error.as_deref());
                     continue;
                 }
@@ -836,7 +845,11 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
         let _ = append_guy_role_log(
             &role,
             "request",
-            &format!("job_id={} payload={}", job.message_id, sanitize_log_value(&request_message)),
+            &format!(
+                "job_id={} payload={}",
+                job.message_id,
+                sanitize_log_value(&request_message)
+            ),
         );
         let response = bridge
             .as_mut()
@@ -868,11 +881,17 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
                     job.continuation_payload = Some(continuation_payload);
                     job.awaiting_message_id = Some(child_message_id);
                     job.continuation_result = None;
-                    job.pending_user_notice = handoff_message.filter(|text| !text.trim().is_empty());
+                    job.pending_user_notice =
+                        handoff_message.filter(|text| !text.trim().is_empty());
                     job.result_text = None;
                     job.completed_at_ms = None;
-                    let _ =
-                        update_job_state(&root, &role, JobState::Running, JobState::Waiting, &mut job);
+                    let _ = update_job_state(
+                        &root,
+                        &role,
+                        JobState::Running,
+                        JobState::Waiting,
+                        &mut job,
+                    );
                     let _ = write_worker_state(&root, &role, pid, None, None);
                 } else {
                     job.result_text = Some(reply.text.clone());
@@ -887,11 +906,16 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
                 let _ = append_guy_role_log(
                     &role,
                     "error",
-                    &format!("job_id={} {}", job.message_id, sanitize_log_value(&err.to_string())),
+                    &format!(
+                        "job_id={} {}",
+                        job.message_id,
+                        sanitize_log_value(&err.to_string())
+                    ),
                 );
                 job.last_error = Some(err.to_string());
                 job.completed_at_ms = Some(botty_jobs::now_ms());
-                let _ = update_job_state(&root, &role, JobState::Running, JobState::Failed, &mut job);
+                let _ =
+                    update_job_state(&root, &role, JobState::Running, JobState::Failed, &mut job);
                 let _ = write_worker_state(&root, &role, None, None, job.last_error.as_deref());
                 let _ = try_resume_parent_job(&root, &job, &dispatch_tx);
                 bridge = None;
@@ -925,7 +949,12 @@ fn try_resume_parent_job(
         return Ok(());
     };
 
-    let mut parent = match load_job(root, &child_job.from_role, JobState::Waiting, parent_message_id) {
+    let mut parent = match load_job(
+        root,
+        &child_job.from_role,
+        JobState::Waiting,
+        parent_message_id,
+    ) {
         Ok(job) => job,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
@@ -948,7 +977,13 @@ fn try_resume_parent_job(
     parent.continuation_result = Some(tool_result);
     parent.pending_user_notice = None;
     parent.completed_at_ms = None;
-    update_job_state(root, &child_job.from_role, JobState::Waiting, JobState::Queued, &mut parent)?;
+    update_job_state(
+        root,
+        &child_job.from_role,
+        JobState::Waiting,
+        JobState::Queued,
+        &mut parent,
+    )?;
     dispatch_tx
         .send(DispatcherCommand::EnsureRole(child_job.from_role.clone()))
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dispatcher is not available"))?;
@@ -1174,13 +1209,18 @@ fn guy_env_config_file() -> PathBuf {
 }
 
 fn guy_role_log_file(role: &str) -> PathBuf {
-    botty_root_dir()
-        .join("log")
-        .join(format!("guy-role-{}{}.log", sanitize_role_for_filename(role), runtime_suffix()))
+    botty_root_dir().join("log").join(format!(
+        "guy-role-{}{}.log",
+        sanitize_role_for_filename(role),
+        runtime_suffix()
+    ))
 }
 
 fn render_watch_terminal_app() -> io::Result<String> {
-    let root = botty_root_dir().join("app").join("terminal").join("sessions");
+    let root = botty_root_dir()
+        .join("app")
+        .join("terminal")
+        .join("sessions");
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -1368,7 +1408,10 @@ impl Drop for GuyBridge {
     }
 }
 
-fn handle_chat_client(stream: UnixStream, dispatch_tx: Sender<DispatcherCommand>) -> io::Result<()> {
+fn handle_chat_client(
+    stream: UnixStream,
+    dispatch_tx: Sender<DispatcherCommand>,
+) -> io::Result<()> {
     let read_stream = stream.try_clone()?;
     let mut reader = BufReader::new(read_stream);
     let mut writer = BufWriter::new(stream);
@@ -1485,12 +1528,7 @@ fn handle_external_request(
     match done_job.state {
         JobState::Done => {
             let reply = done_job.result_text.unwrap_or_default();
-            let _ = persist_chat_message(
-                "assistant",
-                &incoming.source,
-                &incoming.user_id,
-                &reply,
-            );
+            let _ = persist_chat_message("assistant", &incoming.source, &incoming.user_id, &reply);
             Ok(reply)
         }
         JobState::Failed => Err(io::Error::other(
@@ -1498,7 +1536,9 @@ fn handle_external_request(
                 .last_error
                 .unwrap_or_else(|| "leader job failed".to_string()),
         )),
-        _ => Err(io::Error::other("leader job did not reach a terminal state")),
+        _ => Err(io::Error::other(
+            "leader job did not reach a terminal state",
+        )),
     }
 }
 
@@ -1527,7 +1567,12 @@ fn handle_delegated_request(
     dispatch_tx: &Sender<DispatcherCommand>,
 ) -> io::Result<String> {
     let root = botty_root_dir();
-    let parent = load_job(&root, GUY_DEFAULT_ROLE, JobState::Running, &control.parent_message_id)?;
+    let parent = load_job(
+        &root,
+        GUY_DEFAULT_ROLE,
+        JobState::Running,
+        &control.parent_message_id,
+    )?;
     let job = new_delegated_job(
         &parent,
         &control.role,

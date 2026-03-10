@@ -47,10 +47,7 @@ impl CustomSkill {
         if name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "custom skill file missing 'name' field: {}",
-                    path.display()
-                ),
+                format!("custom skill file missing 'name' field: {}", path.display()),
             ));
         }
 
@@ -61,21 +58,18 @@ impl CustomSkill {
             .to_string();
         let _usage = value.get("usage").and_then(Value::as_str).unwrap_or("");
 
-        let input_schema = value
-            .get("input_schema")
-            .cloned()
-            .unwrap_or_else(|| {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "input": {
-                            "type": "string",
-                            "description": "The input for this skill"
-                        }
-                    },
-                    "required": ["input"]
-                })
-            });
+        let input_schema = value.get("input_schema").cloned().unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "The input for this skill"
+                    }
+                },
+                "required": ["input"]
+            })
+        });
         let input_schema_json = serde_json::to_string(&input_schema).map_err(|err| {
             io::Error::other(format!("serialize custom skill input_schema failed: {err}"))
         })?;
@@ -147,10 +141,7 @@ fn execute_script_skill(skill_name: &str, input_json: &str) -> io::Result<String
     if !script_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!(
-                "custom skill script not found: {}",
-                script_path.display()
-            ),
+            format!("custom skill script not found: {}", script_path.display()),
         ));
     }
 

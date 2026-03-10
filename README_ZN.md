@@ -7,6 +7,7 @@ MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 
 - `2026-03-10`：新增基于队列的委派任务恢复机制。父任务在工具委派后可以进入等待态，子任务完成后自动恢复，并可通过 `mylittlebotty watchjobs` 观察队列状态。
 - `2026-03-10`：新增内置 `terminal` skill、`coder` 角色、ACP 终端会话管理，以及基于 PTY 的编码代理执行能力，执行目录受当前 work dir 限制。
 - `2026-03-10`：新增 `mylittlebotty watchapp -n terminal`，可直接查看最新运行中的 terminal 会话输出。
+- `2026-03-10`：新增内置 `browser` skill、`info-searcher` 角色、基于 Chrome remote debugging 的浏览器会话、Telegram 截图附件回传，以及可配置的持久 Chrome profile 目录。
 - `2026-03-09`：发布 `0.0.9`。
 - `2026-03-09`：新增基于角色的 `Botty-Guy` 运行方式。默认 `leader` 角色可以把任务分派给 `paperwork` 和 `all-in-one` 子角色，并尽量缩小传递上下文。
 - `2026-03-09`：新增内置 `leader` skill 与角色专用系统提示词，任务分派和各角色职责变成显式机制。
@@ -70,6 +71,7 @@ TUI 内置命令：
 - `leader`：默认角色，保留记忆上下文，负责提醒协调和任务分派。
 - `paperwork`：面向文书类任务的轻量角色，使用更小的上下文执行。
 - `all-in-one`：兜底执行角色，可以直接使用通用内置工具。
+- `info-searcher`：面向网页浏览、在线检索和网页信息提取的浏览器角色。
 - `coder`：面向代码和仓库任务的角色，通过内置 `terminal` skill 驱动外部终端编码代理执行实际工作。
 
 分派能力由内置 `leader` skill 实现：
@@ -92,6 +94,7 @@ TUI 内置命令：
 - `crond`：查询、创建、编辑保存在 `~/.mylittlebotty/reminder.rec` 中的提醒任务。
 - `leader`：仅 `leader` 角色可用，用于把任务转交给其它角色专用的 `Botty-Guy` 子进程执行。
 - `terminal`：供 `coder` 角色和绑定它的自定义角色使用，可启动或继续一个基于 PTY 的编码代理会话，也可查询状态、读取 transcript、发送中断、终止、重启、列出活跃会话。
+- `browser`：供 `info-searcher` 角色和绑定它的自定义角色使用，可启动或复用一个 Chrome remote-debugging 会话，执行页面打开、快照抓取、点击、填表、页面 JavaScript 执行、元素等待和截图。
 
 ### 6. 委派任务队列与恢复
 
@@ -149,7 +152,15 @@ TUI 内置命令：
 - Codex 会话会以 `workspace-write` sandbox、`never` approval，并附带 `-C <work_dir>` 启动，因此执行范围限定在当前配置的工作目录内。
 - `mylittlebotty watchapp -n terminal` 会持续渲染最新一个运行中 terminal 会话的 transcript 尾部。
 
-### 11. 自更新
+### 11. Browser 浏览器代理集成
+
+- `browser` skill 会把会话运行在 `~/.mylittlebotty/app/browser/sessions/<session_id>/` 下。
+- 每个会话会保存 `session.json` 元数据、`transcript.log`，以及默认保存在会话目录里的截图文件；如果显式指定输出路径，则按指定位置保存。
+- 默认会启动一个可见的 Chrome 并开启 `--remote-debugging-port`；如果页面要求登录、验证码或 MFA，用户可以直接在该 Chrome 窗口内完成，然后继续复用同一会话。
+- 可通过 `browser.chrome.user_data_dir` 配置持久 Chrome user-data 目录，让登录状态跨 Botty 浏览器会话保留。
+- 当回复中带有浏览器截图附件标记时，Telegram 输出会自动走 `sendPhoto` 发送图片，而不是只返回本地文件路径。
+
+### 12. 自更新
 
 - `mylittlebotty update` 会检查 GitHub 最新 release。
 - 如果发现新版本，会提示确认后下载并替换本地二进制。
@@ -340,6 +351,9 @@ ai.provider.debug=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
+browser.chrome.command=
+browser.chrome.headless=false
+browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
 work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
@@ -363,6 +377,9 @@ chatbot.feishu.chat_id=
 - `agent.provider`：`terminal` skill 使用的终端代理提供方，当前默认是 `codex`
 - `agent.codex.command`：Codex CLI 的可执行文件名或路径
 - `agent.claude.command`：预留给 Claude 终端代理的可执行文件名或路径
+- `browser.chrome.command`：Chrome/Chromium 的可执行文件名或路径；留空时自动探测
+- `browser.chrome.headless`：`browser` skill 默认是否以 headless 模式启动 Chrome
+- `browser.chrome.user_data_dir`：可选的持久 Chrome user-data 目录；相对路径会解析到 `~/.mylittlebotty/` 下
 - `work_dir`：`write` 工具使用的根目录；在 TUI 中修改时会迁移旧工作目录内容
 - `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道

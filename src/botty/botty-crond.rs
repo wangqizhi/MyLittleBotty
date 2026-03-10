@@ -184,7 +184,9 @@ impl ReminderRecord {
         if !self.enabled || self.status == "done" {
             return Ok(None);
         }
-        let upper_bound = self.window_end_timestamp()?.map_or(now_ts, |end| end.min(now_ts));
+        let upper_bound = self
+            .window_end_timestamp()?
+            .map_or(now_ts, |end| end.min(now_ts));
         let window_start = self.window_start_timestamp()?;
         if upper_bound < window_start {
             return Ok(None);
@@ -258,7 +260,9 @@ impl ReminderRecord {
         if self.window_end.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(parse_local_datetime(&self.window_end)?.to_timestamp()?))
+            Ok(Some(
+                parse_local_datetime(&self.window_end)?.to_timestamp()?,
+            ))
         }
     }
 

@@ -129,7 +129,9 @@ fn create_reminder(input: &Value) -> io::Result<String> {
     let reminder = ReminderRecord {
         id: format!("r{next_id:04}"),
         schedule_at: schedule_at.clone(),
-        repeat: optional_string(input, "repeat").unwrap_or("once").to_string(),
+        repeat: optional_string(input, "repeat")
+            .unwrap_or("once")
+            .to_string(),
         window_start: optional_string(input, "window_start")
             .unwrap_or(schedule_at.as_str())
             .to_string(),

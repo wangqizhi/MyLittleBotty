@@ -9,6 +9,7 @@ MyLittleBotty is a local AI assistant that runs as a background service. Its cur
 - `2026-03-10`: added queue-based delegated task recovery. Parent jobs can now pause on tool delegation, resume after child completion, and be inspected with `mylittlebotty watchjobs`.
 - `2026-03-10`: added the built-in `terminal` skill, `coder` role, ACP terminal session management, and PTY-backed coding-agent execution inside the configured work dir.
 - `2026-03-10`: added `mylittlebotty watchapp -n terminal` to inspect live terminal-agent transcripts from the newest running terminal session.
+- `2026-03-10`: added the built-in `browser` skill, `info-searcher` role, Chrome remote-debugging sessions, Telegram screenshot attachment forwarding, and configurable persistent Chrome profile directories.
 - `2026-03-09`: released `0.0.9`.
 - `2026-03-09`: added role-based `Botty-Guy` execution. The default `leader` role can delegate focused tasks to `paperwork` and `all-in-one` subprocess roles with reduced context.
 - `2026-03-09`: added the built-in `leader` skill and role-specific system prompts, so task routing and role behavior are now explicit instead of implicit.
@@ -72,6 +73,7 @@ When `ai.provider.debug=true`, request and response payloads are written to the 
 - `leader`: default role. Keeps memory context, handles reminder coordination, and can delegate work to other roles.
 - `paperwork`: a focused role for document-style tasks with reduced context.
 - `all-in-one`: a fallback execution role that can use the general built-in tools directly.
+- `info-searcher`: a browser-driven role for webpage navigation, web research, and information extraction.
 - `coder`: a coding-focused role that delegates repository execution to the built-in `terminal` skill and an external terminal agent such as Codex CLI.
 
 The delegation flow is implemented through a built-in `leader` skill:
@@ -94,6 +96,7 @@ Botty currently exposes seven built-in tools, though role access differs:
 - `crond`: query, create, and edit reminder records stored in `~/.mylittlebotty/reminder.rec`.
 - `leader`: available to the `leader` role only. It delegates a task to another role-specific `Botty-Guy` subprocess with minimal context.
 - `terminal`: available to the `coder` role and custom roles that bind it. It can start or continue a PTY-backed coding-agent session, inspect status/transcripts, interrupt, terminate, restart, or list active sessions.
+- `browser`: available to the `info-searcher` role and custom roles that bind it. It can start or reuse a Chrome remote-debugging session, navigate pages, inspect snapshots, click, fill, evaluate page JavaScript, wait for elements, and capture screenshots.
 
 ### 6. Delegated task queues and recovery
 
@@ -151,7 +154,15 @@ Supported behavior:
 - Codex sessions are started with sandbox mode `workspace-write`, approval mode `never`, and `-C <work_dir>`, so the agent works inside Botty's configured work dir.
 - `mylittlebotty watchapp -n terminal` continuously renders the latest running terminal session transcript.
 
-### 11. Self-update
+### 11. Browser agent integration
+
+- The `browser` skill starts a Chrome/Chromium session under `~/.mylittlebotty/app/browser/sessions/<session_id>/`.
+- Each session stores a `session.json` metadata file, a `transcript.log`, and screenshots under the session directory unless an explicit output path is provided.
+- The default launch mode is visible Chrome with `--remote-debugging-port`; if a page requires login, CAPTCHA, or MFA, the user can finish it in that Chrome window and the same session can continue.
+- `browser.chrome.user_data_dir` can be set to a persistent Chrome profile directory so login state survives across Botty browser sessions.
+- When a reply includes a browser screenshot attachment marker, Telegram output sends the image with `sendPhoto` instead of only returning a file path in text.
+
+### 12. Self-update
 
 - `mylittlebotty update` checks the latest GitHub release.
 - If a newer version exists, it prompts for confirmation, downloads it, and replaces the local binary.
@@ -342,6 +353,9 @@ ai.provider.debug=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
+browser.chrome.command=
+browser.chrome.headless=false
+browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
 work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
@@ -365,6 +379,9 @@ Common meanings:
 - `agent.provider`: terminal-agent provider used by the `terminal` skill, currently `codex` by default
 - `agent.codex.command`: executable name or path for Codex CLI
 - `agent.claude.command`: executable name or path reserved for a Claude terminal agent
+- `browser.chrome.command`: executable name or path for Chrome/Chromium; leave empty to auto-detect
+- `browser.chrome.headless`: whether the browser skill launches Chrome in headless mode by default
+- `browser.chrome.user_data_dir`: optional persistent Chrome user-data directory; relative paths are resolved under `~/.mylittlebotty/`
 - `work_dir`: root directory used by the `write` tool; changing it from the TUI migrates existing work dir content
 - `chatbot.provider`: selected chatbot provider, currently `telegram` or `feishu`
 - `chatbot.telegram.enabled`: enable Telegram input worker

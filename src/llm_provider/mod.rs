@@ -5,8 +5,8 @@ pub mod provider_minimax;
 #[path = "provider-openai.rs"]
 pub mod provider_openai;
 
-use std::io;
 use serde::{Deserialize, Serialize};
+use std::io;
 
 use crate::botty_brain::BrainConfig;
 

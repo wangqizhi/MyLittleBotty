@@ -1,13 +1,15 @@
+#[path = "buildin-browser.rs"]
+pub mod buildin_browser;
 #[path = "buildin-crond.rs"]
 pub mod buildin_crond;
-#[path = "buildin-terminal.rs"]
-pub mod buildin_terminal;
 #[path = "buildin-leader.rs"]
 pub mod buildin_leader;
 #[path = "buildin-list.rs"]
 pub mod buildin_list;
 #[path = "buildin-remember.rs"]
 pub mod buildin_remember;
+#[path = "buildin-terminal.rs"]
+pub mod buildin_terminal;
 #[path = "buildin-watch.rs"]
 pub mod buildin_watch;
 #[path = "buildin-write.rs"]
@@ -17,6 +19,7 @@ pub mod custom_skill;
 
 use std::io;
 
+use crate::skill::buildin_browser::BuildinBrowserSkill;
 use crate::skill::buildin_crond::BuildinCrondSkill;
 use crate::skill::buildin_leader::BuildinLeaderSkill;
 use crate::skill::buildin_list::BuildinListSkill;
@@ -33,12 +36,14 @@ pub trait BottySkill {
     fn execute(&self, input_json: &str) -> io::Result<String>;
 }
 
-pub const BUILDIN_SKILL_NAMES: &[&str] =
-    &["list", "watch", "write", "remember", "crond", "leader", "terminal"];
+pub const BUILDIN_SKILL_NAMES: &[&str] = &[
+    "list", "watch", "write", "remember", "crond", "leader", "terminal", "browser",
+];
 
 pub fn build_skill(name: &str) -> Option<Box<dyn BottySkill>> {
     match name {
         "terminal" => Some(Box::new(BuildinTerminalSkill::new())),
+        "browser" => Some(Box::new(BuildinBrowserSkill::new())),
         "list" => Some(Box::new(BuildinListSkill::new())),
         "watch" => Some(Box::new(BuildinWatchSkill::new())),
         "write" => Some(Box::new(BuildinWriteSkill::new())),

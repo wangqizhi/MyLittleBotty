@@ -28,6 +28,7 @@ const FEISHU_SEEN_CACHE_LIMIT: usize = 200;
 const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
 const CHAT_META_PREFIX: &str = "__botty_meta__";
 const CONTROL_PREFIX: &str = "__botty_control__";
+const ATTACHMENT_PREFIX: &str = "__botty_attachment__";
 
 #[derive(Clone, Copy)]
 pub(crate) struct BottyGuyRoleSpec {
@@ -62,6 +63,14 @@ const ALL_IN_ONE_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     system_instruction_prompt: prompt::ROLE_ALL_IN_ONE_SYSTEM_PROMPT,
     skill_groups: &["base"],
     skills: &["remember", "crond"],
+    include_memory_context: false,
+};
+const INFO_SEARCHER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
+    role: "info-searcher",
+    description: "Handle browser-driven webpage navigation, search, and information extraction.",
+    system_instruction_prompt: prompt::ROLE_INFO_SEARCHER_SYSTEM_PROMPT,
+    skill_groups: &[],
+    skills: &["browser"],
     include_memory_context: false,
 };
 const CODER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
@@ -162,7 +171,9 @@ pub fn run() {
 
         // Rebuild the body for each message so skill/config/env changes take effect
         // without requiring a worker restart.
-        let reply = match BottyBody::from_setup(requested_role().as_str()).and_then(|body| body.think(message)) {
+        let reply = match BottyBody::from_setup(requested_role().as_str())
+            .and_then(|body| body.think(message))
+        {
             Ok(reply) => reply,
             Err(err) => {
                 eprintln!("Botty-Guy failed to process input: {err}");
@@ -204,6 +215,7 @@ pub(crate) fn resolve_role_spec(role: &str) -> Option<&'static BottyGuyRoleSpec>
         "" | BOTTY_GUY_DEFAULT_ROLE => Some(&LEADER_ROLE_SPEC),
         "paperwork" => Some(&PAPERWORK_ROLE_SPEC),
         "all-in-one" => Some(&ALL_IN_ONE_ROLE_SPEC),
+        "info-searcher" => Some(&INFO_SEARCHER_ROLE_SPEC),
         "coder" => Some(&CODER_ROLE_SPEC),
         _ => None,
     }
@@ -265,6 +277,7 @@ pub(crate) fn expand_custom_role_skill_names(config: &CustomRoleConfig) -> Vec<S
 pub(crate) fn delegated_role_names() -> Vec<String> {
     let mut names: Vec<String> = vec![
         CODER_ROLE_SPEC.role.to_string(),
+        INFO_SEARCHER_ROLE_SPEC.role.to_string(),
         PAPERWORK_ROLE_SPEC.role.to_string(),
         ALL_IN_ONE_ROLE_SPEC.role.to_string(),
     ];
@@ -285,6 +298,10 @@ pub(crate) fn delegated_role_descriptions() -> Vec<(String, String)> {
         (
             CODER_ROLE_SPEC.role.to_string(),
             CODER_ROLE_SPEC.description.to_string(),
+        ),
+        (
+            INFO_SEARCHER_ROLE_SPEC.role.to_string(),
+            INFO_SEARCHER_ROLE_SPEC.description.to_string(),
         ),
         (
             PAPERWORK_ROLE_SPEC.role.to_string(),
@@ -411,6 +428,12 @@ trait ChatbotProviderPlugin {
     fn send_reply(&mut self, target: &str, text: &str) -> io::Result<Option<String>>;
 }
 
+struct OutgoingAttachment {
+    kind: String,
+    path: String,
+    caption: String,
+}
+
 fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
     let mut seen = HashSet::new();
     let mut seen_order = VecDeque::new();
@@ -469,35 +492,32 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
             }
             let prefixed = format!("{}: {normalized}", plugin.provider_name());
 
-            let job_message_id =
-                match enqueue_leader_guy(plugin.provider_name(), user_id, &message.target, &prefixed)
-                {
-                    Ok(job_message_id) => job_message_id,
-                    Err(err) => {
-                        eprintln!("{} enqueue leader failed: {err}", plugin.provider_name());
-                        let reply = err.to_string();
-                        let _ = persist_chat_message(
-                            "assistant",
-                            plugin.provider_name(),
-                            user_id,
-                            &reply,
-                        );
-                        if !reply.trim().is_empty() {
-                            match plugin.send_reply(&message.target, &reply) {
-                                Ok(Some(sent_id)) => {
-                                    let _ =
-                                        remember_message_id(&mut seen, &mut seen_order, &sent_id);
-                                }
-                                Ok(None) => {}
-                                Err(err) => eprintln!(
-                                    "{} send message failed: {err}",
-                                    plugin.provider_name()
-                                ),
+            let job_message_id = match enqueue_leader_guy(
+                plugin.provider_name(),
+                user_id,
+                &message.target,
+                &prefixed,
+            ) {
+                Ok(job_message_id) => job_message_id,
+                Err(err) => {
+                    eprintln!("{} enqueue leader failed: {err}", plugin.provider_name());
+                    let reply = err.to_string();
+                    let _ =
+                        persist_chat_message("assistant", plugin.provider_name(), user_id, &reply);
+                    if !reply.trim().is_empty() {
+                        match plugin.send_reply(&message.target, &reply) {
+                            Ok(Some(sent_id)) => {
+                                let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                eprintln!("{} send message failed: {err}", plugin.provider_name())
                             }
                         }
-                        continue;
                     }
-                };
+                    continue;
+                }
+            };
             pending_replies.push(PendingLeaderReply {
                 target: message.target.clone(),
                 user_id: user_id.to_string(),
@@ -569,7 +589,12 @@ fn flush_pending_leader_replies(
         };
 
         let pending = pending_replies.remove(index);
-        let _ = persist_chat_message("assistant", plugin.provider_name(), &pending.user_id, &reply);
+        let _ = persist_chat_message(
+            "assistant",
+            plugin.provider_name(),
+            &pending.user_id,
+            &reply,
+        );
         if reply.trim().is_empty() {
             continue;
         }
@@ -586,7 +611,9 @@ fn flush_pending_leader_replies(
 fn try_load_leader_job_notice(message_id: &str) -> io::Result<Option<String>> {
     let root = botty_root_dir();
     match botty_jobs::load_job(&root, BOTTY_GUY_DEFAULT_ROLE, JobState::Waiting, message_id) {
-        Ok(job) => Ok(job.pending_user_notice.filter(|text| !text.trim().is_empty())),
+        Ok(job) => Ok(job
+            .pending_user_notice
+            .filter(|text| !text.trim().is_empty())),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
@@ -709,7 +736,21 @@ impl ChatbotProviderPlugin for TelegramProviderPlugin {
         let chat_id = target
             .parse::<i64>()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid telegram chat_id"))?;
-        send_telegram_message(&self.api_base, &self.apikey, chat_id, text)?;
+        let (clean_text, attachments) = parse_outgoing_attachments(text);
+        for attachment in attachments {
+            if attachment.kind == "photo" {
+                send_telegram_photo(
+                    &self.api_base,
+                    &self.apikey,
+                    chat_id,
+                    &attachment.path,
+                    &attachment.caption,
+                )?;
+            }
+        }
+        if !clean_text.trim().is_empty() {
+            send_telegram_message(&self.api_base, &self.apikey, chat_id, &clean_text)?;
+        }
         Ok(None)
     }
 }
@@ -759,7 +800,8 @@ impl ChatbotProviderPlugin for FeishuProviderPlugin {
     }
 
     fn send_reply(&mut self, target: &str, text: &str) -> io::Result<Option<String>> {
-        send_feishu_message(&self.api_base, &self.apikey, target, text)
+        let (clean_text, _) = parse_outgoing_attachments(text);
+        send_feishu_message(&self.api_base, &self.apikey, target, &clean_text)
     }
 }
 
@@ -994,6 +1036,39 @@ fn send_telegram_message(api_base: &str, apikey: &str, chat_id: i64, text: &str)
         let detail = String::from_utf8_lossy(&output.stderr);
         return Err(io::Error::other(format!(
             "curl sendMessage failed: {}",
+            detail.trim()
+        )));
+    }
+    Ok(())
+}
+
+fn send_telegram_photo(
+    api_base: &str,
+    apikey: &str,
+    chat_id: i64,
+    path: &str,
+    caption: &str,
+) -> io::Result<()> {
+    let url = format!("{api_base}/bot{apikey}/sendPhoto");
+    let mut command = Command::new("curl");
+    command
+        .arg("-fsS")
+        .arg("-X")
+        .arg("POST")
+        .arg(url)
+        .arg("-F")
+        .arg(format!("chat_id={chat_id}"))
+        .arg("-F")
+        .arg(format!("photo=@{path}"));
+    if !caption.trim().is_empty() {
+        command.arg("-F").arg(format!("caption={caption}"));
+    }
+    let output = command.output()?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "curl sendPhoto failed: {}",
             detail.trim()
         )));
     }
@@ -1330,6 +1405,34 @@ fn escape_json_string(text: &str) -> String {
             _ => vec![ch],
         })
         .collect()
+}
+
+fn parse_outgoing_attachments(text: &str) -> (String, Vec<OutgoingAttachment>) {
+    let mut clean_lines = Vec::new();
+    let mut attachments = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let marker_line = trimmed.strip_prefix("attachment=").unwrap_or(trimmed);
+        if let Some(payload) = marker_line.strip_prefix(ATTACHMENT_PREFIX) {
+            let payload = payload.strip_prefix('|').unwrap_or(payload);
+            let mut parts = payload.splitn(3, '|');
+            let kind = parts.next().unwrap_or_default().trim();
+            let path = parts.next().unwrap_or_default().trim();
+            let caption = parts.next().unwrap_or_default().trim();
+            if !kind.is_empty() && !path.is_empty() {
+                attachments.push(OutgoingAttachment {
+                    kind: kind.to_string(),
+                    path: path.to_string(),
+                    caption: caption.to_string(),
+                });
+                continue;
+            }
+        }
+        clean_lines.push(line);
+    }
+
+    (clean_lines.join("\n").trim().to_string(), attachments)
 }
 
 fn parse_bool(value: &str) -> bool {

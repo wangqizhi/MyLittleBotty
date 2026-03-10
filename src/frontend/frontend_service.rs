@@ -11,6 +11,8 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+const DEFAULT_BROWSER_USER_DATA_DIR: &str = "~/.mylittlebotty/app/browser/user_dir";
+
 pub const COMMANDS: [&str; 10] = [
     "/setup",
     "/restart-server",
@@ -36,6 +38,9 @@ pub enum SetupFieldId {
     AgentProvider,
     AgentCodexCommand,
     AgentClaudeCommand,
+    BrowserChromeCommand,
+    BrowserChromeHeadless,
+    BrowserChromeUserDataDir,
     WorkDir,
     ChatbotProvider,
     TelegramEnabled,
@@ -46,7 +51,7 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 14] = [
+    pub const ALL: [SetupFieldId; 17] = [
         SetupFieldId::AiProviderEndpoint,
         SetupFieldId::AiProviderApikey,
         SetupFieldId::AiProviderModel,
@@ -54,6 +59,9 @@ impl SetupFieldId {
         SetupFieldId::AgentProvider,
         SetupFieldId::AgentCodexCommand,
         SetupFieldId::AgentClaudeCommand,
+        SetupFieldId::BrowserChromeCommand,
+        SetupFieldId::BrowserChromeHeadless,
+        SetupFieldId::BrowserChromeUserDataDir,
         SetupFieldId::WorkDir,
         SetupFieldId::ChatbotProvider,
         SetupFieldId::TelegramEnabled,
@@ -79,6 +87,9 @@ impl SetupFieldId {
             SetupFieldId::AgentProvider => "agent provider",
             SetupFieldId::AgentCodexCommand => "codex command",
             SetupFieldId::AgentClaudeCommand => "claude command",
+            SetupFieldId::BrowserChromeCommand => "browser chrome command",
+            SetupFieldId::BrowserChromeHeadless => "browser chrome headless",
+            SetupFieldId::BrowserChromeUserDataDir => "browser chrome user data dir",
             SetupFieldId::WorkDir => "work dir",
             SetupFieldId::ChatbotProvider => "chatbot provider",
             SetupFieldId::TelegramEnabled => "telegram enabled",
@@ -94,6 +105,7 @@ impl SetupFieldId {
             self,
             SetupFieldId::AiProviderDebug
                 | SetupFieldId::TelegramEnabled
+                | SetupFieldId::BrowserChromeHeadless
                 | SetupFieldId::FeishuEnabled
         )
     }
@@ -119,6 +131,9 @@ pub struct SetupConfig {
     pub agent_provider: String,
     pub agent_codex_command: String,
     pub agent_claude_command: String,
+    pub browser_chrome_command: String,
+    pub browser_chrome_headless: bool,
+    pub browser_chrome_user_data_dir: String,
     pub work_dir: String,
     pub chatbot_provider: String,
     pub chatbot_telegram_api_base: String,
@@ -143,6 +158,9 @@ impl Default for SetupConfig {
             agent_provider: "codex".to_string(),
             agent_codex_command: "codex".to_string(),
             agent_claude_command: "claude".to_string(),
+            browser_chrome_command: String::new(),
+            browser_chrome_headless: false,
+            browser_chrome_user_data_dir: DEFAULT_BROWSER_USER_DATA_DIR.to_string(),
             work_dir: botty_io::default_work_dir_display(),
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
@@ -194,6 +212,15 @@ impl SetupConfig {
             SetupFieldId::AgentProvider => self.agent_provider.clone(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
+            SetupFieldId::BrowserChromeCommand => self.browser_chrome_command.clone(),
+            SetupFieldId::BrowserChromeHeadless => {
+                if self.browser_chrome_headless {
+                    "[x] true".to_string()
+                } else {
+                    "[ ] false".to_string()
+                }
+            }
+            SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramEnabled => {
@@ -229,6 +256,9 @@ impl SetupConfig {
             SetupFieldId::AgentProvider => self.agent_provider.clone(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
+            SetupFieldId::BrowserChromeCommand => self.browser_chrome_command.clone(),
+            SetupFieldId::BrowserChromeHeadless => String::new(),
+            SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramPollSeconds => {
@@ -251,6 +281,11 @@ impl SetupConfig {
             SetupFieldId::AgentProvider => self.agent_provider = value.trim().to_ascii_lowercase(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command = value.to_string(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command = value.to_string(),
+            SetupFieldId::BrowserChromeCommand => self.browser_chrome_command = value.to_string(),
+            SetupFieldId::BrowserChromeHeadless => {}
+            SetupFieldId::BrowserChromeUserDataDir => {
+                self.browser_chrome_user_data_dir = value.to_string()
+            }
             SetupFieldId::WorkDir => {
                 self.work_dir = botty_io::normalize_work_dir_input(value);
             }
@@ -273,6 +308,9 @@ impl SetupConfig {
             SetupFieldId::AiProviderDebug => self.ai_provider_debug = !self.ai_provider_debug,
             SetupFieldId::TelegramEnabled => {
                 self.chatbot_telegram_enabled = !self.chatbot_telegram_enabled
+            }
+            SetupFieldId::BrowserChromeHeadless => {
+                self.browser_chrome_headless = !self.browser_chrome_headless
             }
             SetupFieldId::FeishuEnabled => {
                 self.chatbot_feishu_enabled = !self.chatbot_feishu_enabled
@@ -629,6 +667,11 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "agent.provider" => config.agent_provider = value.to_ascii_lowercase(),
             "agent.codex.command" => config.agent_codex_command = value.to_string(),
             "agent.claude.command" => config.agent_claude_command = value.to_string(),
+            "browser.chrome.command" => config.browser_chrome_command = value.to_string(),
+            "browser.chrome.headless" => config.browser_chrome_headless = parse_bool(value),
+            "browser.chrome.user_data_dir" => {
+                config.browser_chrome_user_data_dir = value.to_string()
+            }
             "provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
             "provider.apikey" => config.ai_provider_apikey = value.to_string(),
             "provider.model" => config.ai_provider_model = value.to_string(),
@@ -675,7 +718,7 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nagent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nagent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_endpoint,
         config.ai_provider_apikey,
         config.ai_provider_model,
@@ -683,6 +726,9 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
         config.agent_provider,
         config.agent_codex_command,
         config.agent_claude_command,
+        config.browser_chrome_command,
+        config.browser_chrome_headless,
+        config.browser_chrome_user_data_dir,
         enabled_provider_list(config),
         config.chatbot_telegram_api_base,
         config.chatbot_telegram_apikey,

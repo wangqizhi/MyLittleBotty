@@ -493,8 +493,11 @@ impl FrontendApp {
                 original_work_dir,
                 ..
             } => (config.clone(), original_work_dir.clone()),
-            Mode::Chat | Mode::GuyEnvEdit { .. } | Mode::GuyEnvList { .. }
-            | Mode::SubAgent { .. } | Mode::CreateSkill { .. } => return None,
+            Mode::Chat
+            | Mode::GuyEnvEdit { .. }
+            | Mode::GuyEnvList { .. }
+            | Mode::SubAgent { .. }
+            | Mode::CreateSkill { .. } => return None,
         };
 
         let previous = botty_io::resolve_work_dir_input(&original_work_dir);
@@ -1365,7 +1368,9 @@ impl FrontendApp {
                 editor.name_cursor += c.len_utf8();
             }
             SubAgentEditorFocus::Description => {
-                editor.description_input.insert(editor.description_cursor, c);
+                editor
+                    .description_input
+                    .insert(editor.description_cursor, c);
                 editor.description_cursor += c.len_utf8();
             }
             SubAgentEditorFocus::Skills => {}
@@ -1484,10 +1489,7 @@ impl FrontendApp {
     }
 
     pub fn sub_agent_editor_save(&mut self) {
-        let Mode::SubAgent {
-            agents, editor, ..
-        } = &mut self.mode
-        else {
+        let Mode::SubAgent { agents, editor, .. } = &mut self.mode else {
             return;
         };
         let Some(editor_state) = editor.take() else {
@@ -1518,10 +1520,12 @@ impl FrontendApp {
         match save_custom_role_config(&config) {
             Ok(path) => {
                 let mut cleanup_error = None;
-                if let Some(original_name) = original_name.as_ref().filter(|original_name| **original_name != name) {
+                if let Some(original_name) = original_name
+                    .as_ref()
+                    .filter(|original_name| **original_name != name)
+                {
                     if let Err(err) = delete_custom_role_config(original_name) {
-                        cleanup_error =
-                            Some(format!("delete old sub-agent config failed: {err}"));
+                        cleanup_error = Some(format!("delete old sub-agent config failed: {err}"));
                     }
                 }
 
@@ -1706,8 +1710,13 @@ impl FrontendApp {
         let action = editor.action_input.trim().to_string();
         let prompt_template = editor.prompt_template_input.trim().to_string();
 
-        match custom_skill::save_custom_skill(&name, &description, &usage, &action, &prompt_template)
-        {
+        match custom_skill::save_custom_skill(
+            &name,
+            &description,
+            &usage,
+            &action,
+            &prompt_template,
+        ) {
             Ok(path) => {
                 self.mode = Mode::Chat;
                 self.push_system(&format!("Custom skill saved to {}", path.display()));

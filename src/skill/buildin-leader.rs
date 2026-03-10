@@ -78,7 +78,11 @@ impl BottySkill for BuildinLeaderSkill {
     }
 }
 
-fn run_delegated_guy(role: &str, prompt: &str, handoff_message: Option<&str>) -> io::Result<String> {
+fn run_delegated_guy(
+    role: &str,
+    prompt: &str,
+    handoff_message: Option<&str>,
+) -> io::Result<String> {
     let parent_message_id = env::var("BOTTY_CURRENT_JOB_ID")
         .ok()
         .map(|value| value.trim().to_string())

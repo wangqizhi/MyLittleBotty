@@ -321,7 +321,10 @@ fn render_session_status(session: &AgentSession, include_tail: bool) -> io::Resu
         format!("last_output_ms={}", status.last_output_ms),
         format!("work_dir={}", session.work_dir.display()),
         format!("command={}", session.command_line),
-        format!("transcript_path={}", session.terminal.transcript_path().display()),
+        format!(
+            "transcript_path={}",
+            session.terminal.transcript_path().display()
+        ),
     ];
     if let Some(exit_code) = status.exit_code {
         lines.push(format!("exit_code={exit_code}"));
@@ -406,7 +409,10 @@ fn extract_marker_payload(transcript: &str, marker: &str) -> Option<String> {
     transcript
         .lines()
         .rev()
-        .find_map(|line| line.split_once(marker).map(|(_, rest)| rest.trim().to_string()))
+        .find_map(|line| {
+            line.split_once(marker)
+                .map(|(_, rest)| rest.trim().to_string())
+        })
         .filter(|text| !text.is_empty())
 }
 
@@ -512,7 +518,10 @@ fn required_field<'a>(value: Option<&'a str>, name: &str) -> io::Result<&'a str>
 }
 
 fn sessions_root_dir() -> PathBuf {
-    botty_root_dir().join("app").join("terminal").join("sessions")
+    botty_root_dir()
+        .join("app")
+        .join("terminal")
+        .join("sessions")
 }
 
 fn session_dir(session_id: &str) -> PathBuf {

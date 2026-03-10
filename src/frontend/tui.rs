@@ -1,7 +1,6 @@
 use crate::frontend::frontend_app::{
-    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor,
-    GuyEnvEditorFocus, Mode, ProviderEdit, Role, SetupEditor, SubAgentEditor,
-    SubAgentEditorFocus, SubmitOutcome,
+    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode,
+    ProviderEdit, Role, SetupEditor, SubAgentEditor, SubAgentEditorFocus, SubmitOutcome,
 };
 use crate::frontend::frontend_service::{
     mask_secret, FrontendRpc, LocalFrontendRpc, SetupConfig, CHATBOT_PROVIDERS,
@@ -1100,7 +1099,7 @@ fn render_sub_agent_editor(frame: &mut Frame, editor: &SubAgentEditor) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // name
-            Constraint::Min(4),   // skills list
+            Constraint::Min(4),    // skills list
             Constraint::Length(3), // description
             Constraint::Length(3), // hints
         ])
@@ -1122,7 +1121,9 @@ fn render_sub_agent_editor(frame: &mut Frame, editor: &SubAgentEditor) {
         "Skills"
     };
     let max_visible = parts[1].height.saturating_sub(2) as usize;
-    let start = editor.skill_scroll.saturating_sub(max_visible.saturating_sub(1));
+    let start = editor
+        .skill_scroll
+        .saturating_sub(max_visible.saturating_sub(1));
     let mut skill_items = Vec::new();
     for (idx, skill) in editor
         .available_skills
@@ -1146,8 +1147,8 @@ fn render_sub_agent_editor(frame: &mut Frame, editor: &SubAgentEditor) {
         };
         skill_items.push(ListItem::new(Line::raw(format!("{checked} {skill}"))).style(style));
     }
-    let skills_list = List::new(skill_items)
-        .block(Block::default().borders(Borders::ALL).title(skills_title));
+    let skills_list =
+        List::new(skill_items).block(Block::default().borders(Borders::ALL).title(skills_title));
     frame.render_widget(skills_list, parts[1]);
 
     let desc_title = if editor.focus == SubAgentEditorFocus::Description {
@@ -1160,8 +1161,8 @@ fn render_sub_agent_editor(frame: &mut Frame, editor: &SubAgentEditor) {
     } else {
         editor.description_input.as_str()
     };
-    let desc_input = Paragraph::new(desc_text)
-        .block(Block::default().borders(Borders::ALL).title(desc_title));
+    let desc_input =
+        Paragraph::new(desc_text).block(Block::default().borders(Borders::ALL).title(desc_title));
     frame.render_widget(desc_input, parts[2]);
 
     let hints = Paragraph::new(Text::from(vec![
@@ -1215,16 +1216,41 @@ fn render_create_skill_page(app: &FrontendApp, frame: &mut Frame) {
             Constraint::Length(3), // usage
             Constraint::Length(3), // action
             Constraint::Length(3), // prompt_template
-            Constraint::Min(1),   // hints
+            Constraint::Min(1),    // hints
         ])
         .split(inner);
 
     let fields: [(&str, &str, usize, CreateSkillEditorFocus); 5] = [
-        ("Name", &editor.name_input, editor.name_cursor, CreateSkillEditorFocus::Name),
-        ("Description", &editor.description_input, editor.description_cursor, CreateSkillEditorFocus::Description),
-        ("Usage", &editor.usage_input, editor.usage_cursor, CreateSkillEditorFocus::Usage),
-        ("Action (prompt/script)", &editor.action_input, editor.action_cursor, CreateSkillEditorFocus::Action),
-        ("Prompt Template (use {{input}})", &editor.prompt_template_input, editor.prompt_template_cursor, CreateSkillEditorFocus::PromptTemplate),
+        (
+            "Name",
+            &editor.name_input,
+            editor.name_cursor,
+            CreateSkillEditorFocus::Name,
+        ),
+        (
+            "Description",
+            &editor.description_input,
+            editor.description_cursor,
+            CreateSkillEditorFocus::Description,
+        ),
+        (
+            "Usage",
+            &editor.usage_input,
+            editor.usage_cursor,
+            CreateSkillEditorFocus::Usage,
+        ),
+        (
+            "Action (prompt/script)",
+            &editor.action_input,
+            editor.action_cursor,
+            CreateSkillEditorFocus::Action,
+        ),
+        (
+            "Prompt Template (use {{input}})",
+            &editor.prompt_template_input,
+            editor.prompt_template_cursor,
+            CreateSkillEditorFocus::PromptTemplate,
+        ),
     ];
 
     for (i, (label, value, _cursor, focus_id)) in fields.iter().enumerate() {
@@ -1233,8 +1259,8 @@ fn render_create_skill_page(app: &FrontendApp, frame: &mut Frame) {
         } else {
             label.to_string()
         };
-        let input = Paragraph::new(*value)
-            .block(Block::default().borders(Borders::ALL).title(title));
+        let input =
+            Paragraph::new(*value).block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(input, parts[i]);
     }
 
