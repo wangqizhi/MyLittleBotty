@@ -2,10 +2,11 @@
 
 [中文说明 / Chinese README](./README_ZN.md)
 
-MyLittleBotty is a local AI assistant that runs as a background service. Its current architecture is built around `Botty-Boss` as the supervisor daemon, `Botty-Guy` as the chat worker, and `Botty-crond` as the reminder scheduler. The current implementation focuses on local chat, TUI-based setup, Telegram/Feishu message integration, reminder scheduling, self-update, and process management.
+MyLittleBotty is a local AI assistant that runs as a background service. Its current architecture is built around `Botty-Boss` as the supervisor daemon, `Botty-Guy` as the chat worker, and `Botty-crond` as the reminder and system scheduler. The current implementation focuses on local chat, TUI-based setup, Telegram/Feishu message integration, reminder scheduling, built-in system cron tasks, self-update, and process management.
 
 ## Recent Updates
 
+- `2026-03-11`: added hardcoded system-crond tasks inside `Botty-crond`, plus `system-crond(-dev).log`. The first built-in task runs `/remember` automatically once per hour.
 - `2026-03-11`: added role-specific experience memory files, `/remember` updates for `coder` and `info-searcher`, and role prompt injection from `memory/summary/experience/<role>-exp.md`.
 - `2026-03-10`: added queue-based delegated task recovery. Parent jobs can now pause on tool delegation, resume after child completion, and be inspected with `mylittlebotty watchjobs`.
 - `2026-03-10`: added the built-in `terminal` skill, `coder` role, ACP terminal session management, and PTY-backed coding-agent execution inside the configured work dir.
@@ -118,12 +119,15 @@ Botty currently exposes seven built-in tools, though role access differs:
 
 - Reminder data is stored in `~/.mylittlebotty/reminder.rec`.
 - `Botty-crond` polls and executes due reminders.
+- `Botty-crond` also runs hardcoded system tasks that are built into the binary and start automatically with the service.
 - Reminders support `once`, `every_minute`, `every_hour`, `every_day`, `every_week`, and `every_month`.
 - Recurring reminders can be limited with `window_start` / `window_end`, for example "every day during 2026" or "every hour for one month".
 - The only actually implemented task type is `ask_guy`.
 - `run_script` is currently only a reserved task shape and does not execute scripts yet.
 - One-time reminders are marked as `done` after execution. Recurring reminders stay active until their time window ends, then are marked as `done`.
 - If Telegram or Feishu output is enabled, reminder results are pushed back to those channels.
+- The first built-in system task is `remember-hourly`, which triggers `/remember` once per hour.
+- Built-in system task execution is logged to `~/.mylittlebotty/log/system-crond.log` and deduplicated across restarts with `~/.mylittlebotty/run/system-crond-state.json`.
 
 ### 8. Telegram / Feishu integration
 
@@ -312,7 +316,7 @@ Optional follow mode:
 mylittlebotty log -f
 ```
 
-This command summarizes recent debug and boss logs. Debug output now includes `role=...`, so delegated role traffic can be distinguished from leader traffic.
+This command summarizes recent debug, boss, and system-crond logs. Debug output now includes `role=...`, so delegated role traffic can be distinguished from leader traffic, and built-in system task runs can be inspected from the same command.
 
 ### 9. Inspect delegated job queues
 
@@ -451,6 +455,8 @@ The program uses these paths by default:
 - `~/.mylittlebotty/app/terminal/sessions/`: PTY-backed terminal agent session metadata and transcripts
 - `~/.mylittlebotty/log/`: log directory
 - `~/.mylittlebotty/run/`: runtime files such as pid, socket, and interrupt flags
+- `~/.mylittlebotty/log/system-crond.log`: built-in system task execution log
+- `~/.mylittlebotty/run/system-crond-state.json`: last successful/executed schedule slot per built-in system task
 - `~/.mylittlebotty/run/guy-role-map*.conf`: runtime mapping from spawned `Botty-Guy` pid to role
 - `~/.mylittlebotty/run/jobs/`: persisted delegated job queues and worker state by role
 - `~/.mylittlebotty/reminder.rec`: reminder records
@@ -460,6 +466,8 @@ The program uses these paths by default:
 - `~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md`: info-searcher role memory
 
 In development runs, some generated config, runtime, or log files use a `-dev` suffix. Normal production use does not add `-dev`.
+
+Built-in system-crond implementation notes are documented in `doc/system-crond.md`.
 
 ## Recommended Flow
 

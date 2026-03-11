@@ -23,13 +23,13 @@ impl LogCommand {
     pub fn run(self) -> io::Result<()> {
         let threshold = threshold_timestamp(DAYS_TO_SHOW)?;
         let debug_files = collect_log_files("brain-debug")?;
-        let boss_files = collect_log_files("boss")?;
+        let runtime_files = collect_runtime_log_files(&["boss", "system-crond"])?;
 
         print_history(&debug_files, &threshold, true)?;
-        print_history(&boss_files, &threshold, false)?;
+        print_history(&runtime_files, &threshold, false)?;
 
         if self.follow {
-            follow_logs(debug_files, boss_files)?;
+            follow_logs(debug_files, runtime_files)?;
         }
 
         Ok(())
@@ -80,13 +80,13 @@ fn print_history(files: &[PathBuf], threshold: &str, is_debug: bool) -> io::Resu
     Ok(())
 }
 
-fn follow_logs(debug_files: Vec<PathBuf>, boss_files: Vec<PathBuf>) -> io::Result<()> {
+fn follow_logs(debug_files: Vec<PathBuf>, runtime_files: Vec<PathBuf>) -> io::Result<()> {
     let mut states = Vec::new();
 
     for path in debug_files {
         states.push(FollowState::new(path, true)?);
     }
-    for path in boss_files {
+    for path in runtime_files {
         states.push(FollowState::new(path, false)?);
     }
 
@@ -376,6 +376,16 @@ fn collect_log_files(prefix: &str) -> io::Result<Vec<PathBuf>> {
     }
 
     files.sort();
+    Ok(files)
+}
+
+fn collect_runtime_log_files(prefixes: &[&str]) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for prefix in prefixes {
+        files.extend(collect_log_files(prefix)?);
+    }
+    files.sort();
+    files.dedup();
     Ok(files)
 }
 

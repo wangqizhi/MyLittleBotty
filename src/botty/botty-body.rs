@@ -374,9 +374,9 @@ impl BottyBody {
             )?);
 
             if line_count(&summary) > ROLE_EXPERIENCE_MAX_LINES {
-                summary = extract_remember_text(&self.compress_role_experience_summary(
-                    spec.role, rule, &summary,
-                )?);
+                summary = extract_remember_text(
+                    &self.compress_role_experience_summary(spec.role, rule, &summary)?,
+                );
             }
 
             summary = trim_to_max_lines(&summary, ROLE_EXPERIENCE_MAX_LINES);

@@ -1,9 +1,10 @@
 # MyLittleBotty
 
-MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 守护进程、`Botty-Guy` 对话执行进程、`Botty-crond` 定时提醒进程组成。当前版本主要提供本地聊天、TUI 配置、Telegram/飞书消息接入、提醒调度、版本更新和进程管理能力。
+MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 守护进程、`Botty-Guy` 对话执行进程、`Botty-crond` 定时提醒与系统调度进程组成。当前版本主要提供本地聊天、TUI 配置、Telegram/飞书消息接入、提醒调度、内置系统定时任务、版本更新和进程管理能力。
 
 ## 最近更新
 
+- `2026-03-11`：`Botty-crond` 新增硬编码的 system-crond 任务机制，并新增 `system-crond(-dev).log`；首个内置任务会每小时自动执行一次 `/remember`。
 - `2026-03-11`：新增 role 专属经验记忆文件；`/remember` 现在会为 `coder` 和 `info-searcher` 同步整理 role memory，并在角色启动时自动注入对应 `memory/summary/experience/<role>-exp.md`。
 - `2026-03-10`：新增基于队列的委派任务恢复机制。父任务在工具委派后可以进入等待态，子任务完成后自动恢复，并可通过 `mylittlebotty watchjobs` 观察队列状态。
 - `2026-03-10`：新增内置 `terminal` skill、`coder` 角色、ACP 终端会话管理，以及基于 PTY 的编码代理执行能力，执行目录受当前 work dir 限制。
@@ -115,12 +116,15 @@ TUI 内置命令：
 
 - 提醒数据保存在 `~/.mylittlebotty/reminder.rec`。
 - `Botty-crond` 会轮询到期提醒并执行。
+- `Botty-crond` 也会执行编译进程序的 system-crond 内置任务，服务启动后自动生效，不走 `reminder.rec` 配置。
 - 提醒支持 `once`、`every_minute`、`every_hour`、`every_day`、`every_week`、`every_month`。
 - 重复提醒支持 `window_start` / `window_end` 生效时间窗，例如“2026 年内每天执行”或“1 个月内每小时执行”。
 - 当前已真正实现的任务类型是 `ask_guy`。
 - `run_script` 目前仅保留字段，尚未真正执行脚本。
 - 单次提醒执行后会变成 `done`；重复提醒会持续生效，直到超出生效时间窗后再变成 `done`。
 - 如果启用了 Telegram/飞书推送，提醒结果会回发到对应聊天渠道。
+- 当前第一个内置 system 任务是 `remember-hourly`，会每小时触发一次 `/remember`。
+- 内置 system 任务执行日志写入 `~/.mylittlebotty/log/system-crond.log`，并通过 `~/.mylittlebotty/run/system-crond-state.json` 避免服务重启后在同一时间槽重复执行。
 
 ### 8. Telegram / 飞书接入
 
@@ -309,7 +313,7 @@ mylittlebotty log
 mylittlebotty log -f
 ```
 
-这个命令会汇总最近的 debug 与 boss 日志。现在 debug 输出里会带 `role=...`，方便区分 leader 和被分派角色的流量。
+这个命令会汇总最近的 debug、boss 和 system-crond 日志。现在 debug 输出里会带 `role=...`，方便区分 leader 和被分派角色的流量，也可以直接看到内置系统任务的执行情况。
 
 ### 9. 查看委派任务队列
 
@@ -448,6 +452,8 @@ chatbot.feishu.chat_id=
 - `~/.mylittlebotty/app/terminal/sessions/`：terminal 代理会话的元数据和 transcript
 - `~/.mylittlebotty/log/`：日志目录
 - `~/.mylittlebotty/run/`：pid、socket、flag 等运行时文件
+- `~/.mylittlebotty/log/system-crond.log`：内置 system 任务执行日志
+- `~/.mylittlebotty/run/system-crond-state.json`：各内置 system 任务上次已执行时间槽状态
 - `~/.mylittlebotty/run/guy-role-map*.conf`：运行中的 `Botty-Guy` 进程与角色映射文件
 - `~/.mylittlebotty/run/jobs/`：按角色保存的委派任务队列和 worker 状态
 - `~/.mylittlebotty/reminder.rec`：提醒任务记录
@@ -457,6 +463,8 @@ chatbot.feishu.chat_id=
 - `~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md`：`info-searcher` 角色经验记忆
 
 在开发环境运行时，部分生成的配置、运行时或日志文件会带 `-dev` 后缀；正式程序不会带 `-dev`。
+
+内置 system-crond 的实现和扩展方法见 `doc/system-crond.md`。
 
 ## 当前推荐使用流程
 

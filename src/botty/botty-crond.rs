@@ -44,6 +44,12 @@ pub fn run() {
 fn tick() -> io::Result<()> {
     let now = local_time_string()?;
     let now_ts = parse_local_datetime(&now)?.to_timestamp()?;
+    run_due_reminders(&now, now_ts)?;
+    run_system_tasks(&now, now_ts)?;
+    Ok(())
+}
+
+fn run_due_reminders(now: &str, now_ts: i64) -> io::Result<()> {
     let mut reminders = load_reminders()?;
     let mut dirty = false;
 
@@ -56,7 +62,7 @@ fn tick() -> io::Result<()> {
             None => {
                 if reminder.should_mark_done(now_ts)? && reminder.status != "done" {
                     reminder.status = "done".to_string();
-                    reminder.updated_at = now.clone();
+                    reminder.updated_at = now.to_string();
                     dirty = true;
                 }
                 continue;
@@ -76,12 +82,37 @@ fn tick() -> io::Result<()> {
         } else {
             "pending".to_string()
         };
-        reminder.updated_at = now.clone();
+        reminder.updated_at = now.to_string();
         dirty = true;
     }
 
     if dirty {
         save_reminders(&reminders)?;
+    }
+
+    Ok(())
+}
+
+fn run_system_tasks(now: &str, now_ts: i64) -> io::Result<()> {
+    let mut state = load_system_crond_state()?;
+    let mut dirty = false;
+
+    for task in system_tasks() {
+        let Some(scheduled_at) = task.due_at(now_ts, state.last_run_slot(task.id))? else {
+            continue;
+        };
+
+        let (status, output) = match execute_system_task(&task, &scheduled_at, now) {
+            Ok(output) => ("ok", output),
+            Err(err) => ("error", err.to_string()),
+        };
+        append_system_crond_log(now, &task, &scheduled_at, status, &output)?;
+        state.set_last_run_slot(task.id, &scheduled_at);
+        dirty = true;
+    }
+
+    if dirty {
+        save_system_crond_state(&state)?;
     }
 
     Ok(())
@@ -171,6 +202,22 @@ struct ReminderRecord {
 
 struct CrondPidGuard {
     path: PathBuf,
+}
+
+struct SystemTask {
+    id: &'static str,
+    description: &'static str,
+    request_message: &'static str,
+    cadence: SystemTaskCadence,
+}
+
+enum SystemTaskCadence {
+    Hourly,
+}
+
+#[derive(Default)]
+struct SystemCrondState {
+    last_run_slots: std::collections::BTreeMap<String, String>,
 }
 
 impl Drop for CrondPidGuard {
@@ -364,6 +411,30 @@ impl ReminderRecord {
     }
 }
 
+impl SystemTask {
+    fn due_at(&self, now_ts: i64, last_run_slot: Option<&str>) -> io::Result<Option<String>> {
+        let scheduled_at = match self.cadence {
+            SystemTaskCadence::Hourly => current_hour_slot(now_ts)?,
+        };
+        if last_run_slot == Some(scheduled_at.as_str()) {
+            Ok(None)
+        } else {
+            Ok(Some(scheduled_at))
+        }
+    }
+}
+
+impl SystemCrondState {
+    fn last_run_slot(&self, task_id: &str) -> Option<&str> {
+        self.last_run_slots.get(task_id).map(String::as_str)
+    }
+
+    fn set_last_run_slot(&mut self, task_id: &str, slot: &str) {
+        self.last_run_slots
+            .insert(task_id.to_string(), slot.to_string());
+    }
+}
+
 fn load_reminders() -> io::Result<Vec<ReminderRecord>> {
     let content = match fs::read_to_string(reminder_rec_path()) {
         Ok(content) => content,
@@ -432,6 +503,90 @@ fn append_result_line(executed_at: &str, status: &str, output: &str) -> io::Resu
     let sanitized = output.replace('\n', "\\n").replace('\r', "\\r");
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{executed_at}\t{status}\t{sanitized}")?;
+    Ok(())
+}
+
+fn system_tasks() -> [SystemTask; 1] {
+    [SystemTask {
+        id: "remember-hourly",
+        description: "refresh long-term memory via /remember",
+        request_message: "/remember",
+        cadence: SystemTaskCadence::Hourly,
+    }]
+}
+
+fn execute_system_task(task: &SystemTask, scheduled_at: &str, now: &str) -> io::Result<String> {
+    let reply = ask_leader_guy("system-crond", task.id, task.request_message)?;
+    Ok(format!(
+        "scheduled {scheduled_at}, executed at {now}: {}",
+        sanitize_log_field(&reply)
+    ))
+}
+
+fn append_system_crond_log(
+    executed_at: &str,
+    task: &SystemTask,
+    scheduled_at: &str,
+    status: &str,
+    output: &str,
+) -> io::Result<()> {
+    let path = system_crond_log_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(
+        file,
+        "[{executed_at}] task={} scheduled_at={} request={} description={} status={} result={}",
+        task.id,
+        scheduled_at,
+        sanitize_log_field(task.request_message),
+        sanitize_log_field(task.description),
+        status,
+        sanitize_log_field(output)
+    )?;
+    Ok(())
+}
+
+fn load_system_crond_state() -> io::Result<SystemCrondState> {
+    let path = system_crond_state_path();
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SystemCrondState::default()),
+        Err(err) => return Err(err),
+    };
+
+    let value = match serde_json::from_str::<Value>(&content) {
+        Ok(value) => value,
+        Err(_) => return Ok(SystemCrondState::default()),
+    };
+    let mut state = SystemCrondState::default();
+    if let Some(map) = value.get("last_run_slots").and_then(Value::as_object) {
+        for (key, value) in map {
+            if let Some(slot) = value.as_str() {
+                state.last_run_slots.insert(key.clone(), slot.to_string());
+            }
+        }
+    }
+    Ok(state)
+}
+
+fn save_system_crond_state(state: &SystemCrondState) -> io::Result<()> {
+    let path = system_crond_state_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let content = serde_json::json!({
+        "last_run_slots": state.last_run_slots,
+    });
+    fs::write(
+        &tmp_path,
+        serde_json::to_string_pretty(&content).map_err(|err| {
+            io::Error::other(format!("serialize system crond state failed: {err}"))
+        })?,
+    )?;
+    fs::rename(tmp_path, path)?;
     Ok(())
 }
 
@@ -633,6 +788,18 @@ fn reminder_result_path() -> PathBuf {
     botty_root_dir().join(format!("reminder{}.result", runtime_suffix()))
 }
 
+fn system_crond_log_path() -> PathBuf {
+    botty_root_dir()
+        .join("log")
+        .join(format!("system-crond{}.log", runtime_suffix()))
+}
+
+fn system_crond_state_path() -> PathBuf {
+    botty_root_dir()
+        .join("run")
+        .join(format!("system-crond-state{}.json", runtime_suffix()))
+}
+
 fn crond_pid_file() -> PathBuf {
     botty_root_dir()
         .join("run")
@@ -722,6 +889,18 @@ fn escape_json_string(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+fn sanitize_log_field(value: &str) -> String {
+    value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn current_hour_slot(now_ts: i64) -> io::Result<String> {
+    let now = DateTimeParts::from_timestamp(now_ts)?;
+    Ok(format!(
+        "{:04}-{:02}-{:02} {:02}:00:00",
+        now.year, now.month, now.day, now.hour
+    ))
 }
 
 fn next_minutely_occurrence(anchor: DateTimeParts, reference_ts: i64) -> io::Result<Option<i64>> {
