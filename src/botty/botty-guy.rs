@@ -38,6 +38,7 @@ pub(crate) struct BottyGuyRoleSpec {
     pub skill_groups: &'static [&'static str],
     pub skills: &'static [&'static str],
     pub include_memory_context: bool,
+    pub experience_memory_rule: Option<&'static str>,
 }
 
 const BASE_SKILL_GROUP: &[&str] = &["list", "watch", "write"];
@@ -48,6 +49,7 @@ const LEADER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     skill_groups: &["base"],
     skills: &["crond", "leader"],
     include_memory_context: true,
+    experience_memory_rule: None,
 };
 const PAPERWORK_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     role: "paperwork",
@@ -56,6 +58,7 @@ const PAPERWORK_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     skill_groups: &["base"],
     skills: &[],
     include_memory_context: false,
+    experience_memory_rule: None,
 };
 const ALL_IN_ONE_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     role: "all-in-one",
@@ -64,6 +67,7 @@ const ALL_IN_ONE_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     skill_groups: &["base"],
     skills: &["remember", "crond"],
     include_memory_context: false,
+    experience_memory_rule: None,
 };
 const INFO_SEARCHER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     role: "info-searcher",
@@ -72,6 +76,9 @@ const INFO_SEARCHER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     skill_groups: &[],
     skills: &["browser"],
     include_memory_context: false,
+    experience_memory_rule: Some(
+        "Keep stable mappings between app/site names, URL addresses, and how leaders or owners are called. Prefer records like `应用名:xxx url地址:xxx leader称呼:xxx 说明:xxx`.",
+    ),
 };
 const CODER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     role: "coder",
@@ -80,7 +87,18 @@ const CODER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     skill_groups: &[],
     skills: &["terminal"],
     include_memory_context: false,
+    experience_memory_rule: Some(
+        "Keep the active development project inventory. Prefer records like `项目名:xxx 项目路径:xxx 项目简介:xxx` and update them when project scope or path changes.",
+    ),
 };
+
+const BUILTIN_ROLE_SPECS: &[&BottyGuyRoleSpec] = &[
+    &LEADER_ROLE_SPEC,
+    &PAPERWORK_ROLE_SPEC,
+    &ALL_IN_ONE_ROLE_SPEC,
+    &INFO_SEARCHER_ROLE_SPEC,
+    &CODER_ROLE_SPEC,
+];
 
 pub fn run() {
     set_process_name(guy_process_name());
@@ -219,6 +237,10 @@ pub(crate) fn resolve_role_spec(role: &str) -> Option<&'static BottyGuyRoleSpec>
         "coder" => Some(&CODER_ROLE_SPEC),
         _ => None,
     }
+}
+
+pub(crate) fn builtin_role_specs() -> &'static [&'static BottyGuyRoleSpec] {
+    BUILTIN_ROLE_SPECS
 }
 
 pub(crate) fn resolve_role_spec_or_custom(role: &str) -> Option<ResolvedRole> {

@@ -6,6 +6,7 @@ MyLittleBotty is a local AI assistant that runs as a background service. Its cur
 
 ## Recent Updates
 
+- `2026-03-11`: added role-specific experience memory files, `/remember` updates for `coder` and `info-searcher`, and role prompt injection from `memory/summary/experience/<role>-exp.md`.
 - `2026-03-10`: added queue-based delegated task recovery. Parent jobs can now pause on tool delegation, resume after child completion, and be inspected with `mylittlebotty watchjobs`.
 - `2026-03-10`: added the built-in `terminal` skill, `coder` role, ACP terminal session management, and PTY-backed coding-agent execution inside the configured work dir.
 - `2026-03-10`: added `mylittlebotty watchapp -n terminal` to inspect live terminal-agent transcripts from the newest running terminal session.
@@ -37,7 +38,7 @@ Built-in TUI commands:
 - `/setup`: open the setup editor for AI provider and chatbot settings
 - `/restart-server`: restart local Botty background services
 - `/new`: start a new chat session
-- `/remember`: trigger long-term memory summarization
+- `/remember`: trigger long-term memory summarization and refresh all configured role-specific experience memory files
 - `/set-guy-env`: open the TUI editor for persisted `Botty-Guy` environment variables
 - `/set-guy-env KEY=VALUE`: validate the key, save the variable to disk, and try to hot-apply it to the running `Botty-Guy` process
 - `/list-guy-env`: open a read-only list page for persisted `Botty-Guy` environment variables
@@ -76,6 +77,11 @@ When `ai.provider.debug=true`, request and response payloads are written to the 
 - `info-searcher`: a browser-driven role for webpage navigation, web research, and information extraction.
 - `coder`: a coding-focused role that delegates repository execution to the built-in `terminal` skill and an external terminal agent such as Codex CLI.
 
+Role-specific experience memory is currently enabled for:
+
+- `coder`: stores active project records such as `项目名:... 项目路径:... 项目简介:...`
+- `info-searcher`: stores stable mappings such as `应用名:... url地址:... leader称呼:...`
+
 The delegation flow is implemented through a built-in `leader` skill:
 
 - the leader chooses a target role
@@ -84,6 +90,7 @@ The delegation flow is implemented through a built-in `leader` skill:
 - it returns the delegated result back to the original conversation
 
 Additional design notes are documented in `doc/role-agent.md`.
+Role memory rules are documented in `doc/role-memory.md`.
 
 ### 5. Local tool usage
 
@@ -143,6 +150,8 @@ Supported behavior:
 - The summary is written to `~/.mylittlebotty/memory/summary/remember.md`.
 - The last summary checkpoint is written to `~/.mylittlebotty/memory/summary/rec.time`.
 - During normal chat, Botty first relies on `memory/summary/remember.md` and recent conversation history.
+- `/remember` also updates every configured role experience file under `~/.mylittlebotty/memory/summary/experience/`.
+- When a role starts and its `~/.mylittlebotty/memory/summary/experience/<role>-exp.md` exists, that file is injected into the role's system prompt.
 - If the current topic does not appear there, the built-in `remember` tool may extract search keywords with the model and then search `~/.mylittlebotty/memory/deep` locally, returning matching snippets with surrounding context.
 
 ### 10. Terminal coding agent integration
@@ -446,6 +455,9 @@ The program uses these paths by default:
 - `~/.mylittlebotty/run/jobs/`: persisted delegated job queues and worker state by role
 - `~/.mylittlebotty/reminder.rec`: reminder records
 - `~/.mylittlebotty/memory/summary/remember.md`: long-term memory summary
+- `~/.mylittlebotty/memory/summary/experience/`: role-specific experience memory files
+- `~/.mylittlebotty/memory/summary/experience/coder-exp.md`: coder role memory
+- `~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md`: info-searcher role memory
 
 In development runs, some generated config, runtime, or log files use a `-dev` suffix. Normal production use does not add `-dev`.
 

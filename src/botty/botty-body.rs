@@ -1,7 +1,7 @@
 use crate::botty_brain::BottyBrain;
 use crate::botty_guy::{
-    expand_custom_role_skill_names, expand_role_skill_names, resolve_role_spec_or_custom,
-    BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
+    builtin_role_specs, expand_custom_role_skill_names, expand_role_skill_names,
+    resolve_role_spec_or_custom, BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
 };
 use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
@@ -18,6 +18,7 @@ use std::process::Command;
 
 const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
+const ROLE_EXPERIENCE_MAX_LINES: usize = 60;
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
 const MAX_TOOL_CALL_STEPS: usize = 8;
 const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
@@ -314,6 +315,7 @@ impl BottyBody {
     fn remember_deep_memory(&self) -> io::Result<String> {
         let summary_dir = botty_root_dir().join("memory").join("summary");
         fs::create_dir_all(&summary_dir)?;
+        fs::create_dir_all(summary_dir.join("experience"))?;
 
         let remember_path = summary_dir.join("remember.md");
         let rec_time_path = summary_dir.join("rec.time");
@@ -345,9 +347,42 @@ impl BottyBody {
         summary = trim_to_max_lines(&summary, REMEMBER_MAX_LINES);
 
         fs::write(&remember_path, ensure_trailing_newline(&summary))?;
+        self.update_role_experience_memories(existing_summary.as_deref(), &transcript)?;
         fs::write(&rec_time_path, format!("{latest_timestamp}\n"))?;
 
         Ok("I'have remembered".to_string())
+    }
+
+    fn update_role_experience_memories(
+        &self,
+        remember_summary: Option<&str>,
+        transcript: &str,
+    ) -> io::Result<()> {
+        for spec in builtin_role_specs() {
+            let Some(rule) = spec.experience_memory_rule else {
+                continue;
+            };
+
+            let path = role_experience_summary_path(spec.role);
+            let existing_summary = read_trimmed_file(&path)?;
+            let mut summary = extract_remember_text(&self.generate_role_experience_summary(
+                spec.role,
+                rule,
+                remember_summary,
+                existing_summary.as_deref(),
+                transcript,
+            )?);
+
+            if line_count(&summary) > ROLE_EXPERIENCE_MAX_LINES {
+                summary = extract_remember_text(&self.compress_role_experience_summary(
+                    spec.role, rule, &summary,
+                )?);
+            }
+
+            summary = trim_to_max_lines(&summary, ROLE_EXPERIENCE_MAX_LINES);
+            fs::write(path, ensure_trailing_newline(&summary))?;
+        }
+        Ok(())
     }
 
     fn generate_remember_summary(
@@ -355,18 +390,89 @@ impl BottyBody {
         existing_summary: Option<&str>,
         transcript: &str,
     ) -> io::Result<String> {
+        let output_instruction = "Write `remember.md` in Markdown.\nKeep it under 100 lines.\nKeep only key events and the user's recent important requests plus solution status.";
         let user_prompt = match existing_summary.filter(|text| !text.trim().is_empty()) {
             Some(summary) => prompt::render(
                 prompt::REMEMBER_UPDATE_PROMPT,
-                &[("summary", summary), ("transcript", transcript)],
+                &[
+                    ("summary", summary),
+                    ("transcript", transcript),
+                    ("output_instruction", output_instruction),
+                ],
             ),
-            None => prompt::render(prompt::REMEMBER_INIT_PROMPT, &[("transcript", transcript)]),
+            None => prompt::render(
+                prompt::REMEMBER_INIT_PROMPT,
+                &[
+                    ("transcript", transcript),
+                    ("output_instruction", output_instruction),
+                ],
+            ),
         };
         self.run_summary_prompt(&user_prompt)
     }
 
     fn compress_remember_summary(&self, summary: &str) -> io::Result<String> {
-        let user_prompt = prompt::render(prompt::REMEMBER_COMPRESS_PROMPT, &[("summary", summary)]);
+        let output_instruction = "Write `remember.md` in Markdown.";
+        let user_prompt = prompt::render(
+            prompt::REMEMBER_COMPRESS_PROMPT,
+            &[
+                ("summary", summary),
+                ("output_instruction", output_instruction),
+            ],
+        );
+        self.run_summary_prompt(&user_prompt)
+    }
+
+    fn generate_role_experience_summary(
+        &self,
+        role_name: &str,
+        rule: &str,
+        remember_summary: Option<&str>,
+        existing_summary: Option<&str>,
+        transcript: &str,
+    ) -> io::Result<String> {
+        let remember_reference = remember_summary
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or("(empty)");
+        let role_specific_instruction = format!(
+            "Target role: `{role_name}`.\nRole memory rule:\n{rule}\nCurrent global remember.md for reference:\n```md\n{remember_reference}\n```\nWrite `{role_name}-exp.md` in Markdown.\nKeep only durable, reusable facts that help this role in future tasks.\nPrefer concise field-style records.\nUse both the new transcript and the current remember.md as evidence.\nIf the transcript adds nothing new, you may still keep or refine useful facts already supported by remember.md.\nIf neither transcript nor remember.md contains useful facts for this role, keep the existing content or return an empty file."
+        );
+        let user_prompt = match existing_summary.filter(|text| !text.trim().is_empty()) {
+            Some(summary) => prompt::render(
+                prompt::REMEMBER_UPDATE_PROMPT,
+                &[
+                    ("summary", summary),
+                    ("transcript", transcript),
+                    ("output_instruction", &role_specific_instruction),
+                ],
+            ),
+            None => prompt::render(
+                prompt::REMEMBER_INIT_PROMPT,
+                &[
+                    ("transcript", transcript),
+                    ("output_instruction", &role_specific_instruction),
+                ],
+            ),
+        };
+        self.run_summary_prompt(&user_prompt)
+    }
+
+    fn compress_role_experience_summary(
+        &self,
+        role_name: &str,
+        rule: &str,
+        summary: &str,
+    ) -> io::Result<String> {
+        let output_instruction = format!(
+            "Rewrite `{role_name}-exp.md` in Markdown.\nRole memory rule:\n{rule}\nKeep only durable, reusable facts for this role.\nPrefer concise field-style records."
+        );
+        let user_prompt = prompt::render(
+            prompt::REMEMBER_COMPRESS_PROMPT,
+            &[
+                ("summary", summary),
+                ("output_instruction", &output_instruction),
+            ],
+        );
         self.run_summary_prompt(&user_prompt)
     }
 
@@ -543,6 +649,15 @@ fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> 
             "\n\nRecent conversation history from memory/deep (latest {rounds} rounds):\n{memory}"
         )
     };
+    let role_experience = load_role_experience_summary(role_spec.role)?;
+    let role_experience_section = if role_experience.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nRole-specific memory from memory/summary/experience/{}-exp.md:\n{}",
+            role_spec.role, role_experience
+        )
+    };
     Ok(prompt::render(
         prompt::TOOL_SYSTEM_PROMPT,
         &[
@@ -560,6 +675,7 @@ fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> 
             ),
             ("remember_section", &remember_section),
             ("memory_section", &memory_section),
+            ("role_experience_section", &role_experience_section),
             ("current_local_time", &current_local_time),
         ],
     ))
@@ -586,6 +702,7 @@ fn build_system_prompt_for_custom_role(
             ),
             ("remember_section", ""),
             ("memory_section", ""),
+            ("role_experience_section", ""),
             ("current_local_time", &current_local_time),
         ],
     ))
@@ -775,8 +892,20 @@ fn remember_summary_path() -> PathBuf {
         .join("remember.md")
 }
 
+fn role_experience_summary_path(role: &str) -> PathBuf {
+    botty_root_dir()
+        .join("memory")
+        .join("summary")
+        .join("experience")
+        .join(format!("{role}-exp.md"))
+}
+
 fn load_remember_summary() -> io::Result<String> {
     Ok(read_trimmed_file(&remember_summary_path())?.unwrap_or_default())
+}
+
+fn load_role_experience_summary(role: &str) -> io::Result<String> {
+    Ok(read_trimmed_file(&role_experience_summary_path(role))?.unwrap_or_default())
 }
 
 fn read_trimmed_file(path: &Path) -> io::Result<Option<String>> {

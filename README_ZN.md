@@ -4,6 +4,7 @@ MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 
 
 ## 最近更新
 
+- `2026-03-11`：新增 role 专属经验记忆文件；`/remember` 现在会为 `coder` 和 `info-searcher` 同步整理 role memory，并在角色启动时自动注入对应 `memory/summary/experience/<role>-exp.md`。
 - `2026-03-10`：新增基于队列的委派任务恢复机制。父任务在工具委派后可以进入等待态，子任务完成后自动恢复，并可通过 `mylittlebotty watchjobs` 观察队列状态。
 - `2026-03-10`：新增内置 `terminal` skill、`coder` 角色、ACP 终端会话管理，以及基于 PTY 的编码代理执行能力，执行目录受当前 work dir 限制。
 - `2026-03-10`：新增 `mylittlebotty watchapp -n terminal`，可直接查看最新运行中的 terminal 会话输出。
@@ -35,7 +36,7 @@ TUI 内置命令：
 - `/setup`：进入配置界面，编辑 AI Provider 和聊天机器人配置。
 - `/restart-server`：重启本地 Botty 后台服务。
 - `/new`：开始新会话。
-- `/remember`：触发长期记忆摘要整理。
+- `/remember`：触发长期记忆摘要整理，并同步刷新所有已配置的 role 经验记忆。
 - `/set-guy-env`：打开 `Botty-Guy` 持久化环境变量的 TUI 编辑页。
 - `/set-guy-env KEY=VALUE`：校验变量名后落盘，并尝试热更新到当前运行中的 `Botty-Guy` 进程。
 - `/list-guy-env`：打开 `Botty-Guy` 已持久化环境变量的只读列表页。
@@ -74,6 +75,11 @@ TUI 内置命令：
 - `info-searcher`：面向网页浏览、在线检索和网页信息提取的浏览器角色。
 - `coder`：面向代码和仓库任务的角色，通过内置 `terminal` skill 驱动外部终端编码代理执行实际工作。
 
+当前已启用 role 专属经验记忆的角色：
+
+- `coder`：记录 `项目名:... 项目路径:... 项目简介:...`
+- `info-searcher`：记录 `应用名:... url地址:... leader称呼:...`
+
 分派能力由内置 `leader` skill 实现：
 
 - leader 判断任务适合哪个角色
@@ -81,7 +87,7 @@ TUI 内置命令：
 - 只把最小必要任务信息发给子进程，而不是整段历史对话
 - 再把子进程结果回传给原始会话
 
-更详细的设计说明见 `doc/role-agent.md`。
+更详细的设计说明见 `doc/role-agent.md`，role memory 规则见 `doc/role-memory.md`。
 
 ### 5. 本地工具能力
 
@@ -141,6 +147,8 @@ TUI 内置命令：
 - 摘要结果写入 `~/.mylittlebotty/memory/summary/remember.md`。
 - 最近整理时间写入 `~/.mylittlebotty/memory/summary/rec.time`。
 - 正常对话时，Botty 会优先使用 `memory/summary/remember.md` 和最近对话历史。
+- `/remember` 还会同步更新 `~/.mylittlebotty/memory/summary/experience/` 下所有已配置的 role 经验记忆文件。
+- role 启动时，如果存在 `~/.mylittlebotty/memory/summary/experience/<role>-exp.md`，会把内容注入该 role 的 system prompt。
 - 如果当前话题在这些内容里没有出现，内置 `remember` 工具会先让模型提炼搜索关键词，再在本地搜索 `~/.mylittlebotty/memory/deep`，并返回命中片段及其上下文。
 
 ### 10. Terminal 编码代理集成
@@ -444,6 +452,9 @@ chatbot.feishu.chat_id=
 - `~/.mylittlebotty/run/jobs/`：按角色保存的委派任务队列和 worker 状态
 - `~/.mylittlebotty/reminder.rec`：提醒任务记录
 - `~/.mylittlebotty/memory/summary/remember.md`：长期记忆摘要
+- `~/.mylittlebotty/memory/summary/experience/`：role 专属经验记忆目录
+- `~/.mylittlebotty/memory/summary/experience/coder-exp.md`：`coder` 角色经验记忆
+- `~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md`：`info-searcher` 角色经验记忆
 
 在开发环境运行时，部分生成的配置、运行时或日志文件会带 `-dev` 后缀；正式程序不会带 `-dev`。
 

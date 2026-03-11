@@ -20,10 +20,11 @@
 pub(crate) struct BottyGuyRoleSpec {
     pub role: &'static str,
     pub description: &'static str,
-    pub system_instruction: &'static str,
+    pub system_instruction_prompt: &'static str,
     pub skill_groups: &'static [&'static str],
     pub skills: &'static [&'static str],
     pub include_memory_context: bool,
+    pub experience_memory_rule: Option<&'static str>,
 }
 ```
 
@@ -35,6 +36,7 @@ pub(crate) struct BottyGuyRoleSpec {
 - `skill_groups`：技能组
 - `skills`：单独追加的技能
 - `include_memory_context`：是否注入 `remember summary` 和最近聊天历史
+- `experience_memory_rule`：该 role 是否维护专属经验记忆，以及记忆提炼规则
 
 角色指令文案不再直接写在代码里，当前放在：
 
@@ -112,6 +114,22 @@ const PAPERWORK_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
 - `leader`：`true`
 - `paperwork`：`false`
 - `all-in-one`：`false`
+
+## Role 专属 memory
+
+部分 role 还可以维护自己的经验记忆文件：
+
+- 路径格式：`~/.mylittlebotty/memory/summary/experience/<role>-exp.md`
+- 当前启用：
+  - `coder`
+  - `info-searcher`
+
+行为：
+
+- 执行 `/remember` 时，除了更新全局 `remember.md`，还会同步更新所有已启用 role memory 的 `*-exp.md`
+- role 启动时，如果该文件存在，会额外注入到该 role 的 system prompt
+
+规则说明见 [doc/role-memory.md](/Users/wangqizhi/Project/MyLittleBotty/doc/role-memory.md)。
 
 ## 调试日志里的 role
 
