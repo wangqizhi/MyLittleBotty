@@ -1,7 +1,7 @@
 use crate::botty_jobs::{
     self, enqueue_job, idle_timeout, job_age, list_roles, load_job, new_delegated_job,
     new_external_job, read_worker_pid, role_snapshot, update_job_state, wait_job_terminal,
-    write_worker_state, JobState,
+    write_worker_state, JobState, QueueJob,
 };
 use serde_json::{self, Value};
 use std::cmp::Ordering;
@@ -1438,6 +1438,8 @@ fn handle_chat_client(
             apply_set_env_control(&dispatch_tx, &key, &value)
         } else if let Some(control) = parse_delegate_control(&incoming.message) {
             handle_delegated_request(control, &dispatch_tx)
+        } else if let Some(control) = parse_interrupt_control(&incoming.message) {
+            handle_interrupt_request(control, &dispatch_tx)
         } else if let Some(control_incoming) =
             parse_enqueue_external_control(&incoming.message, &incoming)
         {
@@ -1483,6 +1485,19 @@ struct DelegatedControlRequest {
     payload: String,
     source: String,
     user_id: String,
+}
+
+struct InterruptControlRequest {
+    message_id: Option<String>,
+    role: Option<String>,
+    source: String,
+    user_id: String,
+}
+
+struct JobLookup {
+    role: String,
+    state: JobState,
+    job: QueueJob,
 }
 
 fn apply_set_env_control(
@@ -1587,6 +1602,15 @@ fn handle_delegated_request(
     Ok(job.message_id.clone())
 }
 
+fn handle_interrupt_request(
+    control: InterruptControlRequest,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<String> {
+    let root = botty_root_dir();
+    let target = resolve_interrupt_target(&root, &control)?;
+    interrupt_job(&root, target, dispatch_tx)
+}
+
 fn leader_message_for_source(incoming: &IncomingChatMessage) -> String {
     let prefix = format!("{}: ", incoming.source);
     if incoming.message.starts_with(&prefix) {
@@ -1627,6 +1651,225 @@ fn parse_delegate_control(message: &str) -> Option<DelegatedControlRequest> {
             .unwrap_or("leader")
             .to_string(),
     })
+}
+
+fn parse_interrupt_control(message: &str) -> Option<InterruptControlRequest> {
+    let payload = message.strip_prefix(CONTROL_PREFIX)?;
+    let payload = payload.strip_prefix("interrupt|")?;
+    let value: Value = serde_json::from_str(payload).ok()?;
+    Some(InterruptControlRequest {
+        message_id: value
+            .get("message_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        role: value
+            .get("role")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        source: value
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("leader")
+            .to_string(),
+        user_id: value
+            .get("user_id")
+            .and_then(Value::as_str)
+            .unwrap_or("leader")
+            .to_string(),
+    })
+}
+
+fn resolve_interrupt_target(
+    root: &PathBuf,
+    control: &InterruptControlRequest,
+) -> io::Result<JobLookup> {
+    if let Some(message_id) = control.message_id.as_deref() {
+        let Some(found) = find_job_by_message_id(root, message_id)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("task {message_id} not found"),
+            ));
+        };
+        if let Some(role) = control.role.as_deref() {
+            if found.job.to_role != role {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "task {message_id} belongs to role {}, not {role}",
+                        found.job.to_role
+                    ),
+                ));
+            }
+        }
+        return Ok(found);
+    }
+
+    let mut candidates = list_active_jobs(root)?
+        .into_iter()
+        .filter(|item| item.job.kind == "delegated_task")
+        .filter(|item| item.job.source == control.source)
+        .filter(|item| item.job.user_id == control.user_id)
+        .collect::<Vec<_>>();
+    if let Some(role) = control.role.as_deref() {
+        candidates.retain(|item| item.job.to_role == role);
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .job
+            .updated_at_ms
+            .cmp(&left.job.updated_at_ms)
+            .then_with(|| right.job.created_at_ms.cmp(&left.job.created_at_ms))
+    });
+    candidates.into_iter().next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no active delegated task found to interrupt",
+        )
+    })
+}
+
+fn find_job_by_message_id(root: &PathBuf, message_id: &str) -> io::Result<Option<JobLookup>> {
+    for role in list_roles(root)? {
+        for state in all_job_states() {
+            match load_job(root, &role, state.clone(), message_id) {
+                Ok(job) => {
+                    return Ok(Some(JobLookup { role, state, job }));
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn list_active_jobs(root: &PathBuf) -> io::Result<Vec<JobLookup>> {
+    let mut jobs = Vec::new();
+    for role in list_roles(root)? {
+        for state in active_job_states() {
+            for job in botty_jobs::list_jobs(root, &role, state.clone())? {
+                jobs.push(JobLookup {
+                    role: role.clone(),
+                    state: state.clone(),
+                    job,
+                });
+            }
+        }
+    }
+    Ok(jobs)
+}
+
+fn active_job_states() -> [JobState; 3] {
+    [JobState::Queued, JobState::Running, JobState::Waiting]
+}
+
+fn all_job_states() -> [JobState; 5] {
+    [
+        JobState::Queued,
+        JobState::Running,
+        JobState::Waiting,
+        JobState::Done,
+        JobState::Failed,
+    ]
+}
+
+fn interrupt_job(
+    root: &PathBuf,
+    target: JobLookup,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<String> {
+    match target.state {
+        JobState::Queued => {
+            let message_id = target.job.message_id.clone();
+            let role = target.role.clone();
+            fail_job(
+                root,
+                role.as_str(),
+                JobState::Queued,
+                target.job,
+                "interrupted before start".to_string(),
+                dispatch_tx,
+            )?;
+            Ok(format!(
+                "Interrupted queued task {message_id} for role {role} before it started."
+            ))
+        }
+        JobState::Running => {
+            let pid = target
+                .job
+                .worker_pid
+                .or(read_worker_pid(root, &target.role)?)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "task {} is running but worker pid is unavailable",
+                            target.job.message_id
+                        ),
+                    )
+                })?;
+            send_signal(pid, libc::SIGINT)?;
+            Ok(format!(
+                "Sent interrupt to running task {} for role {} (pid {}).",
+                target.job.message_id, target.role, pid
+            ))
+        }
+        JobState::Waiting => {
+            if let Some(child_message_id) = target.job.awaiting_message_id.clone() {
+                if child_message_id == target.job.message_id {
+                    return Err(io::Error::other(
+                        "refusing to interrupt self-referential waiting job",
+                    ));
+                }
+                let child = find_job_by_message_id(root, &child_message_id)?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "waiting task {} references missing child task {}",
+                            target.job.message_id, child_message_id
+                        ),
+                    )
+                })?;
+                return interrupt_job(root, child, dispatch_tx);
+            }
+
+            let message_id = target.job.message_id.clone();
+            let role = target.role.clone();
+            fail_job(
+                root,
+                role.as_str(),
+                JobState::Waiting,
+                target.job,
+                "interrupted while waiting".to_string(),
+                dispatch_tx,
+            )?;
+            Ok(format!(
+                "Interrupted waiting task {message_id} for role {role}."
+            ))
+        }
+        JobState::Done => Ok(format!(
+            "Task {} for role {} is already done.",
+            target.job.message_id, target.role
+        )),
+        JobState::Failed => Ok(format!(
+            "Task {} for role {} is already failed.",
+            target.job.message_id, target.role
+        )),
+    }
+}
+
+fn fail_job(
+    root: &PathBuf,
+    role: &str,
+    from: JobState,
+    mut job: QueueJob,
+    error: String,
+    dispatch_tx: &Sender<DispatcherCommand>,
+) -> io::Result<()> {
+    job.last_error = Some(error);
+    job.completed_at_ms = Some(botty_jobs::now_ms());
+    update_job_state(root, role, from, JobState::Failed, &mut job)?;
+    try_resume_parent_job(root, &job, dispatch_tx)
 }
 
 fn parse_chat_meta_message(raw: &str) -> IncomingChatMessage {

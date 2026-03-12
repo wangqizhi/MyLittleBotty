@@ -12,6 +12,8 @@ pub mod buildin_remember;
 pub mod buildin_terminal;
 #[path = "buildin-watch.rs"]
 pub mod buildin_watch;
+#[path = "buildin-web-search.rs"]
+pub mod buildin_web_search;
 #[path = "buildin-write.rs"]
 pub mod buildin_write;
 #[path = "custom-skill.rs"]
@@ -26,6 +28,7 @@ use crate::skill::buildin_list::BuildinListSkill;
 use crate::skill::buildin_remember::BuildinRememberSkill;
 use crate::skill::buildin_terminal::BuildinTerminalSkill;
 use crate::skill::buildin_watch::BuildinWatchSkill;
+use crate::skill::buildin_web_search::BuildinWebSearchSkill;
 use crate::skill::buildin_write::BuildinWriteSkill;
 use crate::skill::custom_skill::load_all_custom_skills;
 
@@ -37,13 +40,22 @@ pub trait BottySkill {
 }
 
 pub const BUILDIN_SKILL_NAMES: &[&str] = &[
-    "list", "watch", "write", "remember", "crond", "leader", "terminal", "browser",
+    "list",
+    "watch",
+    "write",
+    "remember",
+    "crond",
+    "leader",
+    "terminal",
+    "browser",
+    "web-search",
 ];
 
 pub fn build_skill(name: &str) -> Option<Box<dyn BottySkill>> {
     match name {
         "terminal" => Some(Box::new(BuildinTerminalSkill::new())),
         "browser" => Some(Box::new(BuildinBrowserSkill::new())),
+        "web-search" => Some(Box::new(BuildinWebSearchSkill::new())),
         "list" => Some(Box::new(BuildinListSkill::new())),
         "watch" => Some(Box::new(BuildinWatchSkill::new())),
         "write" => Some(Box::new(BuildinWriteSkill::new())),

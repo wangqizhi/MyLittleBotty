@@ -74,7 +74,7 @@ const INFO_SEARCHER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     description: "Handle browser-driven webpage navigation, search, and information extraction.",
     system_instruction_prompt: prompt::ROLE_INFO_SEARCHER_SYSTEM_PROMPT,
     skill_groups: &[],
-    skills: &["browser"],
+    skills: &["web-search", "browser"],
     include_memory_context: false,
     experience_memory_rule: Some(
         "Keep stable mappings between app/site names, URL addresses, and how leaders or owners are called. Prefer records like `应用名:xxx url地址:xxx leader称呼:xxx 说明:xxx`.",

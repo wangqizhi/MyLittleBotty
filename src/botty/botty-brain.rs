@@ -5,6 +5,8 @@ use std::io;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use crate::llm_provider::provider_anthropic::AnthropicProvider;
 use crate::llm_provider::provider_minimax::MinimaxProvider;
@@ -13,6 +15,8 @@ use crate::llm_provider::{
     detect_provider, LlmProvider, ProviderKind, ProviderMessage, ProviderResponse,
     ProviderToolDefinition,
 };
+
+const AI_PROVIDER_REQUEST_MAX_RETRIES: usize = 3;
 
 pub struct BrainConfig {
     pub endpoint: String,
@@ -77,37 +81,73 @@ impl BottyBrain {
         self.log_debug("request-url", &request.url)?;
         self.log_debug("request", &request.payload)?;
 
-        let mut command = Command::new("curl");
-        command
-            .arg("-fsS")
-            .arg("-X")
-            .arg("POST")
-            .arg(&request.url)
-            .arg("-H")
-            .arg("Content-Type: application/json");
-
-        for (name, value) in &request.headers {
-            command.arg("-H").arg(format!("{name}: {value}"));
-        }
-
-        let output = command.arg("-d").arg(&request.payload).output()?;
-        let response_body = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let response_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-        if !response_body.is_empty() {
-            self.log_debug("response", &response_body)?;
-        }
-        if !response_error.is_empty() {
-            self.log_debug("response-stderr", &response_error)?;
-        }
-
-        if !output.status.success() {
-            return Err(io::Error::other(classify_provider_error(
-                response_error.as_str(),
-            )));
-        }
+        let response_body = self.execute_provider_request(&request)?;
 
         provider.parse_response(&response_body)
+    }
+
+    fn execute_provider_request(
+        &self,
+        request: &crate::llm_provider::ProviderRequest,
+    ) -> io::Result<String> {
+        let mut last_error: Option<io::Error> = None;
+
+        for attempt in 0..=AI_PROVIDER_REQUEST_MAX_RETRIES {
+            let mut command = Command::new("curl");
+            command
+                .arg("-fsS")
+                .arg("-X")
+                .arg("POST")
+                .arg(&request.url)
+                .arg("-H")
+                .arg("Content-Type: application/json");
+
+            for (name, value) in &request.headers {
+                command.arg("-H").arg(format!("{name}: {value}"));
+            }
+
+            match command.arg("-d").arg(&request.payload).output() {
+                Ok(output) => {
+                    let response_body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let response_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+                    if !response_body.is_empty() {
+                        self.log_debug("response", &response_body)?;
+                    }
+                    if !response_error.is_empty() {
+                        self.log_debug("response-stderr", &response_error)?;
+                    }
+
+                    if output.status.success() {
+                        return Ok(response_body);
+                    }
+
+                    last_error = Some(io::Error::other(classify_provider_error(
+                        response_error.as_str(),
+                    )));
+                }
+                Err(err) => {
+                    last_error = Some(io::Error::new(
+                        err.kind(),
+                        format!("failed to execute curl for AI provider request: {err}"),
+                    ));
+                }
+            }
+
+            if attempt < AI_PROVIDER_REQUEST_MAX_RETRIES {
+                let attempt_num = attempt + 1;
+                self.log_debug(
+                    "retry",
+                    &format!(
+                        "ai provider request attempt {} failed, retrying (max retries={})",
+                        attempt_num, AI_PROVIDER_REQUEST_MAX_RETRIES
+                    ),
+                )?;
+                thread::sleep(Duration::from_millis(400 * attempt_num as u64));
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| io::Error::other("AI provider request failed")))
     }
 
     fn log_debug(&self, direction: &str, content: &str) -> io::Result<()> {

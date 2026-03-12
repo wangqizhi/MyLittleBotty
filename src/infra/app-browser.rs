@@ -202,16 +202,78 @@ impl AppBrowser {
 
     pub fn click(&self, locator: &str) -> io::Result<Value> {
         let mut cdp = self.lock_cdp()?;
-        let value = cdp.evaluate_value(click_script(locator))?;
+        let value = cdp.evaluate_value(prepare_interaction_script(locator, false))?;
+        dispatch_mouse_click(&mut cdp, &value)?;
         wait_until_ready(&mut cdp, PAGE_READY_TIMEOUT)?;
+        Ok(value)
+    }
+
+    pub fn focus(&self, locator: &str) -> io::Result<Value> {
+        let mut cdp = self.lock_cdp()?;
+        let mut value = cdp.evaluate_value(prepare_interaction_script(locator, true))?;
+        if !value
+            .get("focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            dispatch_mouse_click(&mut cdp, &value)?;
+            value = cdp.evaluate_value(check_focus_script(locator))?;
+        }
         Ok(value)
     }
 
     pub fn fill(&self, locator: &str, text: &str) -> io::Result<Value> {
         let mut cdp = self.lock_cdp()?;
-        let value = cdp.evaluate_value(fill_script(locator, text))?;
+        let mut value = cdp.evaluate_value(prepare_interaction_script(locator, true))?;
+        if !value
+            .get("focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            dispatch_mouse_click(&mut cdp, &value)?;
+            value = cdp.evaluate_value(check_focus_script(locator))?;
+        }
+        if !value
+            .get("focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(io::Error::other(format!(
+                "locator `{locator}` did not receive focus before typing"
+            )));
+        }
+        cdp.command(
+            "Input.dispatchKeyEvent",
+            json!({
+                "type": "rawKeyDown",
+                "key": "End",
+                "code": "End",
+                "windowsVirtualKeyCode": 35,
+                "nativeVirtualKeyCode": 35,
+            }),
+        )?;
+        cdp.command(
+            "Input.dispatchKeyEvent",
+            json!({
+                "type": "keyUp",
+                "key": "End",
+                "code": "End",
+                "windowsVirtualKeyCode": 35,
+                "nativeVirtualKeyCode": 35,
+            }),
+        )?;
+        cdp.command("Input.insertText", json!({ "text": text }))?;
         wait_until_ready(&mut cdp, PAGE_READY_TIMEOUT)?;
         Ok(value)
+    }
+
+    pub fn press(&self, key: &str) -> io::Result<Value> {
+        let mut cdp = self.lock_cdp()?;
+        dispatch_key_press(&mut cdp, key)?;
+        Ok(json!({
+            "ok": true,
+            "key": key,
+        }))
     }
 
     pub fn eval(&self, script: &str) -> io::Result<Value> {
@@ -655,13 +717,7 @@ fn wait_for_locator(cdp: &mut CdpSession, locator: &str, timeout: Duration) -> i
     let script = format!(
         r#"(function () {{
             const locator = {escaped};
-            function resolve(target) {{
-                if (!target) return null;
-                if (target.startsWith("@")) {{
-                    return document.querySelector(`[data-botty-ref="${{target.slice(1)}}"]`);
-                }}
-                return document.querySelector(target);
-            }}
+            {locator_resolver}
             const el = resolve(locator);
             if (!el) return {{ found: false }};
             const rect = el.getBoundingClientRect();
@@ -670,7 +726,8 @@ fn wait_for_locator(cdp: &mut CdpSession, locator: &str, timeout: Duration) -> i
                 tag: (el.tagName || "").toLowerCase(),
                 text: (el.innerText || el.value || "").trim().slice(0, 200)
             }};
-        }})()"#
+        }})()"#,
+        locator_resolver = locator_resolver_script()
     );
 
     loop {
@@ -688,69 +745,272 @@ fn wait_for_locator(cdp: &mut CdpSession, locator: &str, timeout: Duration) -> i
     }
 }
 
-fn click_script(locator: &str) -> String {
+fn prepare_interaction_script(locator: &str, focus: bool) -> String {
     let locator = serde_json::to_string(locator).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"(function () {{
             const locator = {locator};
-            function resolve(target) {{
-                if (!target) return null;
-                if (target.startsWith("@")) {{
-                    return document.querySelector(`[data-botty-ref="${{target.slice(1)}}"]`);
-                }}
-                return document.querySelector(target);
-            }}
+            const shouldFocus = {focus};
+            {locator_resolver}
             const el = resolve(locator);
             if (!el) {{
                 throw new Error(`locator not found: ${{locator}}`);
             }}
             el.scrollIntoView({{ block: "center", inline: "center" }});
-            el.click();
+            if (shouldFocus && typeof el.focus === "function") {{
+                el.focus({{ preventScroll: true }});
+            }}
+
+            if (typeof el.select === "function") {{
+                el.select();
+            }} else if (
+                "value" in el &&
+                typeof el.value === "string" &&
+                typeof el.setSelectionRange === "function"
+            ) {{
+                el.setSelectionRange(0, el.value.length);
+            }} else if (el.isContentEditable) {{
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }}
+
+            const rect = el.getBoundingClientRect();
+            const active = document.activeElement;
+            const focused = active === el || el.contains(active);
             return {{
                 ok: true,
                 locator,
                 tag: (el.tagName || "").toLowerCase(),
-                text: (el.innerText || el.value || "").trim().slice(0, 200)
+                text: (el.innerText || el.value || "").trim().slice(0, 200),
+                focused,
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+                width: rect.width,
+                height: rect.height
             }};
-        }})()"#
+        }})()"#,
+        focus = if focus { "true" } else { "false" },
+        locator_resolver = locator_resolver_script()
     )
 }
 
-fn fill_script(locator: &str, text: &str) -> String {
+fn check_focus_script(locator: &str) -> String {
     let locator = serde_json::to_string(locator).unwrap_or_else(|_| "\"\"".to_string());
-    let text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"(function () {{
             const locator = {locator};
-            const value = {text};
-            function resolve(target) {{
-                if (!target) return null;
-                if (target.startsWith("@")) {{
-                    return document.querySelector(`[data-botty-ref="${{target.slice(1)}}"]`);
-                }}
-                return document.querySelector(target);
-            }}
+            {locator_resolver}
             const el = resolve(locator);
             if (!el) {{
                 throw new Error(`locator not found: ${{locator}}`);
             }}
-            el.scrollIntoView({{ block: "center", inline: "center" }});
-            el.focus();
-            if ("value" in el) {{
-                el.value = value;
-            }} else {{
-                el.textContent = value;
-            }}
-            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-            el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+            const active = document.activeElement;
             return {{
                 ok: true,
                 locator,
                 tag: (el.tagName || "").toLowerCase(),
-                valueLength: value.length
+                focused: active === el || el.contains(active),
+                text: (el.innerText || el.value || "").trim().slice(0, 200)
             }};
-        }})()"#
+        }})()"#,
+        locator_resolver = locator_resolver_script()
     )
+}
+
+fn locator_resolver_script() -> &'static str {
+    r#"
+            function visible(el) {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.visibility === "hidden" || style.display === "none") return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }
+
+            function textOf(el) {
+                return String(
+                    el?.innerText ||
+                    el?.textContent ||
+                    el?.value ||
+                    el?.getAttribute?.("aria-label") ||
+                    el?.getAttribute?.("placeholder") ||
+                    ""
+                ).trim();
+            }
+
+            function normalize(value) {
+                return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+            }
+
+            function pickVisible(nodes) {
+                for (const el of nodes) {
+                    if (visible(el)) return el;
+                }
+                return nodes[0] || null;
+            }
+
+            function resolve(target) {
+                if (!target) return null;
+                if (target.startsWith("@")) {
+                    return document.querySelector(`[data-botty-ref="${target.slice(1)}"]`);
+                }
+                if (target.startsWith("css=")) {
+                    return document.querySelector(target.slice(4));
+                }
+                if (target.startsWith("placeholder=")) {
+                    const expected = target.slice("placeholder=".length).trim();
+                    return pickVisible(Array.from(document.querySelectorAll("input[placeholder], textarea[placeholder]")).filter((el) =>
+                        normalize(el.getAttribute("placeholder")).includes(normalize(expected))
+                    ));
+                }
+                if (target.startsWith("aria=")) {
+                    const expected = target.slice("aria=".length).trim();
+                    return pickVisible(Array.from(document.querySelectorAll("[aria-label]")).filter((el) =>
+                        normalize(el.getAttribute("aria-label")).includes(normalize(expected))
+                    ));
+                }
+                if (target.startsWith("label=")) {
+                    const expected = normalize(target.slice("label=".length));
+                    const labels = Array.from(document.querySelectorAll("label"));
+                    for (const label of labels) {
+                        if (!normalize(textOf(label)).includes(expected)) continue;
+                        if (label.control) return label.control;
+                        const nested = label.querySelector("input, textarea, select, [contenteditable='true'], [role='textbox']");
+                        if (nested) return nested;
+                    }
+                    return null;
+                }
+                if (target.startsWith("text=")) {
+                    const expected = normalize(target.slice("text=".length));
+                    const candidates = Array.from(document.querySelectorAll(
+                        "button, a, input, textarea, [contenteditable='true'], [role='button'], [role='textbox'], div, span"
+                    )).filter((el) => normalize(textOf(el)).includes(expected));
+                    return pickVisible(candidates);
+                }
+                if (target.startsWith("role=")) {
+                    const raw = target.slice("role=".length);
+                    const parts = raw.split("|");
+                    const role = normalize(parts[0]);
+                    const name = normalize(parts.slice(1).join("|"));
+                    const candidates = Array.from(document.querySelectorAll(`[role="${role}"], ${role}`)).filter((el) => {
+                        if (!name) return true;
+                        return normalize(textOf(el)).includes(name);
+                    });
+                    return pickVisible(candidates);
+                }
+                return document.querySelector(target);
+            }
+    "#
+}
+
+fn dispatch_mouse_click(cdp: &mut CdpSession, value: &Value) -> io::Result<()> {
+    let x = value
+        .get("x")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| io::Error::other("interaction target missing x coordinate"))?;
+    let y = value
+        .get("y")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| io::Error::other("interaction target missing y coordinate"))?;
+    cdp.command(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0 }),
+    )?;
+    cdp.command(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
+    )?;
+    cdp.command(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
+    )?;
+    Ok(())
+}
+
+fn dispatch_key_press(cdp: &mut CdpSession, key: &str) -> io::Result<()> {
+    let payload = key_event_payload(key)?;
+    cdp.command(
+        "Input.dispatchKeyEvent",
+        payload.get("down").cloned().unwrap_or(Value::Null),
+    )?;
+    if let Some(char_payload) = payload.get("char") {
+        cdp.command("Input.dispatchKeyEvent", char_payload.clone())?;
+    }
+    cdp.command(
+        "Input.dispatchKeyEvent",
+        payload.get("up").cloned().unwrap_or(Value::Null),
+    )?;
+    Ok(())
+}
+
+fn key_event_payload(key: &str) -> io::Result<Value> {
+    let normalized = key.trim();
+    let payload = match normalized {
+        "Enter" => json!({
+            "down": { "type": "rawKeyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13 },
+            "char": { "type": "char", "key": "Enter", "code": "Enter", "text": "\r", "unmodifiedText": "\r", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13 },
+            "up": { "type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13 }
+        }),
+        "Tab" => json!({
+            "down": { "type": "rawKeyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9 },
+            "up": { "type": "keyUp", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9 }
+        }),
+        "Escape" => json!({
+            "down": { "type": "rawKeyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27, "nativeVirtualKeyCode": 27 },
+            "up": { "type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27, "nativeVirtualKeyCode": 27 }
+        }),
+        "Backspace" => json!({
+            "down": { "type": "rawKeyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8 },
+            "up": { "type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8 }
+        }),
+        "ArrowDown" => json!({
+            "down": { "type": "rawKeyDown", "key": "ArrowDown", "code": "ArrowDown", "windowsVirtualKeyCode": 40, "nativeVirtualKeyCode": 40 },
+            "up": { "type": "keyUp", "key": "ArrowDown", "code": "ArrowDown", "windowsVirtualKeyCode": 40, "nativeVirtualKeyCode": 40 }
+        }),
+        "ArrowUp" => json!({
+            "down": { "type": "rawKeyDown", "key": "ArrowUp", "code": "ArrowUp", "windowsVirtualKeyCode": 38, "nativeVirtualKeyCode": 38 },
+            "up": { "type": "keyUp", "key": "ArrowUp", "code": "ArrowUp", "windowsVirtualKeyCode": 38, "nativeVirtualKeyCode": 38 }
+        }),
+        "ArrowLeft" => json!({
+            "down": { "type": "rawKeyDown", "key": "ArrowLeft", "code": "ArrowLeft", "windowsVirtualKeyCode": 37, "nativeVirtualKeyCode": 37 },
+            "up": { "type": "keyUp", "key": "ArrowLeft", "code": "ArrowLeft", "windowsVirtualKeyCode": 37, "nativeVirtualKeyCode": 37 }
+        }),
+        "ArrowRight" => json!({
+            "down": { "type": "rawKeyDown", "key": "ArrowRight", "code": "ArrowRight", "windowsVirtualKeyCode": 39, "nativeVirtualKeyCode": 39 },
+            "up": { "type": "keyUp", "key": "ArrowRight", "code": "ArrowRight", "windowsVirtualKeyCode": 39, "nativeVirtualKeyCode": 39 }
+        }),
+        "Space" => json!({
+            "down": { "type": "rawKeyDown", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32 },
+            "char": { "type": "char", "key": " ", "code": "Space", "text": " ", "unmodifiedText": " ", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32 },
+            "up": { "type": "keyUp", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32 }
+        }),
+        _ if normalized.chars().count() == 1 => {
+            let ch = normalized.chars().next().unwrap_or_default();
+            let code = if ch.is_ascii_alphabetic() {
+                format!("Key{}", ch.to_ascii_uppercase())
+            } else if ch.is_ascii_digit() {
+                format!("Digit{ch}")
+            } else {
+                "Unidentified".to_string()
+            };
+            let key_code = ch as u32;
+            json!({
+                "down": { "type": "rawKeyDown", "key": normalized, "code": code, "windowsVirtualKeyCode": key_code, "nativeVirtualKeyCode": key_code },
+                "char": { "type": "char", "key": normalized, "code": code, "text": normalized, "unmodifiedText": normalized, "windowsVirtualKeyCode": key_code, "nativeVirtualKeyCode": key_code },
+                "up": { "type": "keyUp", "key": normalized, "code": code, "windowsVirtualKeyCode": key_code, "nativeVirtualKeyCode": key_code }
+            })
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported key: {normalized}"),
+            ))
+        }
+    };
+    Ok(payload)
 }
 
 fn spawn_reader_thread(

@@ -24,11 +24,11 @@ impl BuildinLeaderSkill {
             .map(|(name, desc)| format!("{name}: {desc}"))
             .collect();
         let role_desc = format!(
-            "Target Botty-Guy role. Available roles:\\n{}",
+            "Target Botty-Guy role. Required for delegate. Optional as a filter for interrupt. Available roles:\\n{}",
             role_list.join("\\n")
         );
         format!(
-            r#"{{"type":"object","properties":{{"role":{{"type":"string","description":"{role_desc}"}},"task":{{"type":"string","description":"Delegated task for the target role"}},"necessary_info":{{"type":"string","description":"Only the minimal context the target role needs. Do not include old chat history or summaries."}},"handoff_message":{{"type":"string","description":"Optional short natural-language message to send the user when this delegation starts. Keep it brief and conversational."}}}},"required":["role","task"]}}"#,
+            r#"{{"type":"object","properties":{{"action":{{"type":"string","description":"Either `delegate` or `interrupt`. Default is `delegate`."}},"role":{{"type":"string","description":"{role_desc}"}},"task":{{"type":"string","description":"Delegated task for the target role. Required for `delegate`."}},"necessary_info":{{"type":"string","description":"Only the minimal context the target role needs. Do not include old chat history or summaries."}},"handoff_message":{{"type":"string","description":"Optional short natural-language message to send the user when this delegation starts. Keep it brief and conversational."}},"message_id":{{"type":"string","description":"Specific delegated task message id to interrupt. Optional for `interrupt`; if omitted, leader will interrupt the latest active delegated task for the same user/source, optionally filtered by `role`."}}}},"required":[]}}"#,
         )
     }
 }
@@ -39,7 +39,7 @@ impl BottySkill for BuildinLeaderSkill {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate the current task to a role-specific Botty-Guy with reduced context"
+        "Delegate a task to another Botty-Guy role, or interrupt an in-flight delegated task"
     }
 
     fn input_schema_json(&self) -> &'static str {
@@ -55,26 +55,27 @@ impl BottySkill for BuildinLeaderSkill {
             )
         })?;
 
-        let role = required_string(&input, "role")?;
-        if !delegated_role_exists(role) {
-            let names = delegated_role_names();
-            return Err(io::Error::new(
+        match optional_string(&input, "action").unwrap_or("delegate") {
+            "delegate" => {
+                let role = required_role(&input)?;
+                let task = required_string(&input, "task")?;
+                let necessary_info = optional_string(&input, "necessary_info").unwrap_or_default();
+                let handoff_message = optional_string(&input, "handoff_message");
+                run_delegated_guy(
+                    role,
+                    &delegated_task_prompt(role, task, necessary_info),
+                    handoff_message,
+                )
+            }
+            "interrupt" => run_interrupt_request(
+                optional_string(&input, "message_id"),
+                optional_role(&input)?,
+            ),
+            other => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "unsupported delegated role: {role}. available roles: {}",
-                    names.join(", ")
-                ),
-            ));
+                format!("unsupported leader action: {other}"),
+            )),
         }
-
-        let task = required_string(&input, "task")?;
-        let necessary_info = optional_string(&input, "necessary_info").unwrap_or_default();
-        let handoff_message = optional_string(&input, "handoff_message");
-        run_delegated_guy(
-            role,
-            &delegated_task_prompt(role, task, necessary_info),
-            handoff_message,
-        )
     }
 }
 
@@ -125,6 +126,67 @@ fn run_delegated_guy(
         "handoff_message": handoff_message,
     });
     Ok(format!("{ASYNC_DELEGATION_PREFIX}{payload}"))
+}
+
+fn run_interrupt_request(message_id: Option<&str>, role: Option<&str>) -> io::Result<String> {
+    let source = env::var("BOTTY_CURRENT_JOB_SOURCE").unwrap_or_else(|_| "leader".to_string());
+    let user_id = env::var("BOTTY_CURRENT_JOB_USER_ID").unwrap_or_else(|_| "leader".to_string());
+
+    let stream = UnixStream::connect(crate::botty_boss::chat_socket_path())?;
+    let read_stream = stream.try_clone()?;
+    let mut stdin = BufWriter::new(stream);
+    let mut stdout = BufReader::new(read_stream);
+    let control = serde_json::json!({
+        "message_id": message_id,
+        "role": role,
+        "source": source,
+        "user_id": user_id,
+    });
+    writeln!(
+        stdin,
+        "{}",
+        encode_ipc_line(&format!("__botty_control__interrupt|{}", control))?
+    )?;
+    stdin.flush()?;
+
+    let mut response = String::new();
+    let bytes = stdout.read_line(&mut response)?;
+    if bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "boss closed interrupt socket before replying",
+        ));
+    }
+
+    decode_ipc_line(response.trim_end())
+}
+
+fn required_role<'a>(input: &'a Value) -> io::Result<&'a str> {
+    let role = required_string(input, "role")?;
+    validate_role(role)?;
+    Ok(role)
+}
+
+fn optional_role<'a>(input: &'a Value) -> io::Result<Option<&'a str>> {
+    let Some(role) = optional_string(input, "role") else {
+        return Ok(None);
+    };
+    validate_role(role)?;
+    Ok(Some(role))
+}
+
+fn validate_role(role: &str) -> io::Result<()> {
+    if delegated_role_exists(role) {
+        return Ok(());
+    }
+    let names = delegated_role_names();
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "unsupported delegated role: {role}. available roles: {}",
+            names.join(", ")
+        ),
+    ))
 }
 
 fn required_string<'a>(input: &'a Value, key: &str) -> io::Result<&'a str> {

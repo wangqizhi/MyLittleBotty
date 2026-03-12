@@ -20,7 +20,7 @@ const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
 const ROLE_EXPERIENCE_MAX_LINES: usize = 60;
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
-const MAX_TOOL_CALL_STEPS: usize = 8;
+const MAX_TOOL_CALL_STEPS: usize = 50;
 const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
 
 pub struct AssistantReply {
@@ -114,6 +114,13 @@ impl BottyBody {
         if let Some((name, argument)) = parse_debug_tool_call(input) {
             return Ok(AssistantReply {
                 text: self.execute_tool(name, &argument)?,
+                thinking: None,
+                control: None,
+            });
+        }
+        if let Some(interrupt_result) = self.try_handle_interrupt_shortcut(input)? {
+            return Ok(AssistantReply {
+                text: interrupt_result,
                 thinking: None,
                 control: None,
             });
@@ -310,6 +317,23 @@ impl BottyBody {
                 input_schema_json: skill.input_schema_json(),
             })
             .collect()
+    }
+
+    fn current_role_name(&self) -> &str {
+        match &self.role_info {
+            RoleInfo::Builtin(spec) => spec.role,
+            RoleInfo::Custom(config) => &config.name,
+        }
+    }
+
+    fn try_handle_interrupt_shortcut(&self, input: &str) -> io::Result<Option<String>> {
+        if self.current_role_name() != "leader" {
+            return Ok(None);
+        }
+        let Some(argument) = parse_leader_interrupt_shortcut(input) else {
+            return Ok(None);
+        };
+        Ok(Some(self.execute_tool("leader", &argument)?))
     }
 
     fn remember_deep_memory(&self) -> io::Result<String> {
@@ -741,9 +765,47 @@ fn render_tool_usage_guidance(skills: &[String]) -> String {
     }
     if skills.iter().any(|skill| skill == "leader") {
         lines.push("Use `leader` to delegate to a specialized role when this role is responsible for routing.".to_string());
+        lines.push("If the user asks to stop, cancel, abort, interrupt, terminate, 取消, 中断, 停止, or 终止 a delegated task, you must call `leader` with `action=\"interrupt\"`. Do not claim the task was interrupted unless that tool call has actually succeeded.".to_string());
     }
 
     lines.join(" ")
+}
+
+fn parse_leader_interrupt_shortcut(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || !looks_like_interrupt_request(trimmed) {
+        return None;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    let role = ["coder", "info-searcher", "paperwork", "all-in-one"]
+        .into_iter()
+        .find(|candidate| lowered.contains(candidate))
+        .map(str::to_string);
+
+    let payload = if let Some(role) = role {
+        serde_json::json!({
+            "action": "interrupt",
+            "role": role,
+        })
+    } else {
+        serde_json::json!({
+            "action": "interrupt",
+        })
+    };
+    Some(payload.to_string())
+}
+
+fn looks_like_interrupt_request(input: &str) -> bool {
+    let lowered = input.to_ascii_lowercase();
+    let english_hit = ["interrupt", "cancel", "abort", "stop", "terminate", "pause"]
+        .into_iter()
+        .any(|keyword| lowered.contains(keyword));
+    let chinese_hit = ["中断", "取消", "停止", "终止", "停一下", "停下", "打断"]
+        .into_iter()
+        .any(|keyword| input.contains(keyword));
+
+    english_hit || chinese_hit
 }
 
 fn load_recent_deep_memory_transcript(rounds: usize) -> io::Result<String> {
@@ -1003,4 +1065,35 @@ fn local_time_string() -> io::Result<String> {
         return Err(io::Error::other("failed to get local time by date command"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_interrupt_request, parse_leader_interrupt_shortcut};
+
+    #[test]
+    fn detects_interrupt_requests_in_chinese() {
+        assert!(looks_like_interrupt_request("中断一下这个任务"));
+        assert!(looks_like_interrupt_request("帮我取消当前任务"));
+    }
+
+    #[test]
+    fn detects_interrupt_requests_in_english() {
+        assert!(looks_like_interrupt_request("please stop the current task"));
+        assert!(looks_like_interrupt_request("interrupt coder"));
+    }
+
+    #[test]
+    fn ignores_non_interrupt_requests() {
+        assert!(!looks_like_interrupt_request("继续这个任务"));
+        assert!(parse_leader_interrupt_shortcut("继续这个任务").is_none());
+    }
+
+    #[test]
+    fn builds_interrupt_payload_with_role_filter_when_present() {
+        let payload =
+            parse_leader_interrupt_shortcut("interrupt coder now").expect("payload expected");
+        assert!(payload.contains(r#""action":"interrupt""#));
+        assert!(payload.contains(r#""role":"coder""#));
+    }
 }

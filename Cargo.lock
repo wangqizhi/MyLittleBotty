@@ -646,6 +646,7 @@ dependencies = [
  "clap",
  "crossterm",
  "libc",
+ "percent-encoding",
  "portable-pty",
  "ratatui",
  "serde",

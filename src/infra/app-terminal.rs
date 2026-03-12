@@ -6,9 +6,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const OUTPUT_TAIL_MAX_BYTES: usize = 16 * 1024;
+const CODEX_TRUST_PROMPT_MARKERS: [&str; 3] = [
+    "Do you trust the contents of this directory?",
+    "Working with untrusted contents comes with higher risk of prompt injection.",
+    "Press enter to continue",
+];
+const CODEX_TRUST_MAX_AUTO_ATTEMPTS: u8 = 3;
 
 pub struct AppTerminal {
     transcript_path: PathBuf,
@@ -16,7 +23,7 @@ pub struct AppTerminal {
     last_output_ms: Arc<AtomicU64>,
     exited: Arc<AtomicBool>,
     exit_code: Arc<Mutex<Option<i32>>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn portable_pty::Child + Send>>,
 }
 
@@ -77,10 +84,12 @@ impl AppTerminal {
         let last_output_ms = Arc::new(AtomicU64::new(now_ms()));
         let exited = Arc::new(AtomicBool::new(false));
         let exit_code = Arc::new(Mutex::new(None));
+        let writer = Arc::new(Mutex::new(writer));
 
         spawn_reader_thread(
             reader,
             transcript_path.clone(),
+            Arc::clone(&writer),
             Arc::clone(&output_tail),
             Arc::clone(&last_output_ms),
         );
@@ -90,7 +99,7 @@ impl AppTerminal {
             last_output_ms,
             exited,
             exit_code,
-            writer: Mutex::new(writer),
+            writer,
             child: Mutex::new(child),
         })
     }
@@ -101,8 +110,10 @@ impl AppTerminal {
             .lock()
             .map_err(|_| io::Error::other("terminal writer lock poisoned"))?;
         writer.write_all(text.as_bytes())?;
-        // PTY-backed TUIs usually expect an actual Enter key event (`\r`)
-        // rather than a plain newline when submitting input.
+        writer.flush()?;
+        // Codex's TUI reliably submits only when Enter is sent as a distinct
+        // follow-up keypress instead of being coalesced with pasted text.
+        thread::sleep(Duration::from_millis(120));
         writer.write_all(b"\r")?;
         writer.flush()
     }
@@ -157,6 +168,7 @@ impl AppTerminal {
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     transcript_path: PathBuf,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     output_tail: Arc<Mutex<String>>,
     last_output_ms: Arc<AtomicU64>,
 ) {
@@ -169,6 +181,7 @@ fn spawn_reader_thread(
             Ok(file) => file,
             Err(_) => return,
         };
+        let mut codex_trust_attempts = 0u8;
 
         let mut buffer = [0u8; 4096];
         loop {
@@ -188,9 +201,29 @@ fn spawn_reader_thread(
             if let Ok(mut tail) = output_tail.lock() {
                 tail.push_str(&chunk);
                 trim_tail_to_max_bytes(&mut tail, OUTPUT_TAIL_MAX_BYTES);
+                if codex_trust_attempts < CODEX_TRUST_MAX_AUTO_ATTEMPTS
+                    && should_accept_codex_trust_prompt(tail.as_str())
+                {
+                    if let Ok(mut writer) = writer.lock() {
+                        let payload = if codex_trust_attempts == 0 {
+                            b"\r".as_slice()
+                        } else {
+                            b"1\r".as_slice()
+                        };
+                        let _ = writer.write_all(payload);
+                        let _ = writer.flush();
+                        codex_trust_attempts += 1;
+                    }
+                }
             }
         }
     });
+}
+
+fn should_accept_codex_trust_prompt(transcript_tail: &str) -> bool {
+    CODEX_TRUST_PROMPT_MARKERS
+        .iter()
+        .all(|marker| transcript_tail.contains(marker))
 }
 
 fn trim_tail_to_max_bytes(text: &mut String, max_bytes: usize) {

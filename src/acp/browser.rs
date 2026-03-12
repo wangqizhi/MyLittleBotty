@@ -72,12 +72,24 @@ pub fn handle_browser_skill_request(input_json: &str) -> io::Result<String> {
             let result = session.browser.click(locator)?;
             render_json_result("click", &session, result)
         }
+        "focus" => {
+            let session = session_for_action(request.session_id.as_deref(), request.headless)?;
+            let locator = required_field(request.locator.as_deref(), "locator")?;
+            let result = session.browser.focus(locator)?;
+            render_json_result("focus", &session, result)
+        }
         "fill" => {
             let session = session_for_action(request.session_id.as_deref(), request.headless)?;
             let locator = required_field(request.locator.as_deref(), "locator")?;
             let text = request.text.unwrap_or_default();
             let result = session.browser.fill(locator, &text)?;
             render_json_result("fill", &session, result)
+        }
+        "press" => {
+            let session = session_for_action(request.session_id.as_deref(), request.headless)?;
+            let key = required_field(request.key.as_deref(), "key")?;
+            let result = session.browser.press(key)?;
+            render_json_result("press", &session, result)
         }
         "eval" => {
             let session = session_for_action(request.session_id.as_deref(), request.headless)?;
@@ -147,18 +159,19 @@ struct BrowserSkillRequest {
     url: Option<String>,
     locator: Option<String>,
     text: Option<String>,
+    key: Option<String>,
     script: Option<String>,
     output_path: Option<String>,
     timeout_seconds: Option<u64>,
     headless: Option<bool>,
 }
 
-struct BrowserSession {
-    id: String,
+pub(crate) struct BrowserSession {
+    pub(crate) id: String,
     chrome_command: String,
     work_dir: PathBuf,
     started_at_ms: u64,
-    browser: AppBrowser,
+    pub(crate) browser: AppBrowser,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -172,6 +185,7 @@ struct SessionMeta {
     remote_debugging_port: u16,
     user_data_dir: String,
     chrome_command: String,
+    #[serde(default)]
     target_id: Option<String>,
 }
 
@@ -191,7 +205,9 @@ fn session_for_action(
     }
 }
 
-fn singleton_browser_session(headless_override: Option<bool>) -> io::Result<Arc<BrowserSession>> {
+pub(crate) fn singleton_browser_session(
+    headless_override: Option<bool>,
+) -> io::Result<Arc<BrowserSession>> {
     if let Some(session) = registry()
         .lock()
         .map_err(|_| io::Error::other("browser session registry lock poisoned"))?
