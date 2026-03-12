@@ -857,6 +857,38 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
             .ask(&request_message);
         match response {
             Ok(reply) => {
+                let still_running = match is_job_still_running(&root, &role, &job.message_id) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        boss_log_error(&format!(
+                            "Botty-Boss failed to verify running state for role {role} job {}: {err}",
+                            job.message_id
+                        ));
+                        let _ = write_worker_state(
+                            &root,
+                            &role,
+                            None,
+                            None,
+                            Some("failed to verify running state"),
+                        );
+                        bridge = None;
+                        last_active = Instant::now();
+                        continue;
+                    }
+                };
+                if !still_running {
+                    let _ = append_guy_role_log(
+                        &role,
+                        "stale_response",
+                        &format!(
+                            "job_id={} ignored because job is no longer running",
+                            job.message_id
+                        ),
+                    );
+                    let _ = write_worker_state(&root, &role, pid, None, None);
+                    last_active = Instant::now();
+                    continue;
+                }
                 let _ = append_guy_role_log(
                     &role,
                     "response",
@@ -903,6 +935,40 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
                 }
             }
             Err(err) => {
+                let still_running = match is_job_still_running(&root, &role, &job.message_id) {
+                    Ok(value) => value,
+                    Err(state_err) => {
+                        boss_log_error(&format!(
+                            "Botty-Boss failed to verify running state for role {role} job {}: {state_err}",
+                            job.message_id
+                        ));
+                        let _ = write_worker_state(
+                            &root,
+                            &role,
+                            None,
+                            None,
+                            Some("failed to verify running state"),
+                        );
+                        bridge = None;
+                        last_active = Instant::now();
+                        continue;
+                    }
+                };
+                if !still_running {
+                    let _ = append_guy_role_log(
+                        &role,
+                        "stale_error",
+                        &format!(
+                            "job_id={} ignored because job is no longer running: {}",
+                            job.message_id,
+                            sanitize_log_value(&err.to_string())
+                        ),
+                    );
+                    let _ = write_worker_state(&root, &role, None, None, None);
+                    bridge = None;
+                    last_active = Instant::now();
+                    continue;
+                }
                 let _ = append_guy_role_log(
                     &role,
                     "error",
@@ -988,6 +1054,14 @@ fn try_resume_parent_job(
         .send(DispatcherCommand::EnsureRole(child_job.from_role.clone()))
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dispatcher is not available"))?;
     Ok(())
+}
+
+fn is_job_still_running(root: &PathBuf, role: &str, message_id: &str) -> io::Result<bool> {
+    match load_job(root, role, JobState::Running, message_id) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 struct ChatSocketGuard {
@@ -1808,10 +1882,25 @@ fn interrupt_job(
                         ),
                     )
                 })?;
-            send_signal(pid, libc::SIGINT)?;
+            let message_id = target.job.message_id.clone();
+            let role = target.role.clone();
+            fail_job(
+                root,
+                role.as_str(),
+                JobState::Running,
+                target.job,
+                format!("interrupted while running (pid {pid})"),
+                dispatch_tx,
+            )?;
+            if let Err(err) = send_signal(pid, libc::SIGINT) {
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(err);
+                }
+            }
+            let _ = write_worker_state(root, role.as_str(), None, None, Some("interrupted"));
             Ok(format!(
                 "Sent interrupt to running task {} for role {} (pid {}).",
-                target.job.message_id, target.role, pid
+                message_id, role, pid
             ))
         }
         JobState::Waiting => {
