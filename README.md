@@ -134,19 +134,19 @@ Botty currently exposes seven built-in tools, though role access differs:
 Two input channels are currently implemented:
 
 - Telegram polling and reply
-- Feishu polling and reply
+- Feishu long-connection receive and reply
 
-Testing status:
+Support status:
 
-- Telegram is the primary implemented channel.
-- Feishu is currently best treated as a placeholder integration and has not been fully tested yet.
+- Telegram is fully supported for polling, reply, whitelist control, and reminder push.
+- Feishu is formally supported for long-connection message receive, in-chat reply, and proactive push to a configured chat.
 
 Supported behavior:
 
 - Telegram user whitelist
 - Configurable Telegram / Feishu polling interval
-- Feishu `chat_id` targeting
-- Incoming external messages are forwarded to local `Botty-Guy`
+- Feishu `chat_id` targeting for proactive push such as reminders
+- Incoming external messages are forwarded to local `Botty-Guy` and replies are sent back to the source chat
 
 ### 9. Long-term memory summary
 
@@ -404,7 +404,7 @@ Common meanings:
 - `chatbot.feishu.app_id`: Feishu app ID used to obtain a tenant access token
 - `chatbot.feishu.app_secret`: Feishu app secret used to obtain a tenant access token
 - `chatbot.telegram.whitelist_user_ids`: comma-separated Telegram user IDs allowed to access the bot
-- `chatbot.feishu.chat_id`: target Feishu chat ID
+- `chatbot.feishu.chat_id`: target Feishu chat ID for proactive push such as reminders
 
 Saving from the TUI automatically triggers a service restart.
 

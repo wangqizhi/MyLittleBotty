@@ -162,30 +162,34 @@ fn format_debug_line(line: &str) -> String {
     let Some((timestamp, payload)) = split_timestamped_line(line) else {
         return line.to_string();
     };
-    let (role, payload) = split_debug_role(payload);
+    let (role, user_id, payload) = split_debug_context(payload);
     let role_prefix = role.map(|role| format!(" role={role}")).unwrap_or_default();
+    let user_prefix = user_id
+        .map(|user_id| format!(" user_id={user_id}"))
+        .unwrap_or_default();
+    let meta_prefix = format!("{role_prefix}{user_prefix}");
 
     if let Some(url) = payload.strip_prefix("request-url: ") {
-        return format!("[{timestamp}]{role_prefix} request-url {}", url.trim());
+        return format!("[{timestamp}]{meta_prefix} request-url {}", url.trim());
     }
 
     if let Some(json) = payload.strip_prefix("request: ") {
         return format!(
-            "[{timestamp}]{role_prefix} {}",
+            "[{timestamp}]{meta_prefix} {}",
             summarize_debug_request(json)
         );
     }
 
     if let Some(json) = payload.strip_prefix("response: ") {
         return format!(
-            "[{timestamp}]{role_prefix} {}",
+            "[{timestamp}]{meta_prefix} {}",
             summarize_debug_response(json)
         );
     }
 
     if let Some(stderr) = payload.strip_prefix("response-stderr: ") {
         return format!(
-            "[{timestamp}]{role_prefix} response-stderr {}",
+            "[{timestamp}]{meta_prefix} response-stderr {}",
             truncate_text(stderr.trim(), CONTENT_PREVIEW_LIMIT)
         );
     }
@@ -193,14 +197,27 @@ fn format_debug_line(line: &str) -> String {
     line.to_string()
 }
 
-fn split_debug_role(payload: &str) -> (Option<&str>, &str) {
-    let Some(rest) = payload.strip_prefix("role=") else {
-        return (None, payload);
-    };
-    let Some((role, remainder)) = rest.split_once(' ') else {
-        return (Some(rest.trim()), "");
-    };
-    (Some(role.trim()), remainder.trim_start())
+fn split_debug_context(payload: &str) -> (Option<&str>, Option<&str>, &str) {
+    let mut remainder = payload.trim_start();
+    let mut role = None;
+    let mut user_id = None;
+
+    while let Some((key, value, rest)) = split_debug_field(remainder) {
+        match key {
+            "role" => role = Some(value),
+            "user_id" => user_id = Some(value),
+            _ => break,
+        }
+        remainder = rest;
+    }
+
+    (role, user_id, remainder)
+}
+
+fn split_debug_field(payload: &str) -> Option<(&str, &str, &str)> {
+    let (field, remainder) = payload.split_once(' ')?;
+    let (key, value) = field.split_once('=')?;
+    Some((key.trim(), value.trim(), remainder.trim_start()))
 }
 
 fn summarize_debug_request(json: &str) -> String {

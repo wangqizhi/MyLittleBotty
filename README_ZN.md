@@ -131,19 +131,19 @@ TUI 内置命令：
 当前实现了两个输入通道：
 
 - Telegram 轮询收消息并回消息
-- 飞书群聊轮询收消息并回消息
+- 飞书长连接收消息并回消息
 
-测试状态：
+支持状态：
 
-- Telegram 是当前主要使用和验证过的接入方式。
-- 飞书目前更适合视为占位接入，尚未完整测试。
+- Telegram 已正式支持轮询收发、用户白名单和提醒推送。
+- 飞书已正式支持长连接收消息、原会话回消息，以及按配置会话主动推送。
 
 支持能力：
 
 - Telegram 用户白名单
 - Telegram / 飞书轮询间隔配置
-- 飞书 chat_id 指定
-- 接收到外部消息后转发给本地 `Botty-Guy` 处理
+- 飞书 `chat_id` 可用于提醒等主动推送目标会话
+- 接收到外部消息后转发给本地 `Botty-Guy` 处理，并把回复发回原会话
 
 ### 9. 长期记忆摘要
 
@@ -401,7 +401,7 @@ chatbot.feishu.chat_id=
 - `chatbot.feishu.app_id`：用于换取 tenant access token 的飞书 app id
 - `chatbot.feishu.app_secret`：用于换取 tenant access token 的飞书 app secret
 - `chatbot.telegram.whitelist_user_ids`：Telegram 允许访问的用户 ID，多个值用逗号分隔
-- `chatbot.feishu.chat_id`：飞书目标会话 ID
+- `chatbot.feishu.chat_id`：飞书主动推送目标会话 ID，例如提醒回发
 
 修改完配置后，TUI 保存时会自动触发一次服务重启。
 

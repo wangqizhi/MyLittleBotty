@@ -166,9 +166,20 @@ impl BottyBrain {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "leader".to_string());
+        let user_id = env::var("BOTTY_CURRENT_JOB_USER_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let sanitized = content.replace('\n', "\\n").replace('\r', "\\r");
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "[{timestamp}] role={role} {direction}: {sanitized}")?;
+        let user_prefix = user_id
+            .as_deref()
+            .map(|value| format!(" user_id={value}"))
+            .unwrap_or_default();
+        writeln!(
+            file,
+            "[{timestamp}] role={role}{user_prefix} {direction}: {sanitized}"
+        )?;
         Ok(())
     }
 }
