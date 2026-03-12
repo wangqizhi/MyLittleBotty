@@ -374,7 +374,8 @@ chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
 chatbot.telegram.apikey=
 chatbot.feishu.api_base=https://open.feishu.cn/open-apis
-chatbot.feishu.apikey=
+chatbot.feishu.app_id=
+chatbot.feishu.app_secret=
 chatbot.telegram.enabled=true
 chatbot.feishu.enabled=false
 chatbot.telegram.whitelist_user_ids=
@@ -398,9 +399,12 @@ Common meanings:
 - `work_dir`: root directory used by the `write` tool; changing it from the TUI migrates existing work dir content
 - `chatbot.provider`: selected chatbot provider, currently `telegram` or `feishu`
 - `chatbot.telegram.enabled`: enable Telegram input worker
-- `chatbot.feishu.enabled`: enable Feishu input worker placeholder
+- `chatbot.telegram.apikey`: Telegram bot token
+- `chatbot.feishu.enabled`: enable Feishu input worker
+- `chatbot.feishu.app_id`: Feishu app ID used to obtain a tenant access token
+- `chatbot.feishu.app_secret`: Feishu app secret used to obtain a tenant access token
 - `chatbot.telegram.whitelist_user_ids`: comma-separated Telegram user IDs allowed to access the bot
-- `chatbot.feishu.chat_id`: target Feishu chat ID placeholder
+- `chatbot.feishu.chat_id`: target Feishu chat ID
 
 Saving from the TUI automatically triggers a service restart.
 

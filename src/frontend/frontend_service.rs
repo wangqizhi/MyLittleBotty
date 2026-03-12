@@ -44,14 +44,18 @@ pub enum SetupFieldId {
     WorkDir,
     ChatbotProvider,
     TelegramEnabled,
-    FeishuEnabled,
+    TelegramApikey,
     TelegramPollSeconds,
     TelegramWhitelistUserIds,
+    FeishuEnabled,
+    FeishuAppId,
+    FeishuAppSecret,
+    FeishuPollSeconds,
     FeishuChatId,
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 17] = [
+    pub const ALL: [SetupFieldId; 21] = [
         SetupFieldId::AiProviderEndpoint,
         SetupFieldId::AiProviderApikey,
         SetupFieldId::AiProviderModel,
@@ -65,9 +69,13 @@ impl SetupFieldId {
         SetupFieldId::WorkDir,
         SetupFieldId::ChatbotProvider,
         SetupFieldId::TelegramEnabled,
-        SetupFieldId::FeishuEnabled,
+        SetupFieldId::TelegramApikey,
         SetupFieldId::TelegramPollSeconds,
         SetupFieldId::TelegramWhitelistUserIds,
+        SetupFieldId::FeishuEnabled,
+        SetupFieldId::FeishuAppId,
+        SetupFieldId::FeishuAppSecret,
+        SetupFieldId::FeishuPollSeconds,
         SetupFieldId::FeishuChatId,
     ];
 
@@ -93,9 +101,13 @@ impl SetupFieldId {
             SetupFieldId::WorkDir => "work dir",
             SetupFieldId::ChatbotProvider => "chatbot provider",
             SetupFieldId::TelegramEnabled => "telegram enabled",
-            SetupFieldId::FeishuEnabled => "feishu enabled",
+            SetupFieldId::TelegramApikey => "telegram bot token",
             SetupFieldId::TelegramPollSeconds => "telegram poll seconds",
             SetupFieldId::TelegramWhitelistUserIds => "telegram whitelist user_ids",
+            SetupFieldId::FeishuEnabled => "feishu enabled",
+            SetupFieldId::FeishuAppId => "feishu app id",
+            SetupFieldId::FeishuAppSecret => "feishu app secret",
+            SetupFieldId::FeishuPollSeconds => "feishu poll seconds",
             SetupFieldId::FeishuChatId => "feishu chat id",
         }
     }
@@ -111,7 +123,12 @@ impl SetupFieldId {
     }
 
     pub fn is_masked(self) -> bool {
-        matches!(self, SetupFieldId::AiProviderApikey)
+        matches!(
+            self,
+            SetupFieldId::AiProviderApikey
+                | SetupFieldId::TelegramApikey
+                | SetupFieldId::FeishuAppSecret
+        )
     }
 }
 
@@ -139,7 +156,9 @@ pub struct SetupConfig {
     pub chatbot_telegram_api_base: String,
     pub chatbot_telegram_apikey: String,
     pub chatbot_feishu_api_base: String,
-    pub chatbot_feishu_apikey: String,
+    pub chatbot_feishu_app_id: String,
+    pub chatbot_feishu_app_secret: String,
+    pub chatbot_feishu_access_token: String,
     pub chatbot_telegram_enabled: bool,
     pub chatbot_feishu_enabled: bool,
     pub chatbot_telegram_whitelist_user_ids: String,
@@ -166,7 +185,9 @@ impl Default for SetupConfig {
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
             chatbot_telegram_apikey: String::new(),
             chatbot_feishu_api_base: "https://open.feishu.cn/open-apis".to_string(),
-            chatbot_feishu_apikey: String::new(),
+            chatbot_feishu_app_id: String::new(),
+            chatbot_feishu_app_secret: String::new(),
+            chatbot_feishu_access_token: String::new(),
             chatbot_telegram_enabled: true,
             chatbot_feishu_enabled: false,
             chatbot_telegram_whitelist_user_ids: String::new(),
@@ -230,6 +251,13 @@ impl SetupConfig {
                     "[ ] false".to_string()
                 }
             }
+            SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey.clone(),
+            SetupFieldId::TelegramPollSeconds => {
+                self.chatbot_telegram_poll_interval_seconds.to_string()
+            }
+            SetupFieldId::TelegramWhitelistUserIds => {
+                self.chatbot_telegram_whitelist_user_ids.clone()
+            }
             SetupFieldId::FeishuEnabled => {
                 if self.chatbot_feishu_enabled {
                     "[x] true".to_string()
@@ -237,11 +265,10 @@ impl SetupConfig {
                     "[ ] false".to_string()
                 }
             }
-            SetupFieldId::TelegramPollSeconds => {
-                self.chatbot_telegram_poll_interval_seconds.to_string()
-            }
-            SetupFieldId::TelegramWhitelistUserIds => {
-                self.chatbot_telegram_whitelist_user_ids.clone()
+            SetupFieldId::FeishuAppId => self.chatbot_feishu_app_id.clone(),
+            SetupFieldId::FeishuAppSecret => self.chatbot_feishu_app_secret.clone(),
+            SetupFieldId::FeishuPollSeconds => {
+                self.chatbot_feishu_poll_interval_seconds.to_string()
             }
             SetupFieldId::FeishuChatId => self.chatbot_feishu_chat_id.clone(),
         }
@@ -261,11 +288,17 @@ impl SetupConfig {
             SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
+            SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey.clone(),
             SetupFieldId::TelegramPollSeconds => {
                 self.chatbot_telegram_poll_interval_seconds.to_string()
             }
             SetupFieldId::TelegramWhitelistUserIds => {
                 self.chatbot_telegram_whitelist_user_ids.clone()
+            }
+            SetupFieldId::FeishuAppId => self.chatbot_feishu_app_id.clone(),
+            SetupFieldId::FeishuAppSecret => self.chatbot_feishu_app_secret.clone(),
+            SetupFieldId::FeishuPollSeconds => {
+                self.chatbot_feishu_poll_interval_seconds.to_string()
             }
             SetupFieldId::FeishuChatId => self.chatbot_feishu_chat_id.clone(),
             SetupFieldId::TelegramEnabled | SetupFieldId::FeishuEnabled => String::new(),
@@ -290,6 +323,7 @@ impl SetupConfig {
                 self.work_dir = botty_io::normalize_work_dir_input(value);
             }
             SetupFieldId::ChatbotProvider => self.chatbot_provider = value.to_string(),
+            SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey = value.to_string(),
             SetupFieldId::TelegramPollSeconds => {
                 if let Ok(seconds) = value.trim().parse::<u64>() {
                     self.chatbot_telegram_poll_interval_seconds = seconds.max(1);
@@ -297,6 +331,13 @@ impl SetupConfig {
             }
             SetupFieldId::TelegramWhitelistUserIds => {
                 self.chatbot_telegram_whitelist_user_ids = value.to_string()
+            }
+            SetupFieldId::FeishuAppId => self.chatbot_feishu_app_id = value.to_string(),
+            SetupFieldId::FeishuAppSecret => self.chatbot_feishu_app_secret = value.to_string(),
+            SetupFieldId::FeishuPollSeconds => {
+                if let Ok(seconds) = value.trim().parse::<u64>() {
+                    self.chatbot_feishu_poll_interval_seconds = seconds.max(1);
+                }
             }
             SetupFieldId::FeishuChatId => self.chatbot_feishu_chat_id = value.to_string(),
             SetupFieldId::TelegramEnabled | SetupFieldId::FeishuEnabled => {}
@@ -328,30 +369,6 @@ impl SetupConfig {
         let next = (*selected_provider as i32 + delta).rem_euclid(len);
         *selected_provider = next as usize;
         self.chatbot_provider = CHATBOT_PROVIDERS[*selected_provider].to_string();
-    }
-
-    pub fn provider_apikey(&self, selected_provider: usize) -> &str {
-        match CHATBOT_PROVIDERS
-            .get(selected_provider)
-            .copied()
-            .unwrap_or("telegram")
-        {
-            "telegram" => self.chatbot_telegram_apikey.as_str(),
-            "feishu" => self.chatbot_feishu_apikey.as_str(),
-            _ => "",
-        }
-    }
-
-    pub fn set_provider_apikey(&mut self, selected_provider: usize, apikey: &str) {
-        match CHATBOT_PROVIDERS
-            .get(selected_provider)
-            .copied()
-            .unwrap_or("telegram")
-        {
-            "telegram" => self.chatbot_telegram_apikey = apikey.to_string(),
-            "feishu" => self.chatbot_feishu_apikey = apikey.to_string(),
-            _ => {}
-        }
     }
 }
 
@@ -498,6 +515,7 @@ impl FrontendRpc for LocalFrontendRpc {
                 let path = setup_config_file();
                 let previous_work_dir = botty_io::effective_work_dir()?;
                 let next_work_dir = botty_io::resolve_work_dir_input(&config.work_dir);
+                validate_setup_config(&config)?;
                 save_setup_config(&config)?;
                 if previous_work_dir != next_work_dir {
                     migrate_work_dir_contents(&previous_work_dir, &next_work_dir)?;
@@ -680,10 +698,12 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "chatbot.telegram.api_base" => config.chatbot_telegram_api_base = value.to_string(),
             "chatbot.telegram.apikey" => config.chatbot_telegram_apikey = value.to_string(),
             "chatbot.feishu.api_base" => config.chatbot_feishu_api_base = value.to_string(),
-            "chatbot.feishu.apikey" => config.chatbot_feishu_apikey = value.to_string(),
+            "chatbot.feishu.app_id" => config.chatbot_feishu_app_id = value.to_string(),
+            "chatbot.feishu.app_secret" => config.chatbot_feishu_app_secret = value.to_string(),
+            "chatbot.feishu.apikey" => config.chatbot_feishu_access_token = value.to_string(),
             "chatbot.apikey" => {
                 if config.chatbot_provider == "feishu" {
-                    config.chatbot_feishu_apikey = value.to_string();
+                    config.chatbot_feishu_access_token = value.to_string();
                 } else {
                     config.chatbot_telegram_apikey = value.to_string();
                 }
@@ -718,7 +738,7 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nagent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nagent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_endpoint,
         config.ai_provider_apikey,
         config.ai_provider_model,
@@ -733,7 +753,9 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
         config.chatbot_telegram_api_base,
         config.chatbot_telegram_apikey,
         config.chatbot_feishu_api_base,
-        config.chatbot_feishu_apikey,
+        config.chatbot_feishu_app_id,
+        config.chatbot_feishu_app_secret,
+        config.chatbot_feishu_access_token,
         config.chatbot_telegram_enabled,
         config.chatbot_feishu_enabled,
         config.chatbot_telegram_whitelist_user_ids,
@@ -743,6 +765,28 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     );
 
     fs::write(path, content)
+}
+
+fn validate_setup_config(config: &SetupConfig) -> io::Result<()> {
+    if config.chatbot_telegram_enabled && config.chatbot_telegram_apikey.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "telegram is enabled but chatbot.telegram.apikey is empty",
+        ));
+    }
+
+    if config.chatbot_feishu_enabled {
+        let has_app_credentials = !config.chatbot_feishu_app_id.trim().is_empty()
+            && !config.chatbot_feishu_app_secret.trim().is_empty();
+        if !has_app_credentials {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "feishu is enabled but chatbot.feishu.app_id/app_secret is incomplete for long connection",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn save_guy_env_entry(key: &str, value: &str) -> io::Result<()> {

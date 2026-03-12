@@ -161,6 +161,9 @@ pub fn stop_all_report() -> io::Result<String> {
     let mut targets = Vec::new();
     let pid_path = boss_pid_file();
     if let Some(pid) = read_pid_file(&pid_path)? {
+        if is_process_alive(pid) {
+            targets.extend(find_descendant_pids(pid)?);
+        }
         targets.push(pid);
     }
 
@@ -222,6 +225,28 @@ pub fn print_status() -> io::Result<()> {
     println!("Guy pids: {}", format_pid_list(&snapshot.guy_pids));
     println!("Crond process count: {}", snapshot.crond_pids.len());
     println!("Crond pids: {}", format_pid_list(&snapshot.crond_pids));
+    match load_setup_config() {
+        Ok(config) => {
+            for spec in input_process_specs() {
+                let state = (spec.state)(&config);
+                let process_name = spec.process_name();
+                let pids = snapshot
+                    .input_processes
+                    .iter()
+                    .find(|entry| entry.process_name == process_name)
+                    .map(|entry| entry.pids.as_slice())
+                    .unwrap_or(&[]);
+                println!(
+                    "{} configured: {} ({})",
+                    process_name,
+                    if state.enabled { "ready" } else { "disabled" },
+                    state.reason
+                );
+                println!("{} pids: {}", process_name, format_pid_list(pids));
+            }
+        }
+        Err(err) => println!("Input process config unavailable: {err}"),
+    }
     Ok(())
 }
 
@@ -470,6 +495,7 @@ struct StatusSnapshot {
     boss_pids: Vec<i32>,
     guy_pids: Vec<i32>,
     crond_pids: Vec<i32>,
+    input_processes: Vec<NamedPidList>,
 }
 
 impl StatusSnapshot {
@@ -478,10 +504,22 @@ impl StatusSnapshot {
     }
 }
 
+struct NamedPidList {
+    process_name: String,
+    pids: Vec<i32>,
+}
+
 fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
     let mut boss_pids = Vec::new();
     let mut guy_pids = Vec::new();
     let mut crond_pids = find_pids_by_process_name(crond_process_name())?;
+    let mut input_processes = input_process_specs()
+        .into_iter()
+        .map(|spec| NamedPidList {
+            process_name: spec.process_name(),
+            pids: Vec::new(),
+        })
+        .collect::<Vec<_>>();
 
     if let Some(boss_pid) = read_pid_file(&boss_pid_file())? {
         if is_process_alive(boss_pid) {
@@ -491,6 +529,13 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
             candidates.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
             guy_pids = candidates;
             crond_pids.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
+            for entry in &mut input_processes {
+                let mut candidates = find_pids_by_process_name(&entry.process_name)?;
+                candidates.retain(|pid| descendants.contains(pid) && is_process_alive(*pid));
+                candidates.sort_unstable();
+                candidates.dedup();
+                entry.pids = candidates;
+            }
         } else {
             let _ = fs::remove_file(boss_pid_file());
         }
@@ -507,6 +552,7 @@ fn collect_status_snapshot() -> io::Result<StatusSnapshot> {
         boss_pids,
         guy_pids,
         crond_pids,
+        input_processes,
     })
 }
 
@@ -722,6 +768,7 @@ pub fn run_supervisor() {
     let dispatch_loop_tx = dispatch_tx.clone();
     let _dispatcher =
         thread::spawn(move || run_dispatcher(dispatch_root, dispatch_rx, dispatch_loop_tx));
+    let _ = dispatch_tx.send(DispatcherCommand::EnsureRole(GUY_DEFAULT_ROLE.to_string()));
     let config = load_setup_config().unwrap_or_default();
     let _input_bridges = spawn_enabled_input_processes(&config);
     let _crond_bridge = spawn_crond_process();
@@ -777,6 +824,30 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
     let mut last_active = Instant::now();
 
     loop {
+        if role == GUY_DEFAULT_ROLE && bridge.is_none() {
+            match GuyBridge::spawn(&role) {
+                Ok(live) => {
+                    let pid = i32::try_from(live.child.id()).ok();
+                    let _ = write_worker_state(&root, &role, pid, None, None);
+                    bridge = Some(live);
+                }
+                Err(err) => {
+                    boss_log_error(&format!(
+                        "Botty-Boss failed to eagerly start worker for role {role}: {err}"
+                    ));
+                    let _ = write_worker_state(
+                        &root,
+                        &role,
+                        None,
+                        None,
+                        Some("failed to eagerly start leader worker"),
+                    );
+                    thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+            }
+        }
+
         let next_job = match botty_jobs::next_queued_job(&root, &role) {
             Ok(job) => job,
             Err(err) => {
@@ -1207,7 +1278,12 @@ fn spawn_crond_process() -> Option<InputProcessBridge> {
 struct InputProcessSpec {
     name: &'static str,
     arg: &'static str,
-    enabled: fn(&SetupConfig) -> bool,
+    state: fn(&SetupConfig) -> InputProcessState,
+}
+
+struct InputProcessState {
+    enabled: bool,
+    reason: String,
 }
 
 impl InputProcessSpec {
@@ -1216,21 +1292,53 @@ impl InputProcessSpec {
     }
 }
 
+fn enabled_input_process(reason: impl Into<String>) -> InputProcessState {
+    InputProcessState {
+        enabled: true,
+        reason: reason.into(),
+    }
+}
+
+fn disabled_input_process(reason: impl Into<String>) -> InputProcessState {
+    InputProcessState {
+        enabled: false,
+        reason: reason.into(),
+    }
+}
+
+fn telegram_input_process_state(config: &SetupConfig) -> InputProcessState {
+    if !config.telegram_enabled {
+        return disabled_input_process("chatbot.telegram.enabled=false");
+    }
+    if config.telegram_apikey.trim().is_empty() {
+        return disabled_input_process("chatbot.telegram.apikey is empty");
+    }
+    enabled_input_process("configured")
+}
+
+fn feishu_input_process_state(config: &SetupConfig) -> InputProcessState {
+    if !config.feishu_enabled {
+        return disabled_input_process("chatbot.feishu.enabled=false");
+    }
+    if config.feishu_app_id.trim().is_empty() || config.feishu_app_secret.trim().is_empty() {
+        return disabled_input_process(
+            "chatbot.feishu.app_id/app_secret is incomplete for long connection",
+        );
+    }
+    enabled_input_process("configured")
+}
+
 fn input_process_specs() -> [InputProcessSpec; 2] {
     [
         InputProcessSpec {
             name: "Botty-input-telegram",
             arg: "--input-telegram",
-            enabled: |config| config.telegram_enabled && !config.telegram_apikey.is_empty(),
+            state: telegram_input_process_state,
         },
         InputProcessSpec {
             name: "Botty-input-feishu",
             arg: "--input-feishu",
-            enabled: |config| {
-                config.feishu_enabled
-                    && !config.feishu_apikey.is_empty()
-                    && !config.feishu_chat_id.is_empty()
-            },
+            state: feishu_input_process_state,
         },
     ]
 }
@@ -1248,7 +1356,13 @@ fn spawn_enabled_input_processes(config: &SetupConfig) -> Vec<InputProcessBridge
     };
 
     for spec in input_process_specs() {
-        if !(spec.enabled)(config) {
+        let state = (spec.state)(config);
+        if !state.enabled {
+            boss_log_info(&format!(
+                "Botty-Boss skipped {}: {}",
+                spec.process_name(),
+                state.reason
+            ));
             continue;
         }
 
@@ -2168,7 +2282,9 @@ struct SetupConfig {
     telegram_enabled: bool,
     telegram_apikey: String,
     feishu_enabled: bool,
-    feishu_apikey: String,
+    feishu_app_id: String,
+    feishu_app_secret: String,
+    feishu_access_token: String,
     feishu_chat_id: String,
 }
 
@@ -2179,7 +2295,9 @@ impl Default for SetupConfig {
             telegram_enabled: true,
             telegram_apikey: String::new(),
             feishu_enabled: false,
-            feishu_apikey: String::new(),
+            feishu_app_id: String::new(),
+            feishu_app_secret: String::new(),
+            feishu_access_token: String::new(),
             feishu_chat_id: String::new(),
         }
     }
@@ -2219,14 +2337,16 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "chatbot.telegram.enabled" => config.telegram_enabled = parse_bool(value),
             "chatbot.telegram.apikey" => config.telegram_apikey = value.to_string(),
             "chatbot.feishu.enabled" => config.feishu_enabled = parse_bool(value),
-            "chatbot.feishu.apikey" => config.feishu_apikey = value.to_string(),
+            "chatbot.feishu.app_id" => config.feishu_app_id = value.to_string(),
+            "chatbot.feishu.app_secret" => config.feishu_app_secret = value.to_string(),
+            "chatbot.feishu.apikey" => config.feishu_access_token = value.to_string(),
             "chatbot.feishu.chat_id" => config.feishu_chat_id = value.to_string(),
             "chatbot.apikey" => {
                 if config.telegram_apikey.is_empty() {
                     config.telegram_apikey = value.to_string();
                 }
-                if config.feishu_apikey.is_empty() {
-                    config.feishu_apikey = value.to_string();
+                if config.feishu_access_token.is_empty() {
+                    config.feishu_access_token = value.to_string();
                 }
             }
             _ => {}

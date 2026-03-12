@@ -371,7 +371,8 @@ chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
 chatbot.telegram.apikey=
 chatbot.feishu.api_base=https://open.feishu.cn/open-apis
-chatbot.feishu.apikey=
+chatbot.feishu.app_id=
+chatbot.feishu.app_secret=
 chatbot.telegram.enabled=true
 chatbot.feishu.enabled=false
 chatbot.telegram.whitelist_user_ids=
@@ -395,9 +396,12 @@ chatbot.feishu.chat_id=
 - `work_dir`：`write` 工具使用的根目录；在 TUI 中修改时会迁移旧工作目录内容
 - `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道
-- `chatbot.feishu.enabled`：是否启用飞书输入通道占位配置
+- `chatbot.telegram.apikey`：Telegram 机器人 token
+- `chatbot.feishu.enabled`：是否启用飞书输入通道
+- `chatbot.feishu.app_id`：用于换取 tenant access token 的飞书 app id
+- `chatbot.feishu.app_secret`：用于换取 tenant access token 的飞书 app secret
 - `chatbot.telegram.whitelist_user_ids`：Telegram 允许访问的用户 ID，多个值用逗号分隔
-- `chatbot.feishu.chat_id`：飞书目标会话 ID 占位配置
+- `chatbot.feishu.chat_id`：飞书目标会话 ID
 
 修改完配置后，TUI 保存时会自动触发一次服务重启。
 

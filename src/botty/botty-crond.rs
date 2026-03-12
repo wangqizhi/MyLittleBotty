@@ -1,3 +1,5 @@
+use crate::infra::chatbot_feishu::{FeishuClient, DEFAULT_API_BASE as FEISHU_API_BASE};
+use crate::infra::chatbot_telegram::{TelegramClient, DEFAULT_API_BASE as TELEGRAM_API_BASE};
 use serde_json::{self, Value};
 use std::collections::HashSet;
 use std::env;
@@ -15,8 +17,6 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
-const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 const CHAT_META_PREFIX: &str = "__botty_meta__";
 
 pub fn run() {
@@ -160,23 +160,23 @@ fn push_result_notifications(
     };
 
     if config.telegram_enabled {
+        let client = TelegramClient::new(
+            config.telegram_api_base.clone(),
+            config.telegram_apikey.clone(),
+        );
         for chat_id in &config.telegram_targets {
-            let _ = send_telegram_message(
-                &config.telegram_api_base,
-                &config.telegram_apikey,
-                *chat_id,
-                &text,
-            );
+            let _ = client.send_message(*chat_id, &text);
         }
     }
 
     if config.feishu_enabled && !config.feishu_chat_id.is_empty() {
-        let _ = send_feishu_message(
-            &config.feishu_api_base,
-            &config.feishu_apikey,
-            &config.feishu_chat_id,
-            &text,
+        let mut client = FeishuClient::new(
+            config.feishu_api_base.clone(),
+            config.feishu_app_id.clone(),
+            config.feishu_app_secret.clone(),
+            config.feishu_access_token.clone(),
         );
+        let _ = client.send_message(&config.feishu_chat_id, &text);
     }
 
     Ok(())
@@ -596,7 +596,9 @@ struct ChatbotConfig {
     telegram_api_base: String,
     telegram_targets: Vec<i64>,
     feishu_enabled: bool,
-    feishu_apikey: String,
+    feishu_app_id: String,
+    feishu_app_secret: String,
+    feishu_access_token: String,
     feishu_api_base: String,
     feishu_chat_id: String,
 }
@@ -609,7 +611,9 @@ impl Default for ChatbotConfig {
             telegram_api_base: TELEGRAM_API_BASE.to_string(),
             telegram_targets: Vec::new(),
             feishu_enabled: false,
-            feishu_apikey: String::new(),
+            feishu_app_id: String::new(),
+            feishu_app_secret: String::new(),
+            feishu_access_token: String::new(),
             feishu_api_base: FEISHU_API_BASE.to_string(),
             feishu_chat_id: String::new(),
         }
@@ -655,15 +659,17 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
                 config.telegram_targets = parse_telegram_targets(value);
             }
             "chatbot.feishu.enabled" => config.feishu_enabled = parse_bool(value),
-            "chatbot.feishu.apikey" => config.feishu_apikey = value.to_string(),
+            "chatbot.feishu.app_id" => config.feishu_app_id = value.to_string(),
+            "chatbot.feishu.app_secret" => config.feishu_app_secret = value.to_string(),
+            "chatbot.feishu.apikey" => config.feishu_access_token = value.to_string(),
             "chatbot.feishu.api_base" => config.feishu_api_base = value.to_string(),
             "chatbot.feishu.chat_id" => config.feishu_chat_id = value.to_string(),
             "chatbot.apikey" => {
                 if config.telegram_apikey.is_empty() {
                     config.telegram_apikey = value.to_string();
                 }
-                if config.feishu_apikey.is_empty() {
-                    config.feishu_apikey = value.to_string();
+                if config.feishu_access_token.is_empty() {
+                    config.feishu_access_token = value.to_string();
                 }
             }
             _ => {}
@@ -673,7 +679,10 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
     if config.telegram_apikey.is_empty() || config.telegram_targets.is_empty() {
         config.telegram_enabled = false;
     }
-    if config.feishu_apikey.is_empty() || config.feishu_chat_id.is_empty() {
+    if (config.feishu_access_token.is_empty()
+        && (config.feishu_app_id.is_empty() || config.feishu_app_secret.is_empty()))
+        || config.feishu_chat_id.is_empty()
+    {
         config.feishu_enabled = false;
     }
 
@@ -694,49 +703,6 @@ fn parse_telegram_targets(value: &str) -> Vec<i64> {
         }
     }
     targets
-}
-
-fn send_telegram_message(api_base: &str, apikey: &str, chat_id: i64, text: &str) -> io::Result<()> {
-    let url = format!("{api_base}/bot{apikey}/sendMessage");
-    let output = Command::new("curl")
-        .arg("-fsS")
-        .arg("-X")
-        .arg("POST")
-        .arg(url)
-        .arg("--data-urlencode")
-        .arg(format!("chat_id={chat_id}"))
-        .arg("--data-urlencode")
-        .arg(format!("text={text}"))
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other("curl sendMessage failed"));
-    }
-    Ok(())
-}
-
-fn send_feishu_message(api_base: &str, apikey: &str, chat_id: &str, text: &str) -> io::Result<()> {
-    let url = format!("{api_base}/im/v1/messages?receive_id_type=chat_id");
-    let escaped = escape_json_string(text);
-    let payload = format!(
-        "{{\"receive_id\":\"{chat_id}\",\"msg_type\":\"text\",\"content\":\"{{\\\"text\\\":\\\"{escaped}\\\"}}\"}}"
-    );
-
-    let output = Command::new("curl")
-        .arg("-fsS")
-        .arg("-X")
-        .arg("POST")
-        .arg(url)
-        .arg("-H")
-        .arg(format!("Authorization: Bearer {apikey}"))
-        .arg("-H")
-        .arg("Content-Type: application/json; charset=utf-8")
-        .arg("-d")
-        .arg(payload)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other("curl feishu send message failed"));
-    }
-    Ok(())
 }
 
 fn ask_leader_guy(source: &str, user_id: &str, message: &str) -> io::Result<String> {
@@ -881,14 +847,6 @@ fn local_time_string() -> io::Result<String> {
         return Err(io::Error::other("failed to get local time"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn escape_json_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }
 
 fn sanitize_log_field(value: &str) -> String {

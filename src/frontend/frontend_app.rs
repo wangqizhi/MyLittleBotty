@@ -104,7 +104,6 @@ pub enum CreateSkillEditorFocus {
 }
 
 pub enum SetupEditor {
-    Provider(ProviderEdit),
     Field(FieldEdit),
 }
 
@@ -121,12 +120,6 @@ pub struct GuyEnvEditor {
 pub enum GuyEnvEditorFocus {
     Key,
     Value,
-}
-
-pub struct ProviderEdit {
-    pub selected_provider: usize,
-    pub input: String,
-    pub cursor: usize,
 }
 
 pub struct FieldEdit {
@@ -588,12 +581,7 @@ impl FrontendApp {
         }
 
         if field == SetupFieldId::ChatbotProvider {
-            let input = config.provider_apikey(*selected_provider).to_string();
-            *editor = Some(SetupEditor::Provider(ProviderEdit {
-                selected_provider: *selected_provider,
-                cursor: input.len(),
-                input,
-            }));
+            config.cycle_provider(selected_provider, 1);
             return;
         }
 
@@ -725,9 +713,6 @@ impl FrontendApp {
     pub fn editor_backspace(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => {
-                    delete_previous_char(&mut provider.input, &mut provider.cursor);
-                }
                 Some(SetupEditor::Field(field)) => {
                     delete_previous_char(&mut field.input, &mut field.cursor);
                 }
@@ -752,9 +737,6 @@ impl FrontendApp {
     pub fn editor_delete(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => {
-                    delete_current_char(&mut provider.input, provider.cursor);
-                }
                 Some(SetupEditor::Field(field)) => {
                     delete_current_char(&mut field.input, field.cursor);
                 }
@@ -779,10 +761,6 @@ impl FrontendApp {
     pub fn editor_insert(&mut self, c: char) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => {
-                    provider.input.insert(provider.cursor, c);
-                    provider.cursor += c.len_utf8();
-                }
                 Some(SetupEditor::Field(field)) => {
                     field.input.insert(field.cursor, c);
                     field.cursor += c.len_utf8();
@@ -810,9 +788,6 @@ impl FrontendApp {
     pub fn editor_move_left(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => {
-                    provider.cursor = previous_char_boundary(&provider.input, provider.cursor);
-                }
                 Some(SetupEditor::Field(field)) => {
                     field.cursor = previous_char_boundary(&field.input, field.cursor);
                 }
@@ -839,9 +814,6 @@ impl FrontendApp {
     pub fn editor_move_right(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => {
-                    provider.cursor = next_char_boundary(&provider.input, provider.cursor);
-                }
                 Some(SetupEditor::Field(field)) => {
                     field.cursor = next_char_boundary(&field.input, field.cursor);
                 }
@@ -868,7 +840,6 @@ impl FrontendApp {
     pub fn editor_move_home(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => provider.cursor = 0,
                 Some(SetupEditor::Field(field)) => field.cursor = 0,
                 None => {}
             },
@@ -887,7 +858,6 @@ impl FrontendApp {
     pub fn editor_move_end(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => provider.cursor = provider.input.len(),
                 Some(SetupEditor::Field(field)) => field.cursor = field.input.len(),
                 None => {}
             },
@@ -906,10 +876,6 @@ impl FrontendApp {
     pub fn editor_clear(&mut self) {
         match &mut self.mode {
             Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Provider(provider)) => {
-                    provider.input.clear();
-                    provider.cursor = 0;
-                }
                 Some(SetupEditor::Field(field)) => {
                     field.input.clear();
                     field.cursor = 0;
@@ -936,26 +902,9 @@ impl FrontendApp {
 
     pub fn editor_submit<R: FrontendRpc>(&mut self, rpc: &mut R) {
         match &mut self.mode {
-            Mode::Setup {
-                selected_provider,
-                editor,
-                config,
-                ..
-            } => {
+            Mode::Setup { editor, config, .. } => {
                 let mut close_editor = false;
                 match editor.as_mut() {
-                    Some(SetupEditor::Provider(provider)) => {
-                        let value = provider.input.trim().to_string();
-                        if !value.is_empty() {
-                            config.set_provider_apikey(provider.selected_provider, &value);
-                        }
-                        *selected_provider = provider.selected_provider;
-                        config.chatbot_provider =
-                            crate::frontend::frontend_service::CHATBOT_PROVIDERS
-                                [*selected_provider]
-                                .to_string();
-                        close_editor = true;
-                    }
                     Some(SetupEditor::Field(field)) => {
                         let value = field.input.trim().to_string();
                         if !value.is_empty() || field.selected_field == SetupFieldId::WorkDir {

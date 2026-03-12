@@ -1,6 +1,6 @@
 use crate::frontend::frontend_app::{
-    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode,
-    ProviderEdit, Role, SetupEditor, SubAgentEditor, SubAgentEditorFocus, SubmitOutcome,
+    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode, Role,
+    SetupEditor, SubAgentEditor, SubAgentEditorFocus, SubmitOutcome,
 };
 use crate::frontend::frontend_service::{
     mask_secret, FrontendRpc, LocalFrontendRpc, SetupConfig, CHATBOT_PROVIDERS,
@@ -531,9 +531,11 @@ fn render_setup_page(
         Line::raw("Chatbot provider:"),
         Line::raw(format!("- {}", CHATBOT_PROVIDERS.join(", "))),
         Line::raw(format!("- current: {selected}")),
-        Line::raw("- Enter opens editor for current field"),
-        Line::raw("- Left/Right switches chatbot provider"),
+        Line::raw("- Enter edits current field"),
+        Line::raw("- On chatbot provider, Enter/Left/Right switches provider"),
         Line::raw("- telegram whitelist user_ids supports comma-separated IDs"),
+        Line::raw("- feishu input uses long connection and needs app id + app secret"),
+        Line::raw("- feishu chat id is only needed for proactive push like reminders"),
     ]))
     .wrap(Wrap { trim: false })
     .block(Block::default().borders(Borders::ALL).title("Help"));
@@ -552,58 +554,9 @@ fn render_setup_page(
 
     if let Some(editor) = editor {
         match editor {
-            SetupEditor::Provider(editor) => render_provider_editor(frame, editor),
             SetupEditor::Field(editor) => render_field_editor(frame, editor),
         }
     }
-}
-
-fn render_provider_editor(frame: &mut Frame, editor: &ProviderEdit) {
-    let area = centered_rect(frame.area(), 70, 32);
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Chatbot Provider Editor");
-    frame.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
-        .split(inner);
-
-    let selected = CHATBOT_PROVIDERS[editor
-        .selected_provider
-        .min(CHATBOT_PROVIDERS.len().saturating_sub(1))];
-    let hint = Paragraph::new(Text::from(vec![
-        Line::raw("Left/Right: move cursor"),
-        Line::raw("Ctrl+A: line start | Ctrl+C: clear"),
-        Line::raw("Enter: save provider+apikey"),
-        Line::raw("Esc: cancel"),
-        Line::raw(""),
-        Line::raw("Use setup Left/Right outside editor to switch provider"),
-        Line::raw(format!("Provider: {selected}")),
-    ]))
-    .wrap(Wrap { trim: false });
-    frame.render_widget(hint, parts[0]);
-
-    let input = Paragraph::new(editor.input.as_str()).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Provider API Key | Ctrl+A Home | <- -> Move | Ctrl+C Clear"),
-    );
-    frame.render_widget(input, parts[1]);
-    place_cursor(
-        frame,
-        parts[1],
-        text_display_width_at(editor.input.as_str(), editor.cursor),
-    );
 }
 
 fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {
