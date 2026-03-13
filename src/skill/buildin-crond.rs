@@ -57,7 +57,34 @@ const CROND_TOOL_SCHEMA_JSON: &str = r#"{
       "description": "Whether the reminder stays enabled after edit"
     }
   },
-  "required": ["action"]
+  "required": ["action"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": { "const": "create" }
+        }
+      },
+      "then": {
+        "required": ["schedule_at"],
+        "anyOf": [
+          { "required": ["task_type"] },
+          { "required": ["task_text"] },
+          { "required": ["script_path"] }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": { "const": "edit" }
+        }
+      },
+      "then": {
+        "required": ["id"]
+      }
+    }
+  ]
 }"#;
 
 pub struct BuildinCrondSkill;
@@ -126,6 +153,8 @@ fn create_reminder(input: &Value) -> io::Result<String> {
     let mut reminders = load_reminders()?;
     let next_id = next_reminder_id(&reminders);
     let schedule_at = required_string(input, "schedule_at")?.to_string();
+    let task_type = resolve_task_type(input)?;
+    let route = current_job_route();
     let reminder = ReminderRecord {
         id: format!("r{next_id:04}"),
         schedule_at: schedule_at.clone(),
@@ -138,7 +167,7 @@ fn create_reminder(input: &Value) -> io::Result<String> {
         window_end: optional_string(input, "window_end")
             .unwrap_or_default()
             .to_string(),
-        task_type: required_string(input, "task_type")?.to_string(),
+        task_type,
         task_text: optional_string(input, "task_text")
             .unwrap_or_default()
             .to_string(),
@@ -154,6 +183,15 @@ fn create_reminder(input: &Value) -> io::Result<String> {
         created_at: local_time_string()?,
         updated_at: local_time_string()?,
         last_run_at: String::new(),
+        route_source: route
+            .as_ref()
+            .map(|route| route.source.clone())
+            .unwrap_or_default(),
+        route_user_id: route
+            .as_ref()
+            .map(|route| route.user_id.clone())
+            .unwrap_or_default(),
+        route_target: route.map(|route| route.target).unwrap_or_default(),
     };
     validate_reminder(&reminder)?;
     reminders.push(reminder.clone());
@@ -170,6 +208,7 @@ fn create_reminder(input: &Value) -> io::Result<String> {
 fn edit_reminder(input: &Value) -> io::Result<String> {
     let id = required_string(input, "id")?;
     let mut reminders = load_reminders()?;
+    let route = current_job_route();
     let reminder = reminders
         .iter_mut()
         .find(|item| item.id == id)
@@ -211,6 +250,11 @@ fn edit_reminder(input: &Value) -> io::Result<String> {
     if let Some(enabled) = input.get("enabled").and_then(Value::as_bool) {
         reminder.enabled = enabled;
     }
+    if let Some(route) = route {
+        reminder.route_source = route.source;
+        reminder.route_user_id = route.user_id;
+        reminder.route_target = route.target;
+    }
     if reminder.status == "done" {
         reminder.status = "pending".to_string();
     }
@@ -244,6 +288,16 @@ struct ReminderRecord {
     created_at: String,
     updated_at: String,
     last_run_at: String,
+    route_source: String,
+    route_user_id: String,
+    route_target: String,
+}
+
+#[derive(Clone)]
+struct ReminderRoute {
+    source: String,
+    user_id: String,
+    target: String,
 }
 
 impl ReminderRecord {
@@ -288,6 +342,9 @@ impl ReminderRecord {
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "last_run_at": self.last_run_at,
+            "route_source": self.route_source,
+            "route_user_id": self.route_user_id,
+            "route_target": self.route_target,
         })
         .to_string()
     }
@@ -355,6 +412,21 @@ impl ReminderRecord {
                 .to_string(),
             last_run_at: value
                 .get("last_run_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            route_source: value
+                .get("route_source")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            route_user_id: value
+                .get("route_user_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            route_target: value
+                .get("route_target")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
@@ -446,6 +518,37 @@ fn validate_reminder(reminder: &ReminderRecord) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn current_job_route() -> Option<ReminderRoute> {
+    let source = env::var("BOTTY_CURRENT_JOB_SOURCE").ok()?;
+    let target = env::var("BOTTY_CURRENT_JOB_TARGET").ok()?;
+    let source = source.trim();
+    let target = target.trim();
+    if source.is_empty() || target.is_empty() {
+        return None;
+    }
+    Some(ReminderRoute {
+        source: source.to_string(),
+        user_id: env::var("BOTTY_CURRENT_JOB_USER_ID").unwrap_or_default(),
+        target: target.to_string(),
+    })
+}
+
+fn resolve_task_type(input: &Value) -> io::Result<String> {
+    if let Some(task_type) = optional_string(input, "task_type") {
+        return Ok(task_type.to_string());
+    }
+    if optional_string(input, "task_text").is_some() {
+        return Ok("ask_guy".to_string());
+    }
+    if optional_string(input, "script_path").is_some() {
+        return Ok("run_script".to_string());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "missing task_type; provide task_type, task_text, or script_path",
+    ))
 }
 
 fn validate_repeat(repeat: &str) -> io::Result<()> {

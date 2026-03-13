@@ -117,6 +117,9 @@ TUI 内置命令：
 - 提醒数据保存在 `~/.mylittlebotty/reminder.rec`。
 - `Botty-crond` 会轮询到期提醒并执行。
 - `Botty-crond` 也会执行编译进程序的 system-crond 内置任务，服务启动后自动生效，不走 `reminder.rec` 配置。
+- `mylittlebotty crond` 会列出当前状态仍为 `pending` 的提醒任务。
+- `mylittlebotty crond -list` 作为兼容写法，效果与上面相同，也只看 `pending`。
+- `mylittlebotty crond -list -a` 会显示全部提醒任务，包括已经 `done` 的。
 - 提醒支持 `once`、`every_minute`、`every_hour`、`every_day`、`every_week`、`every_month`。
 - 重复提醒支持 `window_start` / `window_end` 生效时间窗，例如“2026 年内每天执行”或“1 个月内每小时执行”。
 - 当前已真正实现的任务类型是 `ask_guy`。
@@ -339,6 +342,28 @@ mylittlebotty watchapp -n terminal
 
 这个命令会持续显示最新运行中的 terminal 代理会话输出尾部。
 
+### 11. 查看待执行提醒
+
+默认写法：
+
+```bash
+mylittlebotty crond
+```
+
+兼容写法：
+
+```bash
+mylittlebotty crond -list
+```
+
+这个命令只会显示当前状态仍为 `pending` 的提醒任务。
+
+查看全部提醒：
+
+```bash
+mylittlebotty crond -list -a
+```
+
 ## 配置方法
 
 最简单的方式是进入 TUI 后执行：
@@ -417,6 +442,7 @@ chatbot.feishu.chat_id=
 | `mylittlebotty help` | 显示 CLI 帮助 | `mylittlebotty help` |
 | `mylittlebotty version` | 输出版本号 | `mylittlebotty version` |
 | `mylittlebotty log` | 查看最近运行日志和调试日志 | `mylittlebotty log` |
+| `mylittlebotty crond` | 查看当前仍为 `pending` 的提醒任务；`mylittlebotty crond -list -a` 可查看全部 | `mylittlebotty crond` |
 | `mylittlebotty watchjobs` | 查看各角色的委派任务队列 | `mylittlebotty watchjobs` |
 | `mylittlebotty watchapp` | 查看 app 输出，当前仅支持 terminal 会话 | `mylittlebotty watchapp -n terminal` |
 | `mylittlebotty status` | 查看后台服务状态和 PID 信息 | `mylittlebotty status` |
@@ -431,6 +457,8 @@ chatbot.feishu.chat_id=
 
 - `mylittlebotty -h`
 - `mylittlebotty --help`
+- `mylittlebotty crond -list`
+- `mylittlebotty crond -list -a`
 
 ### 内部参数
 

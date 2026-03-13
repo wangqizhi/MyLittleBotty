@@ -1,4 +1,5 @@
 pub mod app;
+pub mod crond;
 pub mod internal;
 pub mod log;
 pub mod restart;

@@ -120,6 +120,9 @@ Botty currently exposes seven built-in tools, though role access differs:
 - Reminder data is stored in `~/.mylittlebotty/reminder.rec`.
 - `Botty-crond` polls and executes due reminders.
 - `Botty-crond` also runs hardcoded system tasks that are built into the binary and start automatically with the service.
+- `mylittlebotty crond` prints the current reminders whose status is still `pending`.
+- `mylittlebotty crond -list` is kept as a compatible alias for the same pending-only view.
+- `mylittlebotty crond -list -a` shows all reminders, including `done` ones.
 - Reminders support `once`, `every_minute`, `every_hour`, `every_day`, `every_week`, and `every_month`.
 - Recurring reminders can be limited with `window_start` / `window_end`, for example "every day during 2026" or "every hour for one month".
 - The only actually implemented task type is `ask_guy`.
@@ -342,6 +345,28 @@ mylittlebotty watchapp -n terminal
 
 This continuously shows the transcript tail of the newest running terminal-agent session.
 
+### 11. Inspect pending reminders
+
+Default view:
+
+```bash
+mylittlebotty crond
+```
+
+Compatible alias:
+
+```bash
+mylittlebotty crond -list
+```
+
+This command prints only reminders whose status is still `pending`.
+
+Show all reminders:
+
+```bash
+mylittlebotty crond -list -a
+```
+
 ## Configuration
 
 The simplest way to configure the app is from the TUI:
@@ -420,6 +445,7 @@ The table below reflects everything currently implemented in `src/main.rs`.
 | `mylittlebotty help` | Show CLI help | `mylittlebotty help` |
 | `mylittlebotty version` | Print the current version | `mylittlebotty version` |
 | `mylittlebotty log` | Show recent runtime and debug logs | `mylittlebotty log` |
+| `mylittlebotty crond` | Show reminders whose status is still `pending`; `mylittlebotty crond -list -a` shows all | `mylittlebotty crond` |
 | `mylittlebotty watchjobs` | Inspect delegated role job queues | `mylittlebotty watchjobs` |
 | `mylittlebotty watchapp` | Inspect app output, currently terminal sessions only | `mylittlebotty watchapp -n terminal` |
 | `mylittlebotty status` | Show service status and PID information | `mylittlebotty status` |
@@ -434,6 +460,8 @@ Short help flags:
 
 - `mylittlebotty -h`
 - `mylittlebotty --help`
+- `mylittlebotty crond -list`
+- `mylittlebotty crond -list -a`
 
 ### Internal flags
 

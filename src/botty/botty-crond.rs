@@ -41,6 +41,33 @@ pub fn run() {
     }
 }
 
+pub fn list_reminders(include_all: bool) -> io::Result<String> {
+    let reminders = load_reminders()?;
+    if reminders.is_empty() {
+        return Ok("No reminders scheduled.".to_string());
+    }
+
+    let mut lines = Vec::new();
+    for reminder in reminders {
+        if !include_all && reminder.status != "pending" {
+            continue;
+        }
+        lines.push(format!(
+            "- id={} schedule={} enabled={} status={} last_run={} task={}",
+            reminder.id,
+            reminder.schedule_summary(),
+            reminder.enabled,
+            reminder.status,
+            display_optional(&reminder.last_run_at),
+            reminder.task_summary()
+        ));
+    }
+    if lines.is_empty() && !include_all {
+        return Ok("No pending reminders scheduled.".to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
 fn tick() -> io::Result<()> {
     let now = local_time_string()?;
     let now_ts = parse_local_datetime(&now)?.to_timestamp()?;
@@ -74,7 +101,14 @@ fn run_due_reminders(now: &str, now_ts: i64) -> io::Result<()> {
             Err(err) => ("error".to_string(), err.to_string()),
         };
 
-        append_result_line(&now, &status, &format!("{} {}", reminder.id, output))?;
+        append_result_line(
+            &now,
+            &status,
+            &format!(
+                "{} scheduled {}, executed at {}: {}",
+                reminder.id, due_at, now, output
+            ),
+        )?;
         let _ = push_result_notifications(reminder, &status, &output, &now);
         reminder.last_run_at = due_at;
         reminder.status = if reminder.repeat == "once" {
@@ -130,10 +164,10 @@ fn execute_reminder(reminder: &ReminderRecord, due_at: &str, now: &str) -> io::R
             })
             .to_string();
             let reply = ask_leader_guy("crond", "scheduler", &format!("/reminder-now {payload}"))?;
-            Ok(format!("scheduled {due_at}, executed at {now}: {reply}"))
+            Ok(reply)
         }
         "run_script" => Ok(format!(
-            "scheduled {due_at}, executed at {now}: run_script is reserved and not implemented yet for {}",
+            "run_script is reserved and not implemented yet for {}",
             reminder.script_path
         )),
         other => Err(io::Error::new(
@@ -144,20 +178,24 @@ fn execute_reminder(reminder: &ReminderRecord, due_at: &str, now: &str) -> io::R
 }
 
 fn push_result_notifications(
-    _reminder: &ReminderRecord,
+    reminder: &ReminderRecord,
     status: &str,
     output: &str,
-    executed_at: &str,
+    _executed_at: &str,
 ) -> io::Result<()> {
-    let config = load_chatbot_config()?;
     let text = if status == "ok" {
-        output
-            .strip_prefix(&format!("executed at {executed_at}: "))
-            .unwrap_or(output)
-            .to_string()
+        output.to_string()
     } else {
         format!("提醒执行失败：{}", output)
     };
+
+    if let Some(route) = reminder.reply_route() {
+        if send_routed_notification(&route, &text).is_ok() {
+            return Ok(());
+        }
+    }
+
+    let config = load_chatbot_config()?;
 
     if config.telegram_enabled {
         let client = TelegramClient::new(
@@ -182,6 +220,36 @@ fn push_result_notifications(
     Ok(())
 }
 
+fn send_routed_notification(route: &ReminderRoute<'_>, text: &str) -> io::Result<()> {
+    match route.source {
+        "telegram" => {
+            let config = load_chatbot_config()?;
+            let chat_id = route.target.parse::<i64>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid telegram reminder target")
+            })?;
+            let client = TelegramClient::new(config.telegram_api_base, config.telegram_apikey);
+            client.send_message(chat_id, text)
+        }
+        "feishu" => {
+            let config = load_chatbot_config()?;
+            let mut client = FeishuClient::new(
+                config.feishu_api_base,
+                config.feishu_app_id,
+                config.feishu_app_secret,
+                config.feishu_access_token,
+            );
+            client.send_message(route.target, text).map(|_| ())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unsupported reminder route source: {} user_id={}",
+                route.source, route.user_id
+            ),
+        )),
+    }
+}
+
 #[derive(Clone)]
 struct ReminderRecord {
     id: String,
@@ -198,6 +266,9 @@ struct ReminderRecord {
     created_at: String,
     updated_at: String,
     last_run_at: String,
+    route_source: String,
+    route_user_id: String,
+    route_target: String,
 }
 
 struct CrondPidGuard {
@@ -227,6 +298,44 @@ impl Drop for CrondPidGuard {
 }
 
 impl ReminderRecord {
+    fn task_summary(&self) -> String {
+        match self.task_type.as_str() {
+            "ask_guy" => self.task_text.clone(),
+            "run_script" => {
+                if self.script_args.is_empty() {
+                    self.script_path.clone()
+                } else {
+                    format!("{} {}", self.script_path, self.script_args.join(" "))
+                }
+            }
+            _ => self.task_text.clone(),
+        }
+    }
+
+    fn schedule_summary(&self) -> String {
+        let mut summary = format!("repeat={} anchor={}", self.repeat, self.schedule_at);
+        if !self.window_start.is_empty() {
+            summary.push_str(&format!(" window_start={}", self.window_start));
+        }
+        if !self.window_end.is_empty() {
+            summary.push_str(&format!(" window_end={}", self.window_end));
+        }
+        summary
+    }
+
+    fn reply_route(&self) -> Option<ReminderRoute<'_>> {
+        let source = self.route_source.trim();
+        let target = self.route_target.trim();
+        if source.is_empty() || target.is_empty() {
+            return None;
+        }
+        Some(ReminderRoute {
+            source,
+            user_id: self.route_user_id.trim(),
+            target,
+        })
+    }
+
     fn next_due_at(&self, now_ts: i64) -> io::Result<Option<String>> {
         if !self.enabled || self.status == "done" {
             return Ok(None);
@@ -387,6 +496,21 @@ impl ReminderRecord {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            route_source: value
+                .get("route_source")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            route_user_id: value
+                .get("route_user_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            route_target: value
+                .get("route_target")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 
@@ -406,9 +530,18 @@ impl ReminderRecord {
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "last_run_at": self.last_run_at,
+            "route_source": self.route_source,
+            "route_user_id": self.route_user_id,
+            "route_target": self.route_target,
         })
         .to_string()
     }
+}
+
+struct ReminderRoute<'a> {
+    source: &'a str,
+    user_id: &'a str,
+    target: &'a str,
 }
 
 impl SystemTask {
@@ -851,6 +984,14 @@ fn local_time_string() -> io::Result<String> {
 
 fn sanitize_log_field(value: &str) -> String {
     value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn display_optional(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 fn current_hour_slot(now_ts: i64) -> io::Result<String> {

@@ -906,6 +906,10 @@ fn run_role_processor(root: PathBuf, role: String, dispatch_tx: Sender<Dispatche
             let _ = live.set_env("BOTTY_CURRENT_JOB_ID", &job.message_id);
             let _ = live.set_env("BOTTY_CURRENT_JOB_SOURCE", &job.source);
             let _ = live.set_env("BOTTY_CURRENT_JOB_USER_ID", &job.user_id);
+            let _ = live.set_env(
+                "BOTTY_CURRENT_JOB_TARGET",
+                job.target.as_deref().unwrap_or_default(),
+            );
         }
 
         let request_message = if let Some(control) = build_resume_control_message(&job) {

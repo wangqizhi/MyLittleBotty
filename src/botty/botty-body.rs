@@ -758,7 +758,7 @@ fn render_tool_usage_guidance(skills: &[String]) -> String {
         lines.push("Use `write` when the user asks to save, write, note, record, or persist text into a local file. Preserve the user's filename intent, but remember that write always remaps paths under the configured work dir.".to_string());
     }
     if skills.iter().any(|skill| skill == "crond") {
-        lines.push("Use `crond` only for reminder and scheduling requests. For create or edit actions, always provide exact local `schedule_at` in `YYYY-MM-DD HH:MM:SS`.".to_string());
+        lines.push("Use `crond` only for reminder and scheduling requests. For create or edit actions, always provide exact local `schedule_at` in `YYYY-MM-DD HH:MM:SS`. For normal text reminders, set `task_type=\"ask_guy\"` and put the reminder text in `task_text`.".to_string());
     }
     if skills.iter().any(|skill| skill == "remember") {
         lines.push("Use `remember` only when the current topic may depend on older conversation memory not already covered by the provided summaries.".to_string());

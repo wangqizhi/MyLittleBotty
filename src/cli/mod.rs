@@ -1,6 +1,7 @@
 mod commands;
 
 use clap::{Args, Parser, Subcommand};
+use std::ffi::OsString;
 use std::io;
 
 #[derive(Parser, Debug)]
@@ -24,6 +25,7 @@ enum Command {
     Start(commands::start::StartCommand),
     Version(commands::version::VersionCommand),
     Status(commands::status::StatusCommand),
+    Crond(commands::crond::CrondCommand),
     Stop(commands::stop::StopCommand),
     Restart(commands::restart::RestartCommand),
     Update(commands::update::UpdateCommand),
@@ -85,7 +87,7 @@ impl InternalFlags {
 }
 
 pub fn run() -> io::Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_args(std::env::args_os()));
 
     if cli.internal.dispatch() {
         return Ok(());
@@ -95,6 +97,7 @@ pub fn run() -> io::Result<()> {
         Command::Start(command) => command.run(),
         Command::Version(command) => command.run(),
         Command::Status(command) => command.run(),
+        Command::Crond(command) => command.run(),
         Command::Stop(command) => command.run(),
         Command::Restart(command) => command.run(),
         Command::Update(command) => command.run(),
@@ -111,4 +114,23 @@ impl Default for Command {
     fn default() -> Self {
         Self::Start(commands::start::StartCommand::default())
     }
+}
+
+fn normalize_args<I>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut normalized = Vec::new();
+    let mut previous_was_crond = false;
+
+    for arg in args {
+        if previous_was_crond && arg == OsString::from("-list") {
+            normalized.push(OsString::from("--list"));
+        } else {
+            normalized.push(arg.clone());
+        }
+        previous_was_crond = arg == OsString::from("crond");
+    }
+
+    normalized
 }
