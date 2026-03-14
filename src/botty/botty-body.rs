@@ -3,6 +3,7 @@ use crate::botty_guy::{
     builtin_role_specs, expand_custom_role_skill_names, expand_role_skill_names,
     resolve_role_spec_or_custom, BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
 };
+use crate::io as botty_io;
 use crate::llm_provider::{
     ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
 };
@@ -682,6 +683,8 @@ fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> 
             role_spec.role, role_experience
         )
     };
+    let work_dir = botty_io::effective_work_dir()?;
+    let work_dir_display = work_dir.display().to_string();
     Ok(prompt::render(
         prompt::TOOL_SYSTEM_PROMPT,
         &[
@@ -701,6 +704,7 @@ fn build_system_prompt_for_role(role_spec: &BottyGuyRoleSpec, rounds: usize) -> 
             ("memory_section", &memory_section),
             ("role_experience_section", &role_experience_section),
             ("current_local_time", &current_local_time),
+            ("work_dir", &work_dir_display),
         ],
     ))
 }
@@ -710,6 +714,8 @@ fn build_system_prompt_for_custom_role(
     _rounds: usize,
 ) -> io::Result<String> {
     let current_local_time = local_time_string()?;
+    let work_dir = botty_io::effective_work_dir()?;
+    let work_dir_display = work_dir.display().to_string();
     let instruction = format!(
         "You are a custom sub-agent named `{}`. {}\nHandle the delegated task using your bound skills.",
         config.name, config.description
@@ -728,6 +734,7 @@ fn build_system_prompt_for_custom_role(
             ("memory_section", ""),
             ("role_experience_section", ""),
             ("current_local_time", &current_local_time),
+            ("work_dir", &work_dir_display),
         ],
     ))
 }
