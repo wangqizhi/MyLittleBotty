@@ -11,6 +11,7 @@ const DAYS_TO_SHOW: &str = "10";
 const TEXT_PREVIEW_LIMIT: usize = 32;
 const CONTENT_PREVIEW_LIMIT: usize = 48;
 const MAX_UNTIMESTAMPED_HISTORY_LINES: usize = 200;
+const FOLLOW_INITIAL_HISTORY_LINES: usize = 20;
 const FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(700);
 
 #[derive(Args, Debug, Default)]
@@ -25,11 +26,18 @@ impl LogCommand {
         let debug_files = collect_log_files("brain-debug")?;
         let runtime_files = collect_runtime_log_files(&["boss", "system-crond"])?;
 
-        print_history(&debug_files, &threshold, true)?;
-        print_history(&runtime_files, &threshold, false)?;
-
         if self.follow {
+            print_recent_history(&debug_files, &threshold, true, FOLLOW_INITIAL_HISTORY_LINES)?;
+            print_recent_history(
+                &runtime_files,
+                &threshold,
+                false,
+                FOLLOW_INITIAL_HISTORY_LINES,
+            )?;
             follow_logs(debug_files, runtime_files)?;
+        } else {
+            print_history(&debug_files, &threshold, true)?;
+            print_history(&runtime_files, &threshold, false)?;
         }
 
         Ok(())
@@ -74,6 +82,42 @@ fn print_history(files: &[PathBuf], threshold: &str, is_debug: bool) -> io::Resu
             if should_show_line(line, threshold, path, has_line_timestamps)? {
                 println!("{}", render_line(path, line, is_debug));
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_recent_history(
+    files: &[PathBuf],
+    threshold: &str,
+    is_debug: bool,
+    limit: usize,
+) -> io::Result<()> {
+    for path in files {
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let has_line_timestamps = lines
+            .iter()
+            .any(|line| split_timestamped_line(line).is_some());
+        let mut visible_lines = Vec::new();
+
+        for line in &lines {
+            if should_show_line(line, threshold, path, has_line_timestamps)? {
+                visible_lines.push(*line);
+            }
+        }
+
+        let header = if is_debug { "debug" } else { "log" };
+        println!("== {header}: {} ==", path.display());
+
+        let start_index = visible_lines.len().saturating_sub(limit);
+        for line in &visible_lines[start_index..] {
+            println!("{}", render_line(path, line, is_debug));
         }
     }
 

@@ -7,7 +7,11 @@ pub struct CrondCommand {
     #[arg(short = 'l', long = "list", help = "List current scheduled reminders")]
     list: bool,
 
-    #[arg(short = 'a', long = "all", help = "Include non-pending reminders when used with -list")]
+    #[arg(
+        short = 'a',
+        long = "all",
+        help = "Include non-pending reminders when used with -list"
+    )]
     all: bool,
 }
 

@@ -225,7 +225,10 @@ fn send_routed_notification(route: &ReminderRoute<'_>, text: &str) -> io::Result
         "telegram" => {
             let config = load_chatbot_config()?;
             let chat_id = route.target.parse::<i64>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid telegram reminder target")
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid telegram reminder target",
+                )
             })?;
             let client = TelegramClient::new(config.telegram_api_base, config.telegram_apikey);
             client.send_message(chat_id, text)

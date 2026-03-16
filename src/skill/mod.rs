@@ -8,6 +8,8 @@ pub mod buildin_leader;
 pub mod buildin_list;
 #[path = "buildin-remember.rs"]
 pub mod buildin_remember;
+#[path = "buildin-search.rs"]
+pub mod buildin_search;
 #[path = "buildin-terminal.rs"]
 pub mod buildin_terminal;
 #[path = "buildin-watch.rs"]
@@ -26,6 +28,7 @@ use crate::skill::buildin_crond::BuildinCrondSkill;
 use crate::skill::buildin_leader::BuildinLeaderSkill;
 use crate::skill::buildin_list::BuildinListSkill;
 use crate::skill::buildin_remember::BuildinRememberSkill;
+use crate::skill::buildin_search::BuildinSearchSkill;
 use crate::skill::buildin_terminal::BuildinTerminalSkill;
 use crate::skill::buildin_watch::BuildinWatchSkill;
 use crate::skill::buildin_web_search::BuildinWebSearchSkill;
@@ -43,6 +46,7 @@ pub const BUILDIN_SKILL_NAMES: &[&str] = &[
     "list",
     "watch",
     "write",
+    "search",
     "remember",
     "crond",
     "leader",
@@ -59,6 +63,7 @@ pub fn build_skill(name: &str) -> Option<Box<dyn BottySkill>> {
         "list" => Some(Box::new(BuildinListSkill::new())),
         "watch" => Some(Box::new(BuildinWatchSkill::new())),
         "write" => Some(Box::new(BuildinWriteSkill::new())),
+        "search" => Some(Box::new(BuildinSearchSkill::new())),
         "remember" => Some(Box::new(BuildinRememberSkill::new())),
         "crond" => Some(Box::new(BuildinCrondSkill::new())),
         "leader" => Some(Box::new(BuildinLeaderSkill::new())),

@@ -1,4 +1,4 @@
-use crate::botty_brain::BottyBrain;
+use crate::botty_brain::{is_llm_connection_error, BottyBrain};
 use crate::botty_guy::{
     builtin_role_specs, expand_custom_role_skill_names, expand_role_skill_names,
     resolve_role_spec_or_custom, BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
@@ -23,6 +23,7 @@ const ROLE_EXPERIENCE_MAX_LINES: usize = 60;
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
 const MAX_TOOL_CALL_STEPS: usize = 50;
 const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
+const TOOL_ERROR_FORMATTER_SYSTEM_PROMPT: &str = "You rewrite internal tool execution failures into short, user-facing assistant replies. Explain the failure naturally, avoid stack traces or internal implementation details, and keep the reply actionable. If the next step is obvious, mention it briefly. Reply in the same language as the user's request. Keep the reply under 4 sentences.";
 
 pub struct AssistantReply {
     pub text: String,
@@ -114,7 +115,7 @@ impl BottyBody {
     pub fn think(&self, input: &str) -> io::Result<AssistantReply> {
         if let Some((name, argument)) = parse_debug_tool_call(input) {
             return Ok(AssistantReply {
-                text: self.execute_tool(name, &argument)?,
+                text: self.execute_tool_with_recovery(Some(input), name, &argument)?,
                 thinking: None,
                 control: None,
             });
@@ -187,7 +188,7 @@ impl BottyBody {
     ) -> io::Result<AssistantReply> {
         let system_prompt = self.build_system_prompt()?;
         let conversation = vec![ProviderMessage::UserText(input.to_string())];
-        self.run_tool_call_loop(&system_prompt, tools, conversation, first_tool_use)
+        self.run_tool_call_loop(&system_prompt, tools, conversation, first_tool_use, Some(input))
     }
 
     fn continue_tool_call(
@@ -222,7 +223,14 @@ impl BottyBody {
                 control: None,
             }),
             ProviderResponse::ToolUse(tool_use) => {
-                self.run_tool_call_loop(system_prompt, tools, conversation, tool_use)
+                let user_request = first_user_text(&conversation).map(|value| value.to_string());
+                self.run_tool_call_loop(
+                    system_prompt,
+                    tools,
+                    conversation,
+                    tool_use,
+                    user_request.as_deref(),
+                )
             }
         }
     }
@@ -233,10 +241,14 @@ impl BottyBody {
         tools: &[ProviderToolDefinition],
         mut conversation: Vec<ProviderMessage>,
         mut tool_use: ProviderToolUse,
+        user_request: Option<&str>,
     ) -> io::Result<AssistantReply> {
         for _ in 0..MAX_TOOL_CALL_STEPS {
-            let tool_result =
-                self.execute_tool(tool_use.name.as_str(), tool_use.input_json.as_str())?;
+            let tool_result = self.execute_tool_with_recovery(
+                user_request,
+                tool_use.name.as_str(),
+                tool_use.input_json.as_str(),
+            )?;
             conversation.push(ProviderMessage::AssistantToolUse {
                 assistant_content_json: tool_use.assistant_content_json,
             });
@@ -334,7 +346,51 @@ impl BottyBody {
         let Some(argument) = parse_leader_interrupt_shortcut(input) else {
             return Ok(None);
         };
-        Ok(Some(self.execute_tool("leader", &argument)?))
+        Ok(Some(
+            self.execute_tool_with_recovery(Some(input), "leader", &argument)?,
+        ))
+    }
+
+    fn execute_tool_with_recovery(
+        &self,
+        user_request: Option<&str>,
+        name: &str,
+        argument: &str,
+    ) -> io::Result<String> {
+        match self.execute_tool(name, argument) {
+            Ok(result) => Ok(result),
+            Err(err) => self.format_tool_error(user_request, name, argument, &err),
+        }
+    }
+
+    fn format_tool_error(
+        &self,
+        user_request: Option<&str>,
+        name: &str,
+        argument: &str,
+        err: &io::Error,
+    ) -> io::Result<String> {
+        let request_summary = user_request.unwrap_or("Continue handling the current user request.");
+        let formatter_input = format!(
+            "User request:\n{request_summary}\n\nTool name:\n{name}\n\nTool input JSON:\n{argument}\n\nInternal error:\n{err}\n"
+        );
+        match self.brain.think(
+            TOOL_ERROR_FORMATTER_SYSTEM_PROMPT,
+            &[ProviderMessage::UserText(formatter_input)],
+            &[],
+        ) {
+            Ok(ProviderResponse::Text(reply)) => {
+                let text = reply.text.trim();
+                if text.is_empty() {
+                    Ok(default_tool_error_message(request_summary, name))
+                } else {
+                    Ok(text.to_string())
+                }
+            }
+            Ok(ProviderResponse::ToolUse(_)) => Ok(default_tool_error_message(request_summary, name)),
+            Err(format_err) if is_llm_connection_error(&format_err) => Err(format_err),
+            Err(_) => Ok(default_tool_error_message(request_summary, name)),
+        }
     }
 
     fn remember_deep_memory(&self) -> io::Result<String> {
@@ -608,6 +664,25 @@ fn extract_tool_use_id(assistant_content_json: &str) -> io::Result<String> {
 
 fn matches_special_command(input: &str, command: &str) -> bool {
     extract_special_command(input) == Some(command)
+}
+
+fn first_user_text(messages: &[ProviderMessage]) -> Option<&str> {
+    messages.iter().find_map(|message| match message {
+        ProviderMessage::UserText(text) => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn default_tool_error_message(user_request: &str, tool_name: &str) -> String {
+    if contains_cjk(user_request) {
+        format!("处理你的请求时，工具 `{tool_name}` 执行失败了。我没有继续暴露内部报错；如果你愿意，我可以换一种方式继续尝试。")
+    } else {
+        format!("The `{tool_name}` tool failed while I was handling your request. I am not surfacing the internal error directly; if you want, I can try a different approach.")
+    }
+}
+
+fn contains_cjk(text: &str) -> bool {
+    text.chars().any(|ch| matches!(ch as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF))
 }
 
 fn parse_special_command_argument<'a>(input: &'a str, command: &str) -> Option<&'a str> {

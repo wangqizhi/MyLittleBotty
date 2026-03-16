@@ -196,17 +196,23 @@ pub fn load_all_custom_skills() -> Vec<CustomSkill> {
     skills
 }
 
-pub fn save_custom_skill(
+pub fn save_generated_custom_skill(
     name: &str,
-    description: &str,
-    usage: &str,
-    action: &str,
-    prompt_template: &str,
+    purpose: &str,
+    generated_description: Option<&str>,
 ) -> io::Result<PathBuf> {
     let dir = custom_skill_dir();
     fs::create_dir_all(&dir)?;
 
     let file_path = dir.join(format!("{name}.json"));
+    let description = generated_description
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("Use this when the user needs help to {purpose}."));
+    let usage = format!("Use this skill when the task is to {purpose}.");
+    let prompt_template =
+        format!("Help with the following task.\n\nGoal: {purpose}\n\nUser input:\n{{{{input}}}}");
 
     let value = serde_json::json!({
         "name": name,
@@ -222,7 +228,7 @@ pub fn save_custom_skill(
             },
             "required": ["input"]
         },
-        "action": action,
+        "action": "prompt",
         "prompt_template": prompt_template
     });
 

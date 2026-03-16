@@ -184,6 +184,10 @@ impl BottyBrain {
     }
 }
 
+pub fn is_llm_connection_error(err: &io::Error) -> bool {
+    is_llm_connection_error_message(&err.to_string())
+}
+
 fn load_brain_config() -> io::Result<BrainConfig> {
     let path = setup_config_file();
     let content = match fs::read_to_string(path) {
@@ -299,4 +303,21 @@ fn classify_provider_error(detail: &str) -> String {
     }
 
     format!("AI provider request failed. Please check your configuration. Details: {trimmed}")
+}
+
+fn is_llm_connection_error_message(detail: &str) -> bool {
+    let lower = detail.trim().to_ascii_lowercase();
+    lower.contains("could not connect to the ai provider endpoint")
+        || lower.contains("ai provider endpoint could not be resolved")
+        || lower.contains("ai provider request timed out")
+        || lower.contains("tls/ssl")
+        || lower.contains("failed to connect")
+        || lower.contains("couldn't connect")
+        || lower.contains("could not resolve host")
+        || lower.contains("name or service not known")
+        || lower.contains("nodename nor servname provided")
+        || lower.contains("timed out")
+        || lower.contains("ssl")
+        || lower.contains("certificate")
+        || lower.contains("failed to execute curl for ai provider request")
 }

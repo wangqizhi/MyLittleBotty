@@ -48,6 +48,7 @@ pub enum Mode {
         agents: Vec<SubAgentEntry>,
         selected_entry: usize,
         editor: Option<SubAgentEditor>,
+        confirm_delete: Option<SubAgentDeleteConfirm>,
     },
     CreateSkill {
         editor: CreateSkillEditor,
@@ -73,6 +74,10 @@ pub struct SubAgentEditor {
     pub generating_description: bool,
 }
 
+pub struct SubAgentDeleteConfirm {
+    pub name: String,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum SubAgentEditorFocus {
     Name,
@@ -83,24 +88,19 @@ pub enum SubAgentEditorFocus {
 pub struct CreateSkillEditor {
     pub name_input: String,
     pub name_cursor: usize,
-    pub description_input: String,
-    pub description_cursor: usize,
-    pub usage_input: String,
-    pub usage_cursor: usize,
-    pub action_input: String,
-    pub action_cursor: usize,
-    pub prompt_template_input: String,
-    pub prompt_template_cursor: usize,
+    pub purpose_input: String,
+    pub purpose_cursor: usize,
     pub focus: CreateSkillEditorFocus,
+    pub generated_description: String,
+    pub generating_description: bool,
+    pub pending_generated_name: String,
+    pub pending_generated_purpose: String,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum CreateSkillEditorFocus {
     Name,
-    Description,
-    Usage,
-    Action,
-    PromptTemplate,
+    Purpose,
 }
 
 pub enum SetupEditor {
@@ -1152,18 +1152,32 @@ impl FrontendApp {
             agents,
             selected_entry: 0,
             editor: None,
+            confirm_delete: None,
         };
         self.input.clear();
         self.input_cursor = 0;
     }
 
-    pub fn sub_agent_state(&self) -> Option<(usize, &[SubAgentEntry], Option<&SubAgentEditor>)> {
+    pub fn sub_agent_state(
+        &self,
+    ) -> Option<(
+        usize,
+        &[SubAgentEntry],
+        Option<&SubAgentEditor>,
+        Option<&SubAgentDeleteConfirm>,
+    )> {
         match &self.mode {
             Mode::SubAgent {
                 agents,
                 selected_entry,
                 editor,
-            } => Some((*selected_entry, agents, editor.as_ref())),
+                confirm_delete,
+            } => Some((
+                *selected_entry,
+                agents,
+                editor.as_ref(),
+                confirm_delete.as_ref(),
+            )),
             _ => None,
         }
     }
@@ -1172,11 +1186,15 @@ impl FrontendApp {
         let Mode::SubAgent {
             selected_entry,
             agents,
+            confirm_delete,
             ..
         } = &mut self.mode
         else {
             return;
         };
+        if confirm_delete.is_some() {
+            return;
+        }
         let len = agents.len() + 1; // +1 for [Create new]
         if len == 0 {
             return;
@@ -1192,11 +1210,15 @@ impl FrontendApp {
         let Mode::SubAgent {
             selected_entry,
             agents,
+            confirm_delete,
             ..
         } = &mut self.mode
         else {
             return;
         };
+        if confirm_delete.is_some() {
+            return;
+        }
         let len = agents.len() + 1;
         *selected_entry = (*selected_entry + 1) % len;
     }
@@ -1206,10 +1228,14 @@ impl FrontendApp {
             selected_entry,
             agents,
             editor,
+            confirm_delete,
         } = &mut self.mode
         else {
             return;
         };
+        if confirm_delete.is_some() {
+            return;
+        }
 
         let available_skills = all_available_skill_names();
         let new_editor = if *selected_entry < agents.len() {
@@ -1246,6 +1272,64 @@ impl FrontendApp {
             }
         };
         *editor = Some(new_editor);
+    }
+
+    pub fn sub_agent_request_delete(&mut self) {
+        let Mode::SubAgent {
+            agents,
+            selected_entry,
+            editor,
+            confirm_delete,
+        } = &mut self.mode
+        else {
+            return;
+        };
+        if editor.is_some() {
+            return;
+        }
+        if *selected_entry >= agents.len() {
+            self.push_system("Select an existing sub-agent to delete.");
+            return;
+        }
+        *confirm_delete = Some(SubAgentDeleteConfirm {
+            name: agents[*selected_entry].name.clone(),
+        });
+    }
+
+    pub fn sub_agent_cancel_delete(&mut self) {
+        let Mode::SubAgent { confirm_delete, .. } = &mut self.mode else {
+            return;
+        };
+        *confirm_delete = None;
+    }
+
+    pub fn sub_agent_confirm_delete(&mut self) {
+        let Mode::SubAgent {
+            agents,
+            selected_entry,
+            confirm_delete,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        let Some(confirm) = confirm_delete.take() else {
+            return;
+        };
+
+        match delete_custom_role_config(&confirm.name) {
+            Ok(()) => {
+                agents.retain(|agent| agent.name != confirm.name);
+                let len = agents.len() + 1;
+                if *selected_entry >= len {
+                    *selected_entry = len.saturating_sub(1);
+                }
+                self.push_system(&format!("Sub-agent '{}' deleted.", confirm.name));
+            }
+            Err(err) => {
+                self.push_system(&format!("delete sub-agent failed: {err}"));
+            }
+        }
     }
 
     pub fn sub_agent_editor_toggle_skill(&mut self) {
@@ -1552,15 +1636,13 @@ impl FrontendApp {
             editor: CreateSkillEditor {
                 name_input: String::new(),
                 name_cursor: 0,
-                description_input: String::new(),
-                description_cursor: 0,
-                usage_input: String::new(),
-                usage_cursor: 0,
-                action_input: "prompt".to_string(),
-                action_cursor: 6,
-                prompt_template_input: String::new(),
-                prompt_template_cursor: 0,
+                purpose_input: String::new(),
+                purpose_cursor: 0,
                 focus: CreateSkillEditorFocus::Name,
+                generated_description: String::new(),
+                generating_description: false,
+                pending_generated_name: String::new(),
+                pending_generated_purpose: String::new(),
             },
         };
         self.input.clear();
@@ -1574,42 +1656,62 @@ impl FrontendApp {
         }
     }
 
-    pub fn create_skill_editor_cycle_focus(&mut self) {
-        let Mode::CreateSkill { editor } = &mut self.mode else {
-            return;
+    pub fn create_skill_preview(&self) -> Option<(String, String, String, bool)> {
+        let Mode::CreateSkill { editor } = &self.mode else {
+            return None;
         };
-        editor.focus = match editor.focus {
-            CreateSkillEditorFocus::Name => CreateSkillEditorFocus::Description,
-            CreateSkillEditorFocus::Description => CreateSkillEditorFocus::Usage,
-            CreateSkillEditorFocus::Usage => CreateSkillEditorFocus::Action,
-            CreateSkillEditorFocus::Action => CreateSkillEditorFocus::PromptTemplate,
-            CreateSkillEditorFocus::PromptTemplate => CreateSkillEditorFocus::Name,
+        let normalized_name = normalize_skill_name(editor.name_input.trim());
+        let target_path = if normalized_name.is_empty() {
+            "~/.mylittlebotty/skill/<name>.json".to_string()
+        } else {
+            format!("~/.mylittlebotty/skill/{normalized_name}.json")
         };
+        Some((
+            normalized_name,
+            editor.generated_description.clone(),
+            target_path,
+            editor.generating_description,
+        ))
     }
 
     pub fn create_skill_editor_insert(&mut self, c: char) {
         let Mode::CreateSkill { editor } = &mut self.mode else {
             return;
         };
-        let (input, cursor) = create_skill_active_field(editor);
-        input.insert(*cursor, c);
-        *cursor += c.len_utf8();
+        {
+            let (input, cursor) = create_skill_active_field(editor);
+            input.insert(*cursor, c);
+            *cursor += c.len_utf8();
+        }
+        editor.generated_description.clear();
+        editor.pending_generated_name.clear();
+        editor.pending_generated_purpose.clear();
     }
 
     pub fn create_skill_editor_backspace(&mut self) {
         let Mode::CreateSkill { editor } = &mut self.mode else {
             return;
         };
-        let (input, cursor) = create_skill_active_field(editor);
-        delete_previous_char(input, cursor);
+        {
+            let (input, cursor) = create_skill_active_field(editor);
+            delete_previous_char(input, cursor);
+        }
+        editor.generated_description.clear();
+        editor.pending_generated_name.clear();
+        editor.pending_generated_purpose.clear();
     }
 
     pub fn create_skill_editor_delete(&mut self) {
         let Mode::CreateSkill { editor } = &mut self.mode else {
             return;
         };
-        let (input, cursor) = create_skill_active_field(editor);
-        delete_current_char(input, *cursor);
+        {
+            let (input, cursor) = create_skill_active_field(editor);
+            delete_current_char(input, *cursor);
+        }
+        editor.generated_description.clear();
+        editor.pending_generated_name.clear();
+        editor.pending_generated_purpose.clear();
     }
 
     pub fn create_skill_editor_move_left(&mut self) {
@@ -1636,35 +1738,95 @@ impl FrontendApp {
         *cursor = 0;
     }
 
+    pub fn create_skill_editor_cycle_focus(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        editor.focus = match editor.focus {
+            CreateSkillEditorFocus::Name => CreateSkillEditorFocus::Purpose,
+            CreateSkillEditorFocus::Purpose => CreateSkillEditorFocus::Name,
+        };
+    }
+
     pub fn create_skill_editor_clear(&mut self) {
         let Mode::CreateSkill { editor } = &mut self.mode else {
             return;
         };
-        let (input, cursor) = create_skill_active_field(editor);
-        input.clear();
-        *cursor = 0;
+        {
+            let (input, cursor) = create_skill_active_field(editor);
+            input.clear();
+            *cursor = 0;
+        }
+        editor.generated_description.clear();
+        editor.pending_generated_name.clear();
+        editor.pending_generated_purpose.clear();
+    }
+
+    pub fn create_skill_editor_begin_generate(&mut self) -> Option<(String, String)> {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return None;
+        };
+        let name = normalize_skill_name(&editor.name_input);
+        let purpose = editor.purpose_input.trim().to_string();
+        if name.is_empty() || purpose.is_empty() || editor.generating_description {
+            return None;
+        }
+        editor.generating_description = true;
+        editor.pending_generated_name = name.clone();
+        editor.pending_generated_purpose = purpose.clone();
+        Some((name, purpose))
+    }
+
+    pub fn create_skill_editor_set_generated_description(
+        &mut self,
+        name: String,
+        purpose: String,
+        description: String,
+    ) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        if editor.pending_generated_name != name || editor.pending_generated_purpose != purpose {
+            return;
+        }
+        editor.generated_description = description;
+        editor.generating_description = false;
+        editor.pending_generated_name.clear();
+        editor.pending_generated_purpose.clear();
+    }
+
+    pub fn create_skill_editor_generation_failed(&mut self) {
+        let Mode::CreateSkill { editor } = &mut self.mode else {
+            return;
+        };
+        editor.generating_description = false;
+        editor.pending_generated_name.clear();
+        editor.pending_generated_purpose.clear();
     }
 
     pub fn create_skill_editor_save(&mut self) {
         let Mode::CreateSkill { editor } = &mut self.mode else {
             return;
         };
-        let name = editor.name_input.trim().to_string();
+        let name = normalize_skill_name(&editor.name_input);
+        let purpose = editor.purpose_input.trim().to_string();
         if name.is_empty() {
             self.push_system("Skill name cannot be empty.");
             return;
         }
-        let description = editor.description_input.trim().to_string();
-        let usage = editor.usage_input.trim().to_string();
-        let action = editor.action_input.trim().to_string();
-        let prompt_template = editor.prompt_template_input.trim().to_string();
+        if purpose.is_empty() {
+            self.push_system("Skill purpose cannot be empty.");
+            return;
+        }
 
-        match custom_skill::save_custom_skill(
+        match custom_skill::save_generated_custom_skill(
             &name,
-            &description,
-            &usage,
-            &action,
-            &prompt_template,
+            &purpose,
+            if editor.generated_description.trim().is_empty() {
+                None
+            } else {
+                Some(editor.generated_description.trim())
+            },
         ) {
             Ok(path) => {
                 self.mode = Mode::Chat;
@@ -1678,16 +1840,7 @@ impl FrontendApp {
 fn create_skill_active_field(editor: &mut CreateSkillEditor) -> (&mut String, &mut usize) {
     match editor.focus {
         CreateSkillEditorFocus::Name => (&mut editor.name_input, &mut editor.name_cursor),
-        CreateSkillEditorFocus::Description => (
-            &mut editor.description_input,
-            &mut editor.description_cursor,
-        ),
-        CreateSkillEditorFocus::Usage => (&mut editor.usage_input, &mut editor.usage_cursor),
-        CreateSkillEditorFocus::Action => (&mut editor.action_input, &mut editor.action_cursor),
-        CreateSkillEditorFocus::PromptTemplate => (
-            &mut editor.prompt_template_input,
-            &mut editor.prompt_template_cursor,
-        ),
+        CreateSkillEditorFocus::Purpose => (&mut editor.purpose_input, &mut editor.purpose_cursor),
     }
 }
 
@@ -1700,6 +1853,33 @@ fn previous_char_boundary(text: &str, cursor: usize) -> usize {
         index -= 1;
     }
     index
+}
+
+fn normalize_skill_name(input: &str) -> String {
+    let mut name = String::new();
+    let mut last_was_dash = false;
+    for ch in input.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if matches!(ch, '-' | '_' | ' ' | '/') {
+            Some('-')
+        } else {
+            None
+        };
+        let Some(mapped) = mapped else {
+            continue;
+        };
+        if mapped == '-' {
+            if name.is_empty() || last_was_dash {
+                continue;
+            }
+            last_was_dash = true;
+        } else {
+            last_was_dash = false;
+        }
+        name.push(mapped);
+    }
+    name.trim_matches('-').to_string()
 }
 
 fn next_char_boundary(text: &str, cursor: usize) -> usize {

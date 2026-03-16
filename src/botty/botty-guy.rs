@@ -43,7 +43,7 @@ pub(crate) struct BottyGuyRoleSpec {
     pub experience_memory_rule: Option<&'static str>,
 }
 
-const BASE_SKILL_GROUP: &[&str] = &["list", "watch", "write"];
+const BASE_SKILL_GROUP: &[&str] = &["list", "watch", "write", "search"];
 const LEADER_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
     role: "leader",
     description: "Dispatch tasks to the right role and manage scheduled tasks.",

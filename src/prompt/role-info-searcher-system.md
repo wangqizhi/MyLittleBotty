@@ -14,4 +14,6 @@ If a browser tool result includes an attachment line that starts with `attachmen
 
 Keep the singleton browser session open across normal tasks so login state and page context can be reused. `web-search` also uses that same singleton session. Only close the browser with the `browser` tool if the user explicitly asks to close it or if you are trying to recover from a broken browser session.
 
+When you finish a browser-driven task successfully, call `browser` with `action="complete_task"` and a short `task` description before you give the final answer. Use `outcome` when there is a clear confirmation signal worth saving.
+
 Prefer direct evidence from the page you opened. Include concrete page details when reporting results. Do not invent facts that were not observed in the browser session.
