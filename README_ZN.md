@@ -5,19 +5,8 @@ MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 
 ## 最近更新
 
 - `2026-03-18`：`/setup` 现在支持多个 AI provider profile。AI profile 在覆盖式弹层中管理，支持创建、编辑、激活和删除；当前激活的 profile 不能直接删除，必须先切换。
-- `2026-03-18`：AI 配置文件现在支持 `ai.provider.active` 和命名的 `ai.provider.<profile>.*` 项，同时兼容老版本单 provider 的 `ai.provider.*` 配置格式。
-- `2026-03-18`：新增 `https://open.bigmodel.cn/api/anthropic` 专用的 GLM provider 适配器。BigModel 的 Anthropic 兼容 endpoint 现在会走 `provider-glm`，并已用 `glm-4.7` 做过真实调用验证。
-- `2026-03-11`：`Botty-crond` 新增硬编码的 system-crond 任务机制，并新增 `system-crond(-dev).log`；首个内置任务会每小时自动执行一次 `/remember`。
-- `2026-03-11`：新增 role 专属经验记忆文件；`/remember` 现在会为 `coder` 和 `info-searcher` 同步整理 role memory，并在角色启动时自动注入对应 `memory/summary/experience/<role>-exp.md`。
-- `2026-03-10`：新增基于队列的委派任务恢复机制。父任务在工具委派后可以进入等待态，子任务完成后自动恢复，并可通过 `mylittlebotty watchjobs` 观察队列状态。
-- `2026-03-10`：新增内置 `terminal` skill、`coder` 角色、ACP 终端会话管理，以及基于 PTY 的编码代理执行能力，执行目录受当前 work dir 限制。
-- `2026-03-10`：新增 `mylittlebotty watchapp -n terminal`，可直接查看最新运行中的 terminal 会话输出。
-- `2026-03-10`：新增内置 `browser` skill、`info-searcher` 角色、基于 Chrome remote debugging 的浏览器会话、Telegram 截图附件回传，以及可配置的持久 Chrome profile 目录。
-- `2026-03-09`：发布 `0.0.9`。
-- `2026-03-09`：新增基于角色的 `Botty-Guy` 运行方式。默认 `leader` 角色可以把任务分派给 `paperwork` 和 `all-in-one` 子角色，并尽量缩小传递上下文。
-- `2026-03-09`：新增内置 `leader` skill 与角色专用系统提示词，任务分派和各角色职责变成显式机制。
-- `2026-03-09`：新增 `mylittlebotty log` 命令，并在调试日志里展示 `role=...`，更容易区分 leader 与被分派子进程。
-- `2026-03-09`：TUI 新增 `Botty-Guy` 持久化环境变量编辑，以及 `work_dir` 配置和迁移能力。
+
+更早的发布记录见 [doc/release.md](./doc/release.md)。
 
 ## 当前已实现功能
 

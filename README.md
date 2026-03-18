@@ -7,19 +7,8 @@ MyLittleBotty is a local AI assistant that runs as a background service. Its cur
 ## Recent Updates
 
 - `2026-03-18`: `/setup` now supports multiple AI provider profiles. AI profiles are managed in an overlay panel with create, edit, activate, and delete actions; deleting the active profile is blocked until another profile is activated.
-- `2026-03-18`: AI setup config now supports `ai.provider.active` plus named `ai.provider.<profile>.*` entries, while remaining backward-compatible with legacy single-provider `ai.provider.*` config files.
-- `2026-03-18`: added a dedicated GLM provider adapter for `https://open.bigmodel.cn/api/anthropic`. BigModel Anthropic-compatible endpoints are now routed to `provider-glm`, and live verification succeeded with `glm-4.7`.
-- `2026-03-11`: added hardcoded system-crond tasks inside `Botty-crond`, plus `system-crond(-dev).log`. The first built-in task runs `/remember` automatically once per hour.
-- `2026-03-11`: added role-specific experience memory files, `/remember` updates for `coder` and `info-searcher`, and role prompt injection from `memory/summary/experience/<role>-exp.md`.
-- `2026-03-10`: added queue-based delegated task recovery. Parent jobs can now pause on tool delegation, resume after child completion, and be inspected with `mylittlebotty watchjobs`.
-- `2026-03-10`: added the built-in `terminal` skill, `coder` role, ACP terminal session management, and PTY-backed coding-agent execution inside the configured work dir.
-- `2026-03-10`: added `mylittlebotty watchapp -n terminal` to inspect live terminal-agent transcripts from the newest running terminal session.
-- `2026-03-10`: added the built-in `browser` skill, `info-searcher` role, Chrome remote-debugging sessions, Telegram screenshot attachment forwarding, and configurable persistent Chrome profile directories.
-- `2026-03-09`: released `0.0.9`.
-- `2026-03-09`: added role-based `Botty-Guy` execution. The default `leader` role can delegate focused tasks to `paperwork` and `all-in-one` subprocess roles with reduced context.
-- `2026-03-09`: added the built-in `leader` skill and role-specific system prompts, so task routing and role behavior are now explicit instead of implicit.
-- `2026-03-09`: added `mylittlebotty log` and role-aware debug log rendering, making it easier to distinguish leader traffic from delegated workers.
-- `2026-03-09`: added persisted `Botty-Guy` env editing and configurable `work_dir` migration in the TUI.
+
+Older release notes are tracked in [doc/release.md](./doc/release.md).
 
 ## Implemented Features
 
