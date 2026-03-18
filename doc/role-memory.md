@@ -12,13 +12,13 @@
 ## 文件位置
 
 - 全局长期记忆：
-  [~/.mylittlebotty/memory/summary/remember.md](/Users/wangqizhi/.mylittlebotty/memory/summary/remember.md)
+  [~/.mylittlebotty/memory/summary/remember.md](~/.mylittlebotty/memory/summary/remember.md)
 - role 经验记忆目录：
-  [~/.mylittlebotty/memory/summary/experience/](/Users/wangqizhi/.mylittlebotty/memory/summary/experience)
+  [~/.mylittlebotty/memory/summary/experience/](~/.mylittlebotty/memory/summary/experience)
 - `coder` 文件：
-  [~/.mylittlebotty/memory/summary/experience/coder-exp.md](/Users/wangqizhi/.mylittlebotty/memory/summary/experience/coder-exp.md)
+  [~/.mylittlebotty/memory/summary/experience/coder-exp.md](~/.mylittlebotty/memory/summary/experience/coder-exp.md)
 - `info-searcher` 文件：
-  [~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md](/Users/wangqizhi/.mylittlebotty/memory/summary/experience/info-searcher-exp.md)
+  [~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md](~/.mylittlebotty/memory/summary/experience/info-searcher-exp.md)
 
 ## 触发方式
 
@@ -93,7 +93,7 @@ role 启动时，如果存在对应的 `~/.mylittlebotty/memory/summary/experien
 
 如果以后要给新 role 增加经验记忆：
 
-1. 在 [src/botty/botty-guy.rs](/Users/wangqizhi/Project/MyLittleBotty/src/botty/botty-guy.rs) 的 `BottyGuyRoleSpec` 中配置 `experience_memory_rule`
+1. 在 [src/botty/botty-guy.rs](~/Project/MyLittleBotty/src/botty/botty-guy.rs) 的 `BottyGuyRoleSpec` 中配置 `experience_memory_rule`
 2. 约定该 role 的经验文件名为 `~/.mylittlebotty/memory/summary/experience/<role>-exp.md`
 3. 为该 role 设计稳定、可复用、低噪音的字段格式
 
@@ -101,7 +101,7 @@ role 启动时，如果存在对应的 `~/.mylittlebotty/memory/summary/experien
 
 如果你下次想让 `/remember` 自动多生成一个 role 的 `exp.md`，通常只需要改一个核心点：
 
-1. 在 [src/botty/botty-guy.rs](/Users/wangqizhi/Project/MyLittleBotty/src/botty/botty-guy.rs) 找到目标 role 的 `BottyGuyRoleSpec`
+1. 在 [src/botty/botty-guy.rs](~/Project/MyLittleBotty/src/botty/botty-guy.rs) 找到目标 role 的 `BottyGuyRoleSpec`
 2. 给这个 role 增加或修改 `experience_memory_rule: Some(\"...\")`
 
 为什么通常只改这里：

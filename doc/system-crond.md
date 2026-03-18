@@ -25,7 +25,7 @@ The state file stores the last completed schedule slot for each task so the same
 
 ## How To Add Another System Task
 
-Add the task in [`src/botty/botty-crond.rs`](/Users/wangqizhi/Project/MyLittleBotty/src/botty/botty-crond.rs):
+Add the task in [`src/botty/botty-crond.rs`](~/Project/MyLittleBotty/src/botty/botty-crond.rs):
 
 1. Extend `system_tasks()` with a new `SystemTask`.
 2. Pick a stable `id`, a readable `description`, and the request text to send through `request_message`.

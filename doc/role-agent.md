@@ -12,7 +12,7 @@
 
 ## 角色定义位置
 
-角色配置写在 [src/botty/botty-guy.rs](/Users/wangqizhi/Project/MyLittleBotty/src/botty/botty-guy.rs)。
+角色配置写在 [src/botty/botty-guy.rs](~/Project/MyLittleBotty/src/botty/botty-guy.rs)。
 
 核心结构：
 
@@ -40,13 +40,13 @@ pub(crate) struct BottyGuyRoleSpec {
 
 角色指令文案不再直接写在代码里，当前放在：
 
-- [src/prompt/role-leader-system.md](/Users/wangqizhi/Project/MyLittleBotty/src/prompt/role-leader-system.md)
-- [src/prompt/role-paperwork-system.md](/Users/wangqizhi/Project/MyLittleBotty/src/prompt/role-paperwork-system.md)
-- [src/prompt/role-all-in-one-system.md](/Users/wangqizhi/Project/MyLittleBotty/src/prompt/role-all-in-one-system.md)
+- [src/prompt/role-leader-system.md](~/Project/MyLittleBotty/src/prompt/role-leader-system.md)
+- [src/prompt/role-paperwork-system.md](~/Project/MyLittleBotty/src/prompt/role-paperwork-system.md)
+- [src/prompt/role-all-in-one-system.md](~/Project/MyLittleBotty/src/prompt/role-all-in-one-system.md)
 
 ## 技能组定义方法
 
-技能组也在 [src/botty/botty-guy.rs](/Users/wangqizhi/Project/MyLittleBotty/src/botty/botty-guy.rs)。
+技能组也在 [src/botty/botty-guy.rs](~/Project/MyLittleBotty/src/botty/botty-guy.rs)。
 
 当前内置：
 
@@ -79,14 +79,14 @@ const PAPERWORK_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
 
 如果要新增角色：
 
-1. 在 [src/botty/botty-guy.rs](/Users/wangqizhi/Project/MyLittleBotty/src/botty/botty-guy.rs) 新增一个 `BottyGuyRoleSpec`
+1. 在 [src/botty/botty-guy.rs](~/Project/MyLittleBotty/src/botty/botty-guy.rs) 新增一个 `BottyGuyRoleSpec`
 2. 在 `resolve_role_spec()` 里注册角色名
 3. 如果该角色允许被 leader 分派，在 `delegated_role_names()` 里加入它
-4. 如果需要新技能，先在 [src/skill/mod.rs](/Users/wangqizhi/Project/MyLittleBotty/src/skill/mod.rs) 的 `build_skill()` 注册
+4. 如果需要新技能，先在 [src/skill/mod.rs](~/Project/MyLittleBotty/src/skill/mod.rs) 的 `build_skill()` 注册
 
 ## Leader 分派逻辑
 
-`leader` skill 定义在 [src/skill/buildin-leader.rs](/Users/wangqizhi/Project/MyLittleBotty/src/skill/buildin-leader.rs)。
+`leader` skill 定义在 [src/skill/buildin-leader.rs](~/Project/MyLittleBotty/src/skill/buildin-leader.rs)。
 
 行为：
 
@@ -129,7 +129,7 @@ const PAPERWORK_ROLE_SPEC: BottyGuyRoleSpec = BottyGuyRoleSpec {
 - 执行 `/remember` 时，除了更新全局 `remember.md`，还会同步更新所有已启用 role memory 的 `*-exp.md`
 - role 启动时，如果该文件存在，会额外注入到该 role 的 system prompt
 
-规则说明见 [doc/role-memory.md](/Users/wangqizhi/Project/MyLittleBotty/doc/role-memory.md)。
+规则说明见 [doc/role-memory.md](~/Project/MyLittleBotty/doc/role-memory.md)。
 
 ## 调试日志里的 role
 
