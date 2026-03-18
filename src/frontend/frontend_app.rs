@@ -3,8 +3,8 @@ use crate::botty_guy::{
     CustomRoleConfig,
 };
 use crate::frontend::frontend_service::{
-    command_suggestions, FrontendRpc, GuyEnvSetResult, RestartStatus, SaveSetupResult, SetupConfig,
-    SetupFieldId,
+    command_suggestions, AiProviderProfile, FrontendRpc, GuyEnvSetResult, RestartStatus,
+    SaveSetupResult, SetupConfig, SetupFieldId,
 };
 use crate::io as botty_io;
 use crate::skill::all_available_skill_names;
@@ -31,7 +31,7 @@ pub enum Mode {
     Setup {
         selected_field: usize,
         selected_provider: usize,
-        editor: Option<SetupEditor>,
+        overlay: Option<SetupOverlay>,
         original_work_dir: String,
         config: SetupConfig,
     },
@@ -103,8 +103,9 @@ pub enum CreateSkillEditorFocus {
     Purpose,
 }
 
-pub enum SetupEditor {
+pub enum SetupOverlay {
     Field(FieldEdit),
+    AiProfiles(SetupProfilePanel),
 }
 
 pub struct GuyEnvEditor {
@@ -126,6 +127,62 @@ pub struct FieldEdit {
     pub selected_field: SetupFieldId,
     pub input: String,
     pub cursor: usize,
+}
+
+pub struct SetupProfilePanel {
+    pub selected_profile: usize,
+    pub editor: Option<SetupProfileEditor>,
+    pub message: Option<String>,
+}
+
+pub struct SetupProfileEditor {
+    pub original_name: Option<String>,
+    pub draft: AiProviderProfile,
+    pub selected_field: usize,
+    pub field_editor: Option<ProfileFieldEdit>,
+}
+
+pub struct ProfileFieldEdit {
+    pub selected_field: AiProfileFieldId,
+    pub input: String,
+    pub cursor: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AiProfileFieldId {
+    Name,
+    Endpoint,
+    Apikey,
+    Model,
+    Debug,
+}
+
+impl AiProfileFieldId {
+    pub const ALL: [AiProfileFieldId; 5] = [
+        AiProfileFieldId::Name,
+        AiProfileFieldId::Endpoint,
+        AiProfileFieldId::Apikey,
+        AiProfileFieldId::Model,
+        AiProfileFieldId::Debug,
+    ];
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL.get(index).copied().unwrap_or(AiProfileFieldId::Name)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AiProfileFieldId::Name => "profile name",
+            AiProfileFieldId::Endpoint => "endpoint",
+            AiProfileFieldId::Apikey => "apikey",
+            AiProfileFieldId::Model => "model",
+            AiProfileFieldId::Debug => "debug",
+        }
+    }
+
+    pub fn is_toggle(self) -> bool {
+        self == AiProfileFieldId::Debug
+    }
 }
 
 pub enum SubmitOutcome {
@@ -405,7 +462,7 @@ impl FrontendApp {
         self.mode = Mode::Setup {
             selected_field: 0,
             selected_provider,
-            editor: None,
+            overlay: None,
             original_work_dir: config.work_dir.clone(),
             config,
         };
@@ -566,7 +623,7 @@ impl FrontendApp {
         let Mode::Setup {
             selected_field,
             selected_provider,
-            editor,
+            overlay,
             config,
             ..
         } = &mut self.mode
@@ -575,6 +632,15 @@ impl FrontendApp {
         };
 
         let field = SetupFieldId::from_index(*selected_field);
+        if field == SetupFieldId::AiProfiles {
+            *overlay = Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                selected_profile: config.active_ai_profile_index(),
+                editor: None,
+                message: None,
+            }));
+            return;
+        }
+
         if field.is_toggle() {
             config.toggle_field(field);
             return;
@@ -586,7 +652,7 @@ impl FrontendApp {
         }
 
         let input = config.editable_value(field);
-        *editor = Some(SetupEditor::Field(FieldEdit {
+        *overlay = Some(SetupOverlay::Field(FieldEdit {
             selected_field: field,
             cursor: input.len(),
             input,
@@ -607,6 +673,226 @@ impl FrontendApp {
         if field.is_toggle() {
             config.toggle_field(field);
         }
+    }
+
+    pub fn setup_open_ai_profiles(&mut self) {
+        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+            return;
+        };
+        *overlay = Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+            selected_profile: config.active_ai_profile_index(),
+            editor: None,
+            message: None,
+        }));
+    }
+
+    pub fn setup_close_overlay(&mut self) {
+        let Mode::Setup { overlay, .. } = &mut self.mode else {
+            return;
+        };
+
+        if let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() {
+            if panel.message.is_some() {
+                panel.message = None;
+                return;
+            }
+            if panel.editor.is_some() {
+                panel.editor = None;
+                return;
+            }
+        }
+        *overlay = None;
+    }
+
+    pub fn setup_ai_profiles_prev(&mut self) {
+        let profile_count = match &self.mode {
+            Mode::Setup { config, .. } => config.ai_provider_profiles.len(),
+            _ => 0,
+        };
+        let Some(panel) = self.setup_ai_profiles_panel_mut() else {
+            return;
+        };
+        let len = profile_count + 1;
+        if len == 0 {
+            return;
+        }
+        if panel.selected_profile == 0 {
+            panel.selected_profile = len - 1;
+        } else {
+            panel.selected_profile -= 1;
+        }
+    }
+
+    pub fn setup_ai_profiles_next(&mut self) {
+        let profile_count = match &self.mode {
+            Mode::Setup { config, .. } => config.ai_provider_profiles.len(),
+            _ => 0,
+        };
+        let Some(panel) = self.setup_ai_profiles_panel_mut() else {
+            return;
+        };
+        let len = profile_count + 1;
+        if len == 0 {
+            return;
+        }
+        panel.selected_profile = (panel.selected_profile + 1) % len;
+    }
+
+    pub fn setup_ai_profiles_activate(&mut self) {
+        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() else {
+            return;
+        };
+        if panel.selected_profile < config.ai_provider_profiles.len() {
+            config.activate_ai_profile_by_index(panel.selected_profile);
+        }
+    }
+
+    pub fn setup_ai_profiles_delete_selected(&mut self) {
+        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() else {
+            return;
+        };
+        panel.message = None;
+        if panel.selected_profile >= config.ai_provider_profiles.len() {
+            return;
+        }
+        if let Err(err) = config.delete_ai_profile(panel.selected_profile) {
+            let profile_name = config
+                .ai_provider_profiles
+                .get(panel.selected_profile)
+                .map(|profile| profile.name.clone())
+                .unwrap_or_default();
+            panel.message = Some(match err.kind() {
+                io::ErrorKind::InvalidInput if profile_name == config.ai_provider_active => {
+                    "当前 profile 正在使用中，请先切换到其他 profile 再删除".to_string()
+                }
+                io::ErrorKind::InvalidInput => err.to_string(),
+                _ => format!("delete AI profile failed: {err}"),
+            });
+            return;
+        }
+        let max_index = config.ai_provider_profiles.len();
+        panel.selected_profile = panel.selected_profile.min(max_index);
+    }
+
+    pub fn setup_ai_profiles_edit_selected(&mut self) {
+        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+            return;
+        };
+        let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() else {
+            return;
+        };
+        panel.message = None;
+        if panel.selected_profile < config.ai_provider_profiles.len() {
+            let profile = config.ai_provider_profiles[panel.selected_profile].clone();
+            panel.editor = Some(SetupProfileEditor {
+                original_name: Some(profile.name.clone()),
+                draft: profile,
+                selected_field: 0,
+                field_editor: None,
+            });
+        } else {
+            panel.editor = Some(SetupProfileEditor {
+                original_name: None,
+                draft: AiProviderProfile {
+                    name: String::new(),
+                    endpoint: String::new(),
+                    apikey: String::new(),
+                    model: String::new(),
+                    debug: false,
+                },
+                selected_field: 0,
+                field_editor: None,
+            });
+        }
+    }
+
+    pub fn setup_ai_profiles_new(&mut self) {
+        let next_index = match &self.mode {
+            Mode::Setup { config, .. } => config.ai_provider_profiles.len(),
+            _ => return,
+        };
+        if let Some(panel) = self.setup_ai_profiles_panel_mut() {
+            panel.selected_profile = next_index;
+            panel.message = None;
+        } else {
+            self.setup_open_ai_profiles();
+            if let Some(panel) = self.setup_ai_profiles_panel_mut() {
+                panel.selected_profile = next_index;
+                panel.message = None;
+            }
+        }
+        self.setup_ai_profiles_edit_selected();
+    }
+
+    pub fn setup_ai_profile_editor_prev_field(&mut self) {
+        let Some(editor) = self.setup_ai_profile_editor_mut() else {
+            return;
+        };
+        if editor.selected_field == 0 {
+            editor.selected_field = AiProfileFieldId::ALL.len() - 1;
+        } else {
+            editor.selected_field -= 1;
+        }
+    }
+
+    pub fn setup_ai_profile_editor_next_field(&mut self) {
+        let Some(editor) = self.setup_ai_profile_editor_mut() else {
+            return;
+        };
+        editor.selected_field = (editor.selected_field + 1) % AiProfileFieldId::ALL.len();
+    }
+
+    pub fn setup_ai_profile_editor_activate(&mut self) {
+        let Some(editor) = self.setup_ai_profile_editor_mut() else {
+            return;
+        };
+        let field = AiProfileFieldId::from_index(editor.selected_field);
+        if field.is_toggle() {
+            editor.draft.debug = !editor.draft.debug;
+            return;
+        }
+
+        let input = match field {
+            AiProfileFieldId::Name => editor.draft.name.clone(),
+            AiProfileFieldId::Endpoint => editor.draft.endpoint.clone(),
+            AiProfileFieldId::Apikey => editor.draft.apikey.clone(),
+            AiProfileFieldId::Model => editor.draft.model.clone(),
+            AiProfileFieldId::Debug => String::new(),
+        };
+        editor.field_editor = Some(ProfileFieldEdit {
+            selected_field: field,
+            cursor: input.len(),
+            input,
+        });
+    }
+
+    pub fn setup_ai_profile_editor_toggle_selected(&mut self) {
+        let Some(editor) = self.setup_ai_profile_editor_mut() else {
+            return;
+        };
+        if AiProfileFieldId::from_index(editor.selected_field) == AiProfileFieldId::Debug {
+            editor.draft.debug = !editor.draft.debug;
+        }
+    }
+
+    fn setup_ai_profiles_panel_mut(&mut self) -> Option<&mut SetupProfilePanel> {
+        let Mode::Setup { overlay, .. } = &mut self.mode else {
+            return None;
+        };
+        match overlay.as_mut() {
+            Some(SetupOverlay::AiProfiles(panel)) => Some(panel),
+            _ => None,
+        }
+    }
+
+    fn setup_ai_profile_editor_mut(&mut self) -> Option<&mut SetupProfileEditor> {
+        self.setup_ai_profiles_panel_mut()?.editor.as_mut()
     }
 
     pub fn guy_env_prev_entry(&mut self) {
@@ -704,7 +990,21 @@ impl FrontendApp {
 
     pub fn editor_cancel(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => *editor = None,
+            Mode::Setup { overlay, .. } => {
+                if let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if editor.field_editor.is_some() {
+                            editor.field_editor = None;
+                            return;
+                        }
+                    }
+                    if panel.editor.is_some() {
+                        panel.editor = None;
+                        return;
+                    }
+                }
+                *overlay = None;
+            }
             Mode::GuyEnvEdit { editor, .. } => *editor = None,
             _ => {}
         }
@@ -712,9 +1012,16 @@ impl FrontendApp {
 
     pub fn editor_backspace(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => {
                     delete_previous_char(&mut field.input, &mut field.cursor);
+                }
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            delete_previous_char(&mut field.input, &mut field.cursor);
+                        }
+                    }
                 }
                 None => {}
             },
@@ -736,9 +1043,16 @@ impl FrontendApp {
 
     pub fn editor_delete(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => {
                     delete_current_char(&mut field.input, field.cursor);
+                }
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            delete_current_char(&mut field.input, field.cursor);
+                        }
+                    }
                 }
                 None => {}
             },
@@ -760,10 +1074,18 @@ impl FrontendApp {
 
     pub fn editor_insert(&mut self, c: char) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => {
                     field.input.insert(field.cursor, c);
                     field.cursor += c.len_utf8();
+                }
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.input.insert(field.cursor, c);
+                            field.cursor += c.len_utf8();
+                        }
+                    }
                 }
                 None => {}
             },
@@ -787,9 +1109,16 @@ impl FrontendApp {
 
     pub fn editor_move_left(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => {
                     field.cursor = previous_char_boundary(&field.input, field.cursor);
+                }
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = previous_char_boundary(&field.input, field.cursor);
+                        }
+                    }
                 }
                 None => {}
             },
@@ -813,9 +1142,16 @@ impl FrontendApp {
 
     pub fn editor_move_right(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => {
                     field.cursor = next_char_boundary(&field.input, field.cursor);
+                }
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = next_char_boundary(&field.input, field.cursor);
+                        }
+                    }
                 }
                 None => {}
             },
@@ -839,8 +1175,15 @@ impl FrontendApp {
 
     pub fn editor_move_home(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => field.cursor = 0,
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => field.cursor = 0,
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = 0;
+                        }
+                    }
+                }
                 None => {}
             },
             Mode::GuyEnvEdit { editor, .. } => {
@@ -857,8 +1200,15 @@ impl FrontendApp {
 
     pub fn editor_move_end(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => field.cursor = field.input.len(),
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => field.cursor = field.input.len(),
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = field.input.len();
+                        }
+                    }
+                }
                 None => {}
             },
             Mode::GuyEnvEdit { editor, .. } => {
@@ -875,10 +1225,18 @@ impl FrontendApp {
 
     pub fn editor_clear(&mut self) {
         match &mut self.mode {
-            Mode::Setup { editor, .. } => match editor.as_mut() {
-                Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, .. } => match overlay.as_mut() {
+                Some(SetupOverlay::Field(field)) => {
                     field.input.clear();
                     field.cursor = 0;
+                }
+                Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.input.clear();
+                            field.cursor = 0;
+                        }
+                    }
                 }
                 None => {}
             },
@@ -902,21 +1260,53 @@ impl FrontendApp {
 
     pub fn editor_submit<R: FrontendRpc>(&mut self, rpc: &mut R) {
         match &mut self.mode {
-            Mode::Setup { editor, config, .. } => {
-                let mut close_editor = false;
-                match editor.as_mut() {
-                    Some(SetupEditor::Field(field)) => {
+            Mode::Setup { overlay, config, .. } => {
+                let mut close_overlay = false;
+                match overlay.as_mut() {
+                    Some(SetupOverlay::Field(field)) => {
                         let value = field.input.trim().to_string();
                         if !value.is_empty() || field.selected_field == SetupFieldId::WorkDir {
                             config.set_field(field.selected_field, &value);
                         }
-                        close_editor = true;
+                        close_overlay = true;
+                    }
+                    Some(SetupOverlay::AiProfiles(panel)) => {
+                        if let Some(editor) = panel.editor.as_mut() {
+                            if let Some(field) = editor.field_editor.take() {
+                                match field.selected_field {
+                                    AiProfileFieldId::Name => editor.draft.name = field.input,
+                                    AiProfileFieldId::Endpoint => {
+                                        editor.draft.endpoint = field.input;
+                                    }
+                                    AiProfileFieldId::Apikey => editor.draft.apikey = field.input,
+                                    AiProfileFieldId::Model => editor.draft.model = field.input,
+                                    AiProfileFieldId::Debug => {}
+                                }
+                                return;
+                            }
+
+                            match config
+                                .upsert_ai_profile(editor.original_name.as_deref(), editor.draft.clone())
+                            {
+                                Ok(()) => {
+                                    let selected_name = editor.draft.name.clone();
+                                    panel.editor = None;
+                                    panel.selected_profile = config
+                                        .ai_provider_profiles
+                                        .iter()
+                                        .position(|profile| profile.name == selected_name)
+                                        .unwrap_or_else(|| config.active_ai_profile_index());
+                                    panel.message = None;
+                                }
+                                Err(err) => panel.message = Some(format!("{err}")),
+                            }
+                        }
                     }
                     None => {}
                 }
 
-                if close_editor {
-                    *editor = None;
+                if close_overlay {
+                    *overlay = None;
                 }
             }
             Mode::GuyEnvEdit {

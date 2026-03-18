@@ -6,6 +6,9 @@ MyLittleBotty is a local AI assistant that runs as a background service. Its cur
 
 ## Recent Updates
 
+- `2026-03-18`: `/setup` now supports multiple AI provider profiles. AI profiles are managed in an overlay panel with create, edit, activate, and delete actions; deleting the active profile is blocked until another profile is activated.
+- `2026-03-18`: AI setup config now supports `ai.provider.active` plus named `ai.provider.<profile>.*` entries, while remaining backward-compatible with legacy single-provider `ai.provider.*` config files.
+- `2026-03-18`: added a dedicated GLM provider adapter for `https://open.bigmodel.cn/api/anthropic`. BigModel Anthropic-compatible endpoints are now routed to `provider-glm`, and live verification succeeded with `glm-4.7`.
 - `2026-03-11`: added hardcoded system-crond tasks inside `Botty-crond`, plus `system-crond(-dev).log`. The first built-in task runs `/remember` automatically once per hour.
 - `2026-03-11`: added role-specific experience memory files, `/remember` updates for `coder` and `info-searcher`, and role prompt injection from `memory/summary/experience/<role>-exp.md`.
 - `2026-03-10`: added queue-based delegated task recovery. Parent jobs can now pause on tool delegation, resume after child completion, and be inspected with `mylittlebotty watchjobs`.
@@ -37,6 +40,7 @@ MyLittleBotty is a local AI assistant that runs as a background service. Its cur
 Built-in TUI commands:
 
 - `/setup`: open the setup editor for AI provider and chatbot settings
+- `AI profiles` in `/setup`: manage multiple named AI provider profiles from an overlay panel; supports create, edit, activate, and delete
 - `/restart-server`: restart local Botty background services
 - `/new`: start a new chat session
 - `/remember`: trigger long-term memory summarization and refresh all configured role-specific experience memory files
@@ -53,20 +57,25 @@ The code currently supports these provider adapters:
 - OpenAI-compatible API
 - Anthropic
 - MiniMax
+- GLM Anthropic-compatible endpoint (`open.bigmodel.cn/api/anthropic`)
 
 Testing status:
 
 - Only MiniMax has been tested in practice.
-- OpenAI-compatible and Anthropic adapters exist in code, but have not been verified in real use yet.
+- GLM Anthropic-compatible access has been verified in practice with `glm-4.7`.
+- OpenAI-compatible and generic Anthropic adapters still exist in code, but have not been broadly verified in real use yet.
 
 Runtime behavior depends on these config keys:
 
-- `ai.provider.endpoint`
-- `ai.provider.apikey`
-- `ai.provider.model`
-- `ai.provider.debug`
+- `ai.provider.active`
+- `ai.provider.<profile>.endpoint`
+- `ai.provider.<profile>.apikey`
+- `ai.provider.<profile>.model`
+- `ai.provider.<profile>.debug`
 
-When `ai.provider.debug=true`, request and response payloads are written to the debug log.
+The loader remains backward-compatible with legacy single-provider keys such as `ai.provider.endpoint`, `ai.provider.apikey`, `ai.provider.model`, and `ai.provider.debug`.
+
+When the active profile has `debug=true`, request and response payloads are written to the debug log.
 
 ### 4. Role-based agents
 
@@ -384,10 +393,11 @@ The config file is stored at:
 Current config keys:
 
 ```ini
-ai.provider.endpoint=
-ai.provider.apikey=
-ai.provider.model=MiniMax-M2.1
-ai.provider.debug=false
+ai.provider.active=default
+ai.provider.default.endpoint=
+ai.provider.default.apikey=
+ai.provider.default.model=
+ai.provider.default.debug=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
@@ -411,10 +421,11 @@ chatbot.feishu.chat_id=
 
 Common meanings:
 
-- `ai.provider.endpoint`: model API endpoint
-- `ai.provider.apikey`: model API key
-- `ai.provider.model`: model name
-- `ai.provider.debug`: enable request/response debug logging
+- `ai.provider.active`: active AI profile name used at runtime
+- `ai.provider.<profile>.endpoint`: model API endpoint for a named profile
+- `ai.provider.<profile>.apikey`: model API key for a named profile
+- `ai.provider.<profile>.model`: model name for a named profile
+- `ai.provider.<profile>.debug`: enable request/response debug logging for a named profile
 - `agent.provider`: terminal-agent provider used by the `terminal` skill, currently `codex` by default
 - `agent.codex.command`: executable name or path for Codex CLI
 - `agent.claude.command`: executable name or path reserved for a Claude terminal agent
@@ -430,6 +441,13 @@ Common meanings:
 - `chatbot.feishu.app_secret`: Feishu app secret used to obtain a tenant access token
 - `chatbot.telegram.whitelist_user_ids`: comma-separated Telegram user IDs allowed to access the bot
 - `chatbot.feishu.chat_id`: target Feishu chat ID for proactive push such as reminders
+
+Notes:
+
+- The TUI `AI profiles` manager supports create, edit, activate, and delete.
+- You cannot delete the currently active AI profile; activate another one first.
+- The config loader is backward-compatible with legacy single-provider `ai.provider.*` keys.
+- For GLM Claude-compatible access, use `https://open.bigmodel.cn/api/anthropic` with a model such as `glm-4.7`.
 
 Saving from the TUI automatically triggers a service restart.
 

@@ -1,6 +1,7 @@
 use crate::frontend::frontend_app::{
-    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode, Role,
-    SetupEditor, SubAgentDeleteConfirm, SubAgentEditor, SubAgentEditorFocus, SubmitOutcome,
+    CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode,
+    ProfileFieldEdit, Role, SetupOverlay, SetupProfileEditor, SetupProfilePanel,
+    SubAgentDeleteConfirm, SubAgentEditor, SubAgentEditorFocus, SubmitOutcome,
 };
 use crate::frontend::frontend_service::{
     mask_secret, FrontendRpc, LocalFrontendRpc, SetupConfig, CHATBOT_PROVIDERS,
@@ -235,10 +236,33 @@ fn handle_panel_key<R: FrontendRpc>(
         return Ok(None);
     }
 
+    let profile_editor_open = matches!(
+        app.mode(),
+        Mode::Setup {
+            overlay: Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                editor: Some(_),
+                ..
+            })),
+            ..
+        }
+    );
+
     let editor_open = matches!(
         app.mode(),
         Mode::Setup {
-            editor: Some(_),
+            overlay: Some(SetupOverlay::Field(_)),
+            ..
+        }
+    ) || matches!(
+        app.mode(),
+        Mode::Setup {
+            overlay: Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                editor: Some(SetupProfileEditor {
+                    field_editor: Some(_),
+                    ..
+                }),
+                ..
+            })),
             ..
         }
     ) || matches!(
@@ -268,8 +292,16 @@ fn handle_panel_key<R: FrontendRpc>(
             KeyCode::End => app.editor_move_end(),
             KeyCode::Backspace => app.editor_backspace(),
             KeyCode::Delete => app.editor_delete(),
-            KeyCode::Tab => app.toggle_guy_env_editor_focus(),
-            KeyCode::BackTab => app.toggle_guy_env_editor_focus(),
+            KeyCode::Tab => {
+                if matches!(app.mode(), Mode::GuyEnvEdit { .. }) {
+                    app.toggle_guy_env_editor_focus();
+                }
+            }
+            KeyCode::BackTab => {
+                if matches!(app.mode(), Mode::GuyEnvEdit { .. }) {
+                    app.toggle_guy_env_editor_focus();
+                }
+            }
             KeyCode::Enter => app.editor_submit(rpc),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.editor_insert(c)
@@ -279,9 +311,25 @@ fn handle_panel_key<R: FrontendRpc>(
         return Ok(None);
     }
 
+    if profile_editor_open {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') | KeyCode::Char('S') => app.editor_submit(rpc),
+                _ => {}
+            }
+            return Ok(None);
+        }
+    }
+
     match app.mode() {
-        Mode::Setup { .. } => match key.code {
-            KeyCode::Esc => app.cancel_setup(),
+        Mode::Setup { overlay, .. } => match key.code {
+            KeyCode::Esc => {
+                if overlay.is_some() {
+                    app.setup_close_overlay();
+                } else {
+                    app.cancel_setup();
+                }
+            }
             KeyCode::Char(c)
                 if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') =>
             {
@@ -289,13 +337,77 @@ fn handle_panel_key<R: FrontendRpc>(
                     return Ok(Some(spawn_setup_save_request(config)));
                 }
             }
-            KeyCode::Up => app.setup_prev_field(),
-            KeyCode::Down | KeyCode::Tab => app.setup_next_field(),
-            KeyCode::BackTab => app.setup_prev_field(),
-            KeyCode::Left => app.setup_cycle_provider(-1),
-            KeyCode::Right => app.setup_cycle_provider(1),
-            KeyCode::Enter => app.setup_activate(),
-            KeyCode::Char(' ') => app.setup_toggle_selected(),
+            KeyCode::Up => {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                    app.setup_ai_profile_editor_prev_field();
+                } else if overlay.is_some() {
+                    app.setup_ai_profiles_prev();
+                } else {
+                    app.setup_prev_field();
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                    app.setup_ai_profile_editor_next_field();
+                } else if overlay.is_some() {
+                    app.setup_ai_profiles_next();
+                } else {
+                    app.setup_next_field();
+                }
+            }
+            KeyCode::BackTab => {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                    app.setup_ai_profile_editor_prev_field();
+                } else if overlay.is_some() {
+                    app.setup_ai_profiles_prev();
+                } else {
+                    app.setup_prev_field();
+                }
+            }
+            KeyCode::Left => {
+                if overlay.is_none() {
+                    app.setup_cycle_provider(-1);
+                }
+            }
+            KeyCode::Right => {
+                if overlay.is_none() {
+                    app.setup_cycle_provider(1);
+                }
+            }
+            KeyCode::Enter => {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                    app.setup_ai_profile_editor_activate();
+                } else if overlay.is_some() {
+                    app.setup_ai_profiles_edit_selected();
+                } else {
+                    app.setup_activate();
+                }
+            }
+            KeyCode::Char(' ') => {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                    app.setup_ai_profile_editor_toggle_selected();
+                } else {
+                    app.setup_toggle_selected();
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if overlay.is_some() {
+                    app.setup_ai_profiles_activate();
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if overlay.is_some() {
+                    app.setup_ai_profiles_delete_selected();
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if overlay.is_some() {
+                    app.setup_ai_profiles_new();
+                } else {
+                    app.setup_open_ai_profiles();
+                    app.setup_ai_profiles_new();
+                }
+            }
             _ => {}
         },
         Mode::GuyEnvEdit { .. } => match key.code {
@@ -335,14 +447,14 @@ fn render(app: &FrontendApp, frame: &mut Frame) {
         Mode::Setup {
             selected_field,
             selected_provider,
-            editor,
+            overlay,
             config,
             ..
         } => render_setup_page(
             frame,
             *selected_field,
             *selected_provider,
-            editor.as_ref(),
+            overlay.as_ref(),
             config,
             app.pending_setup_save_text(),
         ),
@@ -491,7 +603,7 @@ fn render_setup_page(
     frame: &mut Frame,
     selected_field: usize,
     selected_provider: usize,
-    editor: Option<&SetupEditor>,
+    overlay: Option<&SetupOverlay>,
     config: &SetupConfig,
     pending_message: Option<&str>,
 ) {
@@ -542,6 +654,7 @@ fn render_setup_page(
         Line::raw("- Ctrl+S: Save and return"),
         Line::raw("- Esc: Cancel"),
         Line::raw("- Tab / Shift+Tab: Next/Prev field"),
+        Line::raw("- Enter on AI profiles opens profile manager"),
         Line::raw(""),
         Line::raw("Work dir:"),
         Line::raw("- default: ~/opt/mylittlebotty-workdir"),
@@ -571,11 +684,252 @@ fn render_setup_page(
     });
     frame.render_widget(footer, layout[1]);
 
-    if let Some(editor) = editor {
-        match editor {
-            SetupEditor::Field(editor) => render_field_editor(frame, editor),
+    if let Some(overlay) = overlay {
+        match overlay {
+            SetupOverlay::Field(editor) => render_field_editor(frame, editor),
+            SetupOverlay::AiProfiles(panel) => render_ai_profiles_panel(frame, panel, config),
         }
     }
+}
+
+fn render_ai_profiles_panel(frame: &mut Frame, panel: &SetupProfilePanel, config: &SetupConfig) {
+    let area = centered_rect(frame.area(), 78, 70);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("AI Profiles | Enter Edit | a Activate | n New | d Delete | Esc Close");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let parts = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(inner);
+
+    let mut items = Vec::new();
+    for (idx, profile) in config.ai_provider_profiles.iter().enumerate() {
+        let suffix = if profile.name == config.ai_provider_active {
+            " [active]"
+        } else {
+            ""
+        };
+        let style = if idx == panel.selected_profile {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(Line::raw(format!("{}{}", profile.name, suffix))).style(style));
+    }
+
+    let new_index = config.ai_provider_profiles.len();
+    items.push(
+        ListItem::new(Line::raw("+ New profile")).style(if panel.selected_profile == new_index {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
+    );
+
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title("Profiles")),
+        parts[0],
+    );
+
+    let detail_lines = if panel.selected_profile < config.ai_provider_profiles.len() {
+        let profile = &config.ai_provider_profiles[panel.selected_profile];
+        vec![
+            Line::raw(format!("name: {}", profile.name)),
+            Line::raw(format!("endpoint: {}", profile.endpoint)),
+            Line::raw(format!("apikey: {}", mask_secret(&profile.apikey))),
+            Line::raw(format!("model: {}", profile.model)),
+            Line::raw(format!(
+                "debug: {}",
+                if profile.debug { "[x] true" } else { "[ ] false" }
+            )),
+            Line::raw(""),
+            Line::raw("Deleting the active profile is blocked."),
+            Line::raw("Switch to another profile before deleting."),
+        ]
+    } else {
+        vec![
+            Line::raw("Create a new AI profile."),
+            Line::raw(""),
+            Line::raw("Suggested fields:"),
+            Line::raw("- name"),
+            Line::raw("- endpoint"),
+            Line::raw("- apikey"),
+            Line::raw("- model"),
+            Line::raw("- debug"),
+        ]
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(detail_lines))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Details")),
+        parts[1],
+    );
+
+    if let Some(editor) = panel.editor.as_ref() {
+        render_ai_profile_editor(frame, editor);
+    }
+    if let Some(message) = panel.message.as_deref() {
+        render_message_modal(frame, "AI Profile Message", message);
+    }
+}
+
+fn render_ai_profile_editor(frame: &mut Frame, editor: &SetupProfileEditor) {
+    let area = centered_rect(frame.area(), 72, 60);
+    frame.render_widget(Clear, area);
+    let title = if editor.original_name.is_some() {
+        "Edit AI Profile | Enter Edit/Toggle | Ctrl+S Save | Esc Cancel"
+    } else {
+        "New AI Profile | Enter Edit/Toggle | Ctrl+S Save | Esc Cancel"
+    };
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).title(title),
+        area,
+    );
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let items = vec![
+        profile_editor_item(
+            "profile name",
+            editor.draft.name.as_str(),
+            editor.selected_field == 0,
+            false,
+        ),
+        profile_editor_item(
+            "endpoint",
+            editor.draft.endpoint.as_str(),
+            editor.selected_field == 1,
+            false,
+        ),
+        profile_editor_item(
+            "apikey",
+            editor.draft.apikey.as_str(),
+            editor.selected_field == 2,
+            true,
+        ),
+        profile_editor_item(
+            "model",
+            editor.draft.model.as_str(),
+            editor.selected_field == 3,
+            false,
+        ),
+        profile_editor_item(
+            "debug",
+            if editor.draft.debug { "[x] true" } else { "[ ] false" },
+            editor.selected_field == 4,
+            false,
+        ),
+    ];
+
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title("Profile Fields")),
+        inner,
+    );
+
+    if let Some(field_editor) = editor.field_editor.as_ref() {
+        render_profile_field_editor(frame, field_editor);
+    }
+}
+
+fn profile_editor_item<'a>(
+    label: &'a str,
+    value: &'a str,
+    selected: bool,
+    masked: bool,
+) -> ListItem<'a> {
+    let shown = if masked { mask_secret(value) } else { value.to_string() };
+    ListItem::new(Line::raw(format!("{label}: {shown}"))).style(if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    })
+}
+
+fn render_profile_field_editor(frame: &mut Frame, editor: &ProfileFieldEdit) {
+    let area = centered_rect(frame.area(), 68, 24);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Edit AI Profile Field | Ctrl+A Home | <- -> Move | Ctrl+C Clear");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(inner);
+
+    let label = editor.selected_field.label();
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::raw(format!("Field: {label}")),
+            Line::raw("Enter: save field"),
+            Line::raw("Esc: cancel field editing"),
+        ]))
+        .wrap(Wrap { trim: false }),
+        parts[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(editor.input.as_str())
+            .block(Block::default().borders(Borders::ALL).title(label)),
+        parts[1],
+    );
+    place_cursor(
+        frame,
+        parts[1],
+        text_display_width_at(editor.input.as_str(), editor.cursor),
+    );
+}
+
+fn render_message_modal(frame: &mut Frame, title: &str, message: &str) {
+    let area = centered_rect(frame.area(), 62, 22);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), area);
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::raw(message),
+            Line::raw(""),
+            Line::raw("Press Esc to close."),
+        ]))
+        .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn render_field_editor(frame: &mut Frame, editor: &FieldEdit) {

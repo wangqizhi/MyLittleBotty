@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::llm_provider::provider_anthropic::AnthropicProvider;
+use crate::llm_provider::provider_glm::GlmProvider;
 use crate::llm_provider::provider_minimax::MinimaxProvider;
 use crate::llm_provider::provider_openai::OpenAiProvider;
 use crate::llm_provider::{
@@ -73,6 +74,7 @@ impl BottyBrain {
         }
 
         let provider: Box<dyn LlmProvider> = match detect_provider(&self.config) {
+            ProviderKind::Glm => Box::new(GlmProvider::from_config(&self.config)),
             ProviderKind::Anthropic => Box::new(AnthropicProvider::from_config(&self.config)),
             ProviderKind::Minimax => Box::new(MinimaxProvider::from_config(&self.config)),
             ProviderKind::OpenAi => Box::new(OpenAiProvider::from_config(&self.config)),
@@ -197,6 +199,8 @@ fn load_brain_config() -> io::Result<BrainConfig> {
     };
 
     let mut config = BrainConfig::default();
+    let mut active_profile = String::new();
+    let mut profiles: Vec<(String, BrainConfig)> = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -207,17 +211,59 @@ fn load_brain_config() -> io::Result<BrainConfig> {
             continue;
         };
         match key.trim() {
+            "ai.provider.active" => active_profile = value.trim().to_string(),
             "ai.provider.endpoint" | "provider.endpoint" => {
                 config.endpoint = value.trim().to_string()
             }
             "ai.provider.apikey" | "provider.apikey" => config.apikey = value.trim().to_string(),
             "ai.provider.model" | "provider.model" => config.model = value.trim().to_string(),
             "ai.provider.debug" | "provider.debug" => config.debug_enabled = parse_bool(value),
-            _ => {}
+            other => {
+                if let Some((profile_name, field_name)) = parse_ai_profile_key(other) {
+                    let profile = ensure_brain_profile_slot(&mut profiles, profile_name);
+                    match field_name {
+                        "endpoint" => profile.endpoint = value.trim().to_string(),
+                        "apikey" => profile.apikey = value.trim().to_string(),
+                        "model" => profile.model = value.trim().to_string(),
+                        "debug" => profile.debug_enabled = parse_bool(value),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if !profiles.is_empty() {
+        if active_profile.trim().is_empty() {
+            return Ok(profiles.remove(0).1);
+        }
+        if let Some((_, active)) = profiles.into_iter().find(|(name, _)| name == &active_profile) {
+            return Ok(active);
         }
     }
 
     Ok(config)
+}
+
+fn parse_ai_profile_key(key: &str) -> Option<(&str, &str)> {
+    let key = key.strip_prefix("ai.provider.")?;
+    let (profile_name, field_name) = key.split_once('.')?;
+    if profile_name.is_empty() {
+        return None;
+    }
+    Some((profile_name, field_name))
+}
+
+fn ensure_brain_profile_slot<'a>(
+    profiles: &'a mut Vec<(String, BrainConfig)>,
+    profile_name: &str,
+) -> &'a mut BrainConfig {
+    if let Some(index) = profiles.iter().position(|(name, _)| name == profile_name) {
+        return &mut profiles[index].1;
+    }
+    profiles.push((profile_name.to_string(), BrainConfig::default()));
+    let index = profiles.len().saturating_sub(1);
+    &mut profiles[index].1
 }
 
 fn parse_bool(value: &str) -> bool {

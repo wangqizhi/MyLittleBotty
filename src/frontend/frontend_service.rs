@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 const DEFAULT_BROWSER_USER_DATA_DIR: &str = "~/.mylittlebotty/app/browser/user_dir";
+const DEFAULT_AI_PROFILE_NAME: &str = "default";
 
 pub const COMMANDS: [&str; 10] = [
     "/setup",
@@ -31,10 +32,7 @@ const CONTROL_PREFIX: &str = "__botty_control__";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupFieldId {
-    AiProviderEndpoint,
-    AiProviderApikey,
-    AiProviderModel,
-    AiProviderDebug,
+    AiProfiles,
     AgentProvider,
     AgentCodexCommand,
     AgentClaudeCommand,
@@ -55,11 +53,8 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 21] = [
-        SetupFieldId::AiProviderEndpoint,
-        SetupFieldId::AiProviderApikey,
-        SetupFieldId::AiProviderModel,
-        SetupFieldId::AiProviderDebug,
+    pub const ALL: [SetupFieldId; 18] = [
+        SetupFieldId::AiProfiles,
         SetupFieldId::AgentProvider,
         SetupFieldId::AgentCodexCommand,
         SetupFieldId::AgentClaudeCommand,
@@ -83,15 +78,12 @@ impl SetupFieldId {
         Self::ALL
             .get(index)
             .copied()
-            .unwrap_or(SetupFieldId::AiProviderEndpoint)
+            .unwrap_or(SetupFieldId::AiProfiles)
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            SetupFieldId::AiProviderEndpoint => "AI provider endpoint",
-            SetupFieldId::AiProviderApikey => "AI provider apikey",
-            SetupFieldId::AiProviderModel => "AI provider model",
-            SetupFieldId::AiProviderDebug => "AI provider debug",
+            SetupFieldId::AiProfiles => "AI profiles",
             SetupFieldId::AgentProvider => "agent provider",
             SetupFieldId::AgentCodexCommand => "codex command",
             SetupFieldId::AgentClaudeCommand => "claude command",
@@ -115,9 +107,7 @@ impl SetupFieldId {
     pub fn is_toggle(self) -> bool {
         matches!(
             self,
-            SetupFieldId::AiProviderDebug
-                | SetupFieldId::TelegramEnabled
-                | SetupFieldId::BrowserChromeHeadless
+            SetupFieldId::TelegramEnabled | SetupFieldId::BrowserChromeHeadless
                 | SetupFieldId::FeishuEnabled
         )
     }
@@ -125,10 +115,29 @@ impl SetupFieldId {
     pub fn is_masked(self) -> bool {
         matches!(
             self,
-            SetupFieldId::AiProviderApikey
-                | SetupFieldId::TelegramApikey
-                | SetupFieldId::FeishuAppSecret
+            SetupFieldId::TelegramApikey | SetupFieldId::FeishuAppSecret
         )
+    }
+}
+
+#[derive(Clone)]
+pub struct AiProviderProfile {
+    pub name: String,
+    pub endpoint: String,
+    pub apikey: String,
+    pub model: String,
+    pub debug: bool,
+}
+
+impl Default for AiProviderProfile {
+    fn default() -> Self {
+        Self {
+            name: DEFAULT_AI_PROFILE_NAME.to_string(),
+            endpoint: String::new(),
+            apikey: String::new(),
+            model: String::new(),
+            debug: false,
+        }
     }
 }
 
@@ -141,10 +150,8 @@ pub struct SetupFieldView {
 
 #[derive(Clone)]
 pub struct SetupConfig {
-    pub ai_provider_endpoint: String,
-    pub ai_provider_apikey: String,
-    pub ai_provider_model: String,
-    pub ai_provider_debug: bool,
+    pub ai_provider_active: String,
+    pub ai_provider_profiles: Vec<AiProviderProfile>,
     pub agent_provider: String,
     pub agent_codex_command: String,
     pub agent_claude_command: String,
@@ -170,10 +177,8 @@ pub struct SetupConfig {
 impl Default for SetupConfig {
     fn default() -> Self {
         Self {
-            ai_provider_endpoint: String::new(),
-            ai_provider_apikey: String::new(),
-            ai_provider_model: "MiniMax-M2.1".to_string(),
-            ai_provider_debug: false,
+            ai_provider_active: DEFAULT_AI_PROFILE_NAME.to_string(),
+            ai_provider_profiles: vec![AiProviderProfile::default()],
             agent_provider: "codex".to_string(),
             agent_codex_command: "codex".to_string(),
             agent_claude_command: "claude".to_string(),
@@ -220,16 +225,7 @@ impl SetupConfig {
 
     pub fn field_value(&self, field: SetupFieldId) -> String {
         match field {
-            SetupFieldId::AiProviderEndpoint => self.ai_provider_endpoint.clone(),
-            SetupFieldId::AiProviderApikey => self.ai_provider_apikey.clone(),
-            SetupFieldId::AiProviderModel => self.ai_provider_model.clone(),
-            SetupFieldId::AiProviderDebug => {
-                if self.ai_provider_debug {
-                    "[x] true".to_string()
-                } else {
-                    "[ ] false".to_string()
-                }
-            }
+            SetupFieldId::AiProfiles => self.ai_profile_summary(),
             SetupFieldId::AgentProvider => self.agent_provider.clone(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
@@ -276,10 +272,7 @@ impl SetupConfig {
 
     pub fn editable_value(&self, field: SetupFieldId) -> String {
         match field {
-            SetupFieldId::AiProviderEndpoint => self.ai_provider_endpoint.clone(),
-            SetupFieldId::AiProviderApikey => self.ai_provider_apikey.clone(),
-            SetupFieldId::AiProviderModel => self.ai_provider_model.clone(),
-            SetupFieldId::AiProviderDebug => String::new(),
+            SetupFieldId::AiProfiles => String::new(),
             SetupFieldId::AgentProvider => self.agent_provider.clone(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
@@ -307,10 +300,7 @@ impl SetupConfig {
 
     pub fn set_field(&mut self, field: SetupFieldId, value: &str) {
         match field {
-            SetupFieldId::AiProviderEndpoint => self.ai_provider_endpoint = value.to_string(),
-            SetupFieldId::AiProviderApikey => self.ai_provider_apikey = value.to_string(),
-            SetupFieldId::AiProviderModel => self.ai_provider_model = value.to_string(),
-            SetupFieldId::AiProviderDebug => {}
+            SetupFieldId::AiProfiles => {}
             SetupFieldId::AgentProvider => self.agent_provider = value.trim().to_ascii_lowercase(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command = value.to_string(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command = value.to_string(),
@@ -346,7 +336,6 @@ impl SetupConfig {
 
     pub fn toggle_field(&mut self, field: SetupFieldId) {
         match field {
-            SetupFieldId::AiProviderDebug => self.ai_provider_debug = !self.ai_provider_debug,
             SetupFieldId::TelegramEnabled => {
                 self.chatbot_telegram_enabled = !self.chatbot_telegram_enabled
             }
@@ -358,6 +347,92 @@ impl SetupConfig {
             }
             _ => {}
         }
+    }
+
+    pub fn active_ai_profile_index(&self) -> usize {
+        self.ai_provider_profiles
+            .iter()
+            .position(|profile| profile.name == self.ai_provider_active)
+            .unwrap_or(0)
+    }
+
+    pub fn active_ai_profile(&self) -> &AiProviderProfile {
+        let index = self.active_ai_profile_index();
+        &self.ai_provider_profiles[index.min(self.ai_provider_profiles.len().saturating_sub(1))]
+    }
+
+    pub fn ai_profile_summary(&self) -> String {
+        format!(
+            "active: {} ({} profiles)",
+            self.ai_provider_active,
+            self.ai_provider_profiles.len()
+        )
+    }
+
+    pub fn activate_ai_profile_by_index(&mut self, index: usize) {
+        if let Some(profile) = self.ai_provider_profiles.get(index) {
+            self.ai_provider_active = profile.name.clone();
+        }
+    }
+
+    pub fn upsert_ai_profile(
+        &mut self,
+        original_name: Option<&str>,
+        mut profile: AiProviderProfile,
+    ) -> io::Result<()> {
+        profile.name = profile.name.trim().to_string();
+        validate_ai_profile_name(profile.name.as_str())?;
+        if self.ai_provider_profiles.iter().any(|saved| {
+            saved.name == profile.name && Some(saved.name.as_str()) != original_name
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("AI profile '{}' already exists", profile.name),
+            ));
+        }
+
+        if let Some(original_name) = original_name {
+            if let Some(saved) = self
+                .ai_provider_profiles
+                .iter_mut()
+                .find(|saved| saved.name == original_name)
+            {
+                let renamed_active = self.ai_provider_active == original_name;
+                *saved = profile.clone();
+                if renamed_active {
+                    self.ai_provider_active = profile.name.clone();
+                }
+                return Ok(());
+            }
+        }
+
+        self.ai_provider_profiles.push(profile);
+        self.ai_provider_profiles
+            .sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Ok(())
+    }
+
+    pub fn delete_ai_profile(&mut self, index: usize) -> io::Result<()> {
+        let Some(profile) = self.ai_provider_profiles.get(index) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "AI profile does not exist",
+            ));
+        };
+        if profile.name == self.ai_provider_active {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "current AI profile is active; switch to another profile before deleting",
+            ));
+        }
+        if self.ai_provider_profiles.len() <= 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "at least one AI profile is required",
+            ));
+        }
+        self.ai_provider_profiles.remove(index);
+        Ok(())
     }
 
     pub fn cycle_provider(&mut self, selected_provider: &mut usize, delta: i32) {
@@ -662,6 +737,9 @@ fn load_setup_config() -> io::Result<SetupConfig> {
     let path = setup_config_file();
     let mut config = SetupConfig::default();
     config.work_dir = botty_io::load_work_dir_setting()?;
+    config.ai_provider_profiles.clear();
+    let mut legacy_profile = AiProviderProfile::default();
+    let mut saw_legacy_ai_profile = false;
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(config),
@@ -678,10 +756,7 @@ fn load_setup_config() -> io::Result<SetupConfig> {
         };
         let value = value.trim();
         match key.trim() {
-            "ai.provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
-            "ai.provider.apikey" => config.ai_provider_apikey = value.to_string(),
-            "ai.provider.model" => config.ai_provider_model = value.to_string(),
-            "ai.provider.debug" => config.ai_provider_debug = parse_bool(value),
+            "ai.provider.active" => config.ai_provider_active = value.to_string(),
             "agent.provider" => config.agent_provider = value.to_ascii_lowercase(),
             "agent.codex.command" => config.agent_codex_command = value.to_string(),
             "agent.claude.command" => config.agent_claude_command = value.to_string(),
@@ -690,10 +765,6 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "browser.chrome.user_data_dir" => {
                 config.browser_chrome_user_data_dir = value.to_string()
             }
-            "provider.endpoint" => config.ai_provider_endpoint = value.to_string(),
-            "provider.apikey" => config.ai_provider_apikey = value.to_string(),
-            "provider.model" => config.ai_provider_model = value.to_string(),
-            "provider.debug" => config.ai_provider_debug = parse_bool(value),
             "chatbot.provider" => apply_chatbot_provider_list(&mut config, value),
             "chatbot.telegram.api_base" => config.chatbot_telegram_api_base = value.to_string(),
             "chatbot.telegram.apikey" => config.chatbot_telegram_apikey = value.to_string(),
@@ -724,8 +795,54 @@ fn load_setup_config() -> io::Result<SetupConfig> {
                     config.chatbot_feishu_poll_interval_seconds = seconds.max(1);
                 }
             }
-            _ => {}
+            "ai.provider.endpoint" | "provider.endpoint" => {
+                legacy_profile.endpoint = value.to_string();
+                saw_legacy_ai_profile = true;
+            }
+            "ai.provider.apikey" | "provider.apikey" => {
+                legacy_profile.apikey = value.to_string();
+                saw_legacy_ai_profile = true;
+            }
+            "ai.provider.model" | "provider.model" => {
+                legacy_profile.model = value.to_string();
+                saw_legacy_ai_profile = true;
+            }
+            "ai.provider.debug" | "provider.debug" => {
+                legacy_profile.debug = parse_bool(value);
+                saw_legacy_ai_profile = true;
+            }
+            other => {
+                if let Some((profile_name, field_name)) = parse_ai_profile_key(other) {
+                    let profile = ensure_ai_profile_slot(&mut config.ai_provider_profiles, profile_name);
+                    match field_name {
+                        "endpoint" => profile.endpoint = value.to_string(),
+                        "apikey" => profile.apikey = value.to_string(),
+                        "model" => profile.model = value.to_string(),
+                        "debug" => profile.debug = parse_bool(value),
+                        _ => {}
+                    }
+                }
+            }
         }
+    }
+
+    if config.ai_provider_profiles.is_empty() && saw_legacy_ai_profile {
+        config.ai_provider_profiles.push(legacy_profile);
+    }
+    if config.ai_provider_profiles.is_empty() {
+        config.ai_provider_profiles.push(AiProviderProfile::default());
+    }
+    config
+        .ai_provider_profiles
+        .sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    if config.ai_provider_active.trim().is_empty() {
+        config.ai_provider_active = config.active_ai_profile().name.clone();
+    } else if !config
+        .ai_provider_profiles
+        .iter()
+        .any(|profile| profile.name == config.ai_provider_active)
+    {
+        config.ai_provider_active = config.active_ai_profile().name.clone();
     }
 
     Ok(config)
@@ -738,11 +855,9 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.endpoint={}\nai.provider.apikey={}\nai.provider.model={}\nai.provider.debug={}\nagent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
-        config.ai_provider_endpoint,
-        config.ai_provider_apikey,
-        config.ai_provider_model,
-        config.ai_provider_debug,
+        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
+        config.ai_provider_active,
+        serialize_ai_profiles(&config.ai_provider_profiles),
         config.agent_provider,
         config.agent_codex_command,
         config.agent_claude_command,
@@ -768,6 +883,28 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
 }
 
 fn validate_setup_config(config: &SetupConfig) -> io::Result<()> {
+    if config.ai_provider_profiles.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "at least one AI profile is required",
+        ));
+    }
+
+    for profile in &config.ai_provider_profiles {
+        validate_ai_profile_name(profile.name.as_str())?;
+    }
+
+    if !config
+        .ai_provider_profiles
+        .iter()
+        .any(|profile| profile.name == config.ai_provider_active)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "active AI profile does not exist",
+        ));
+    }
+
     if config.chatbot_telegram_enabled && config.chatbot_telegram_apikey.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -829,6 +966,62 @@ fn validate_env_key(key: &str) -> io::Result<()> {
 
 fn parse_bool(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "yes" | "on")
+}
+
+fn validate_ai_profile_name(name: &str) -> io::Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AI profile name cannot be empty",
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AI profile name may only contain A-Z, a-z, 0-9, - or _",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_ai_profile_key(key: &str) -> Option<(&str, &str)> {
+    let key = key.strip_prefix("ai.provider.")?;
+    let (profile_name, field_name) = key.split_once('.')?;
+    if profile_name.is_empty() {
+        return None;
+    }
+    Some((profile_name, field_name))
+}
+
+fn ensure_ai_profile_slot<'a>(
+    profiles: &'a mut Vec<AiProviderProfile>,
+    profile_name: &str,
+) -> &'a mut AiProviderProfile {
+    if let Some(index) = profiles.iter().position(|profile| profile.name == profile_name) {
+        return &mut profiles[index];
+    }
+
+    profiles.push(AiProviderProfile {
+        name: profile_name.to_string(),
+        ..AiProviderProfile::default()
+    });
+    let index = profiles.len().saturating_sub(1);
+    &mut profiles[index]
+}
+
+fn serialize_ai_profiles(profiles: &[AiProviderProfile]) -> String {
+    let mut lines = String::new();
+    for profile in profiles {
+        lines.push_str(&format!(
+            "ai.provider.{}.endpoint={}\nai.provider.{}.apikey={}\nai.provider.{}.model={}\nai.provider.{}.debug={}\n",
+            profile.name, profile.endpoint, profile.name, profile.apikey, profile.name, profile.model, profile.name, profile.debug
+        ));
+    }
+    lines
 }
 
 fn apply_chatbot_provider_list(config: &mut SetupConfig, value: &str) {

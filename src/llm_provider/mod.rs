@@ -4,6 +4,8 @@ pub mod provider_anthropic;
 pub mod provider_minimax;
 #[path = "provider-openai.rs"]
 pub mod provider_openai;
+#[path = "provider-glm.rs"]
+pub mod provider_glm;
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -65,6 +67,7 @@ pub trait LlmProvider {
 }
 
 pub enum ProviderKind {
+    Glm,
     Anthropic,
     Minimax,
     OpenAi,
@@ -81,6 +84,9 @@ pub fn detect_provider(config: &BrainConfig) -> ProviderKind {
         || endpoint.ends_with("/anthropic")
         || endpoint.contains("/anthropic/")
     {
+        if endpoint.contains("bigmodel.cn") {
+            return ProviderKind::Glm;
+        }
         return ProviderKind::Anthropic;
     }
 

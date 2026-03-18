@@ -4,6 +4,9 @@ MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 
 
 ## 最近更新
 
+- `2026-03-18`：`/setup` 现在支持多个 AI provider profile。AI profile 在覆盖式弹层中管理，支持创建、编辑、激活和删除；当前激活的 profile 不能直接删除，必须先切换。
+- `2026-03-18`：AI 配置文件现在支持 `ai.provider.active` 和命名的 `ai.provider.<profile>.*` 项，同时兼容老版本单 provider 的 `ai.provider.*` 配置格式。
+- `2026-03-18`：新增 `https://open.bigmodel.cn/api/anthropic` 专用的 GLM provider 适配器。BigModel 的 Anthropic 兼容 endpoint 现在会走 `provider-glm`，并已用 `glm-4.7` 做过真实调用验证。
 - `2026-03-11`：`Botty-crond` 新增硬编码的 system-crond 任务机制，并新增 `system-crond(-dev).log`；首个内置任务会每小时自动执行一次 `/remember`。
 - `2026-03-11`：新增 role 专属经验记忆文件；`/remember` 现在会为 `coder` 和 `info-searcher` 同步整理 role memory，并在角色启动时自动注入对应 `memory/summary/experience/<role>-exp.md`。
 - `2026-03-10`：新增基于队列的委派任务恢复机制。父任务在工具委派后可以进入等待态，子任务完成后自动恢复，并可通过 `mylittlebotty watchjobs` 观察队列状态。
@@ -35,6 +38,7 @@ MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 
 TUI 内置命令：
 
 - `/setup`：进入配置界面，编辑 AI Provider 和聊天机器人配置。
+- `/setup` 中的 `AI profiles`：在覆盖式弹层里管理多个命名 AI profile，支持创建、编辑、激活和删除。
 - `/restart-server`：重启本地 Botty 后台服务。
 - `/new`：开始新会话。
 - `/remember`：触发长期记忆摘要整理，并同步刷新所有已配置的 role 经验记忆。
@@ -51,20 +55,25 @@ TUI 内置命令：
 - OpenAI 兼容接口
 - Anthropic
 - MiniMax
+- GLM 的 Anthropic 兼容 endpoint（`open.bigmodel.cn/api/anthropic`）
 
 测试状态：
 
 - 实际只测试过 MiniMax。
-- OpenAI 兼容接口和 Anthropic 目前只是代码里有适配，尚未经过真实使用验证。
+- `glm-4.7` 已在智谱 Anthropic 兼容接口上做过真实调用验证。
+- OpenAI 兼容接口和通用 Anthropic 适配器目前仍然只是代码里有适配，尚未广泛验证。
 
 实际使用依赖配置文件中的：
 
-- `ai.provider.endpoint`
-- `ai.provider.apikey`
-- `ai.provider.model`
-- `ai.provider.debug`
+- `ai.provider.active`
+- `ai.provider.<profile>.endpoint`
+- `ai.provider.<profile>.apikey`
+- `ai.provider.<profile>.model`
+- `ai.provider.<profile>.debug`
 
-当 `ai.provider.debug=true` 时，会把请求和响应写入调试日志。
+配置读取仍兼容老版本单 provider 的 `ai.provider.endpoint`、`ai.provider.apikey`、`ai.provider.model`、`ai.provider.debug`。
+
+当当前激活 profile 的 `debug=true` 时，会把请求和响应写入调试日志。
 
 ### 4. 角色化 Agent 能力
 
@@ -381,10 +390,11 @@ mylittlebotty crond -list -a
 当前支持的配置项如下：
 
 ```ini
-ai.provider.endpoint=
-ai.provider.apikey=
-ai.provider.model=MiniMax-M2.1
-ai.provider.debug=false
+ai.provider.active=default
+ai.provider.default.endpoint=
+ai.provider.default.apikey=
+ai.provider.default.model=
+ai.provider.default.debug=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
@@ -408,10 +418,11 @@ chatbot.feishu.chat_id=
 
 常见说明：
 
-- `ai.provider.endpoint`：模型接口地址
-- `ai.provider.apikey`：模型 API Key
-- `ai.provider.model`：模型名
-- `ai.provider.debug`：是否记录调试日志
+- `ai.provider.active`：运行时使用的当前 AI profile 名称
+- `ai.provider.<profile>.endpoint`：某个命名 profile 的模型接口地址
+- `ai.provider.<profile>.apikey`：某个命名 profile 的模型 API Key
+- `ai.provider.<profile>.model`：某个命名 profile 的模型名
+- `ai.provider.<profile>.debug`：某个命名 profile 是否记录调试日志
 - `agent.provider`：`terminal` skill 使用的终端代理提供方，当前默认是 `codex`
 - `agent.codex.command`：Codex CLI 的可执行文件名或路径
 - `agent.claude.command`：预留给 Claude 终端代理的可执行文件名或路径
@@ -427,6 +438,13 @@ chatbot.feishu.chat_id=
 - `chatbot.feishu.app_secret`：用于换取 tenant access token 的飞书 app secret
 - `chatbot.telegram.whitelist_user_ids`：Telegram 允许访问的用户 ID，多个值用逗号分隔
 - `chatbot.feishu.chat_id`：飞书主动推送目标会话 ID，例如提醒回发
+
+补充说明：
+
+- TUI 中的 `AI profiles` 支持创建、编辑、激活和删除。
+- 当前激活的 AI profile 不能直接删除，需要先切换到其他 profile。
+- 配置读取仍兼容老版本单 provider 的 `ai.provider.*` 键。
+- 如果要接入智谱 Claude 兼容接口，可使用 `https://open.bigmodel.cn/api/anthropic`，模型建议填 `glm-4.7`。
 
 修改完配置后，TUI 保存时会自动触发一次服务重启。
 
