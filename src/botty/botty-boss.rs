@@ -1625,6 +1625,15 @@ fn handle_chat_client(
         if incoming.message.is_empty() {
             continue;
         }
+        let _ = crate::botty_brain::log_debug_line_if_enabled(
+            "inbound-chat",
+            &serde_json::json!({
+                "source": incoming.source.as_str(),
+                "message": incoming.message.as_str(),
+            })
+            .to_string(),
+            Some(&incoming.user_id),
+        );
 
         let response = if let Some((key, value)) = parse_set_env_control(&incoming.message) {
             apply_set_env_control(&dispatch_tx, &key, &value)

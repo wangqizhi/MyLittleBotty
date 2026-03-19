@@ -153,41 +153,24 @@ impl BottyBrain {
     }
 
     fn log_debug(&self, direction: &str, content: &str) -> io::Result<()> {
-        if !self.config.debug_enabled {
-            return Ok(());
-        }
-
-        let path = debug_log_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")?;
-        let role = env::var("BOTTY_GUY_ROLE")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "leader".to_string());
-        let user_id = env::var("BOTTY_CURRENT_JOB_USER_ID")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let sanitized = content.replace('\n', "\\n").replace('\r', "\\r");
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        let user_prefix = user_id
-            .as_deref()
-            .map(|value| format!(" user_id={value}"))
-            .unwrap_or_default();
-        writeln!(
-            file,
-            "[{timestamp}] role={role}{user_prefix} {direction}: {sanitized}"
-        )?;
-        Ok(())
+        log_debug_line_if_enabled(direction, content, None)
     }
 }
 
 pub fn is_llm_connection_error(err: &io::Error) -> bool {
     is_llm_connection_error_message(&err.to_string())
+}
+
+pub fn log_debug_line_if_enabled(
+    direction: &str,
+    content: &str,
+    user_id_override: Option<&str>,
+) -> io::Result<()> {
+    if !load_brain_config()?.debug_enabled {
+        return Ok(());
+    }
+
+    append_debug_log_line(direction, content, user_id_override)
 }
 
 fn load_brain_config() -> io::Result<BrainConfig> {
@@ -268,6 +251,45 @@ fn ensure_brain_profile_slot<'a>(
 
 fn parse_bool(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "yes" | "on")
+}
+
+fn append_debug_log_line(
+    direction: &str,
+    content: &str,
+    user_id_override: Option<&str>,
+) -> io::Result<()> {
+    let path = debug_log_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let timestamp = local_time_format("%Y-%m-%d %H:%M:%S")?;
+    let role = env::var("BOTTY_GUY_ROLE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "leader".to_string());
+    let user_id = user_id_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            env::var("BOTTY_CURRENT_JOB_USER_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+    let sanitized = content.replace('\n', "\\n").replace('\r', "\\r");
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let user_prefix = user_id
+        .as_deref()
+        .map(|value| format!(" user_id={value}"))
+        .unwrap_or_default();
+    writeln!(
+        file,
+        "[{timestamp}] role={role}{user_prefix} {direction}: {sanitized}"
+    )?;
+    Ok(())
 }
 
 fn debug_log_path() -> PathBuf {

@@ -31,10 +31,10 @@ impl TelegramClient {
         );
         let output = Command::new("curl").arg("-fsS").arg(url).output()?;
         if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::other(format!(
-                "curl getUpdates failed: {}",
-                detail.trim()
+            return Err(io::Error::other(format_curl_failure(
+                "getUpdates",
+                &self.api_base,
+                &output,
             )));
         }
         let body = String::from_utf8_lossy(&output.stdout);
@@ -55,10 +55,10 @@ impl TelegramClient {
             .output()?;
 
         if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::other(format!(
-                "curl sendMessage failed: {}",
-                detail.trim()
+            return Err(io::Error::other(format_curl_failure(
+                "sendMessage",
+                &self.api_base,
+                &output,
             )));
         }
         Ok(())
@@ -82,13 +82,53 @@ impl TelegramClient {
         let output = command.output()?;
 
         if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::other(format!(
-                "curl sendPhoto failed: {}",
-                detail.trim()
+            return Err(io::Error::other(format_curl_failure(
+                "sendPhoto",
+                &self.api_base,
+                &output,
             )));
         }
         Ok(())
+    }
+}
+
+fn format_curl_failure(action: &str, api_base: &str, output: &std::process::Output) -> String {
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let exit_code = output
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    format!(
+        "curl {action} failed: exit_code={exit_code}, api_base={api_base}, proxy_env=[{}], stderr={}",
+        describe_proxy_env(),
+        detail.trim()
+    )
+}
+
+fn describe_proxy_env() -> String {
+    let keys = [
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ];
+    let mut values = Vec::new();
+    for key in keys {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                values.push(format!("{key}={value}"));
+            }
+        }
+    }
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
     }
 }
 

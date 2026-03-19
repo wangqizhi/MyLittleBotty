@@ -238,6 +238,13 @@ fn format_debug_line(line: &str) -> String {
         );
     }
 
+    if let Some(json) = payload.strip_prefix("inbound-chat: ") {
+        return format!(
+            "[{timestamp}]{meta_prefix} {}",
+            summarize_inbound_chat(json)
+        );
+    }
+
     line.to_string()
 }
 
@@ -301,6 +308,21 @@ fn summarize_debug_response(json: &str) -> String {
             skills.join(", ")
         )
     }
+}
+
+fn summarize_inbound_chat(json: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(json) else {
+        return format!("inbound-chat {}", json.trim());
+    };
+
+    let source = value.get("source").and_then(Value::as_str).unwrap_or("-");
+    let text = value
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "-".to_string());
+
+    format!("inbound-chat source={source} text={text}")
 }
 
 fn collect_tool_uses(value: &Value) -> Vec<String> {
