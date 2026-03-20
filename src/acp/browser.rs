@@ -836,7 +836,7 @@ fn generate_browser_procedure_sop(
     )?;
     match response {
         ProviderResponse::Text(reply) => Ok(reply.text.trim().to_string()),
-        ProviderResponse::ToolUse(_) => Err(io::Error::other(
+        ProviderResponse::ToolUses(_) => Err(io::Error::other(
             "browser procedure summary unexpectedly returned a tool call",
         )),
     }

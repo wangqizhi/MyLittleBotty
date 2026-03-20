@@ -33,7 +33,7 @@ role 启动时，如果存在对应的 `~/.mylittlebotty/memory/summary/experien
 
 这部分记忆与全局 `remember.md` 独立：
 
-- 全局 `remember.md`：记录近期关键事件、请求和状态
+- 全局 `remember.md`：记录近期关键事件、请求、状态，以及用户明确要求以后记住的内容
 - role `*-exp.md`：记录某个角色未来复用价值高的稳定知识
 
 ## 生成依据

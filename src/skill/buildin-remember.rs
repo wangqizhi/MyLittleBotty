@@ -123,7 +123,7 @@ fn extract_search_keywords(query: &str) -> io::Result<Vec<String>> {
     )?;
     let text = match response {
         ProviderResponse::Text(reply) => reply.text,
-        ProviderResponse::ToolUse(_) => {
+        ProviderResponse::ToolUses(_) => {
             return Err(io::Error::other(
                 "keyword extraction unexpectedly returned a tool call",
             ));

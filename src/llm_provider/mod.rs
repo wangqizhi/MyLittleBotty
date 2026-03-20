@@ -47,7 +47,7 @@ pub enum ProviderMessage {
 
 pub enum ProviderResponse {
     Text(ProviderTextResponse),
-    ToolUse(ProviderToolUse),
+    ToolUses(Vec<ProviderToolUse>),
 }
 
 pub struct ProviderRequest {
@@ -80,6 +80,10 @@ pub fn detect_provider(config: &BrainConfig) -> ProviderKind {
         .trim_end_matches('/')
         .to_ascii_lowercase();
 
+    if endpoint.contains("minimax") {
+        return ProviderKind::Minimax;
+    }
+
     if endpoint.ends_with("/v1/messages")
         || endpoint.ends_with("/anthropic")
         || endpoint.contains("/anthropic/")
@@ -89,10 +93,5 @@ pub fn detect_provider(config: &BrainConfig) -> ProviderKind {
         }
         return ProviderKind::Anthropic;
     }
-
-    if endpoint.contains("minimax") {
-        return ProviderKind::Minimax;
-    }
-
     ProviderKind::OpenAi
 }

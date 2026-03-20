@@ -120,7 +120,8 @@ TUI 内置命令：
 - `mylittlebotty crond -list -a` 会显示全部提醒任务，包括已经 `done` 的。
 - 提醒支持 `once`、`every_minute`、`every_hour`、`every_day`、`every_week`、`every_month`。
 - 重复提醒支持 `window_start` / `window_end` 生效时间窗，例如“2026 年内每天执行”或“1 个月内每小时执行”。
-- 当前已真正实现的任务类型是 `ask_guy`。
+- 当前已真正实现的任务类型是 `ask_guy` 和 `assign_tasks`。
+- `assign_tasks` 会先推送一条“任务开始执行”的提示，再把 `task_text` 交给 leader，在触发时按正常分派链路执行，并在完成后继续按提醒回复链路回推结果。
 - `run_script` 目前仅保留字段，尚未真正执行脚本。
 - 单次提醒执行后会变成 `done`；重复提醒会持续生效，直到超出生效时间窗后再变成 `done`。
 - 如果启用了 Telegram/飞书推送，提醒结果会回发到对应聊天渠道。
@@ -151,6 +152,7 @@ TUI 内置命令：
 - 通过 `/remember` 触发整理长期记忆。
 - 摘要结果写入 `~/.mylittlebotty/memory/summary/remember.md`。
 - 最近整理时间写入 `~/.mylittlebotty/memory/summary/rec.time`。
+- 摘要时要明确保留并强调用户在对话中明确说过“希望以后记住”的内容。
 - 正常对话时，Botty 会优先使用 `memory/summary/remember.md` 和最近对话历史。
 - `/remember` 还会同步更新 `~/.mylittlebotty/memory/summary/experience/` 下所有已配置的 role 经验记忆文件。
 - role 启动时，如果存在 `~/.mylittlebotty/memory/summary/experience/<role>-exp.md`，会把内容注入该 role 的 system prompt。
@@ -183,6 +185,7 @@ TUI 内置命令：
 
 - `mylittlebotty webui`：当前未实现，执行会报错。
 - `mylittlebotty app`：当前未实现，执行会报错。
+- `crond` 的 `assign_tasks`：会在提醒触发时执行 leader 任务，并支持继续分派到其他 role。
 - `crond` 的 `run_script` 实际执行逻辑：当前未实现。
 
 ## 安装

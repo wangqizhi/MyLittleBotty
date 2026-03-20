@@ -166,6 +166,14 @@ fn execute_reminder(reminder: &ReminderRecord, due_at: &str, now: &str) -> io::R
             let reply = ask_leader_guy("crond", "scheduler", &format!("/reminder-now {payload}"))?;
             Ok(reply)
         }
+        "assign_tasks" => {
+            let start_notice = format!(
+                "定时任务已开始执行，我处理完后再把结果发给你。\n任务内容：{}",
+                reminder.task_text
+            );
+            let _ = push_text_notification(reminder, &start_notice);
+            ask_leader_guy("crond", "scheduler", &reminder.task_text)
+        }
         "run_script" => Ok(format!(
             "run_script is reserved and not implemented yet for {}",
             reminder.script_path
@@ -188,6 +196,14 @@ fn push_result_notifications(
     } else {
         format!("提醒执行失败：{}", output)
     };
+
+    push_text_notification(reminder, &text)
+}
+
+fn push_text_notification(reminder: &ReminderRecord, text: &str) -> io::Result<()> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
 
     if let Some(route) = reminder.reply_route() {
         if send_routed_notification(&route, &text).is_ok() {
@@ -303,7 +319,7 @@ impl Drop for CrondPidGuard {
 impl ReminderRecord {
     fn task_summary(&self) -> String {
         match self.task_type.as_str() {
-            "ask_guy" => self.task_text.clone(),
+            "ask_guy" | "assign_tasks" => self.task_text.clone(),
             "run_script" => {
                 if self.script_args.is_empty() {
                     self.script_path.clone()

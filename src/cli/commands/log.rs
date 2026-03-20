@@ -293,6 +293,10 @@ fn summarize_debug_response(json: &str) -> String {
         return format!("response {}", truncate_text(json, CONTENT_PREVIEW_LIMIT));
     };
 
+    if let Some(summary) = summarize_debug_error_response(&value) {
+        return summary;
+    }
+
     let stop_reason = value
         .get("stop_reason")
         .and_then(Value::as_str)
@@ -307,6 +311,29 @@ fn summarize_debug_response(json: &str) -> String {
             "response stop_reason={stop_reason} skills=[{}] text={text}",
             skills.join(", ")
         )
+    }
+}
+
+fn summarize_debug_error_response(value: &Value) -> Option<String> {
+    let error = value.get("error")?;
+    let error_type = error.get("type").and_then(Value::as_str).unwrap_or("error");
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("-");
+    let request_id = value
+        .get("request_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("trace_id").and_then(Value::as_str));
+
+    let message = truncate_text(message, CONTENT_PREVIEW_LIMIT * 2);
+    match request_id {
+        Some(request_id) if !request_id.trim().is_empty() => {
+            Some(format!(
+                "response error_type={error_type} request_id={} message={message}",
+                request_id.trim()
+            ))
+        }
+        _ => Some(format!(
+            "response error_type={error_type} message={message}"
+        )),
     }
 }
 

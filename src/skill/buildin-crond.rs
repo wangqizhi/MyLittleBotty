@@ -36,12 +36,12 @@ const CROND_TOOL_SCHEMA_JSON: &str = r#"{
     },
     "task_type": {
       "type": "string",
-      "enum": ["ask_guy", "run_script"],
-      "description": "ask_guy sends a task to leader Botty-Guy, run_script schedules a script placeholder"
+      "enum": ["ask_guy", "assign_tasks", "run_script"],
+      "description": "ask_guy generates a reminder reply, assign_tasks executes a real scheduled task through leader routing and returns the result, run_script schedules a script placeholder"
     },
     "task_text": {
       "type": "string",
-      "description": "Content for ask_guy task"
+      "description": "Content for ask_guy or assign_tasks task"
     },
     "script_path": {
       "type": "string",
@@ -303,7 +303,7 @@ struct ReminderRoute {
 impl ReminderRecord {
     fn task_summary(&self) -> String {
         match self.task_type.as_str() {
-            "ask_guy" => self.task_text.clone(),
+            "ask_guy" | "assign_tasks" => self.task_text.clone(),
             "run_script" => {
                 if self.script_args.is_empty() {
                     self.script_path.clone()
@@ -494,11 +494,11 @@ fn validate_reminder(reminder: &ReminderRecord) -> io::Result<()> {
         ));
     }
     match reminder.task_type.as_str() {
-        "ask_guy" => {
+        "ask_guy" | "assign_tasks" => {
             if reminder.task_text.trim().is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "ask_guy reminder requires task_text",
+                    format!("{} reminder requires task_text", reminder.task_type),
                 ));
             }
         }

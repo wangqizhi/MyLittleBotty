@@ -123,7 +123,8 @@ Botty currently exposes seven built-in tools, though role access differs:
 - `mylittlebotty crond -list -a` shows all reminders, including `done` ones.
 - Reminders support `once`, `every_minute`, `every_hour`, `every_day`, `every_week`, and `every_month`.
 - Recurring reminders can be limited with `window_start` / `window_end`, for example "every day during 2026" or "every hour for one month".
-- The only actually implemented task type is `ask_guy`.
+- Implemented reminder task types are `ask_guy` and `assign_tasks`.
+- `assign_tasks` first pushes a short "task started" notice, then hands `task_text` to leader so it can delegate to the appropriate role and finally pushes the result back through the normal reminder reply flow.
 - `run_script` is currently only a reserved task shape and does not execute scripts yet.
 - One-time reminders are marked as `done` after execution. Recurring reminders stay active until their time window ends, then are marked as `done`.
 - If Telegram or Feishu output is enabled, reminder results are pushed back to those channels.
@@ -154,6 +155,7 @@ Supported behavior:
 - `/remember` triggers long-term memory summarization.
 - The summary is written to `~/.mylittlebotty/memory/summary/remember.md`.
 - The last summary checkpoint is written to `~/.mylittlebotty/memory/summary/rec.time`.
+- The summary should explicitly preserve and highlight anything the user clearly said Botty should remember for future conversations.
 - During normal chat, Botty first relies on `memory/summary/remember.md` and recent conversation history.
 - `/remember` also updates every configured role experience file under `~/.mylittlebotty/memory/summary/experience/`.
 - When a role starts and its `~/.mylittlebotty/memory/summary/experience/<role>-exp.md` exists, that file is injected into the role's system prompt.
@@ -186,6 +188,7 @@ Supported behavior:
 
 - `mylittlebotty webui`: entry exists, but the frontend is not implemented
 - `mylittlebotty app`: entry exists, but the frontend is not implemented
+- `crond` `assign_tasks`: executes a scheduled leader task and supports downstream role delegation at trigger time
 - `crond` `run_script`: schema exists, but execution is not implemented
 
 ## Install

@@ -82,7 +82,7 @@ impl LlmProvider for GlmProvider {
                     io::Error::new(io::ErrorKind::InvalidData, "tool_use missing name")
                 })?;
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
-                return Ok(ProviderResponse::ToolUse(ProviderToolUse {
+                return Ok(ProviderResponse::ToolUses(vec![ProviderToolUse {
                     id: id.to_string(),
                     name: name.to_string(),
                     input_json: serde_json::to_string(&input).map_err(|err| {
@@ -93,11 +93,11 @@ impl LlmProvider for GlmProvider {
                     })?,
                     assistant_content_json: serde_json::to_string(content).map_err(|err| {
                         io::Error::new(
-                            io::ErrorKind::InvalidData,
+                        io::ErrorKind::InvalidData,
                             format!("serialize assistant content failed: {err}"),
                         )
                     })?,
-                }));
+                }]));
             }
         }
 

@@ -4,9 +4,12 @@ use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
+
+use serde_json::Value;
 
 use crate::llm_provider::provider_anthropic::AnthropicProvider;
 use crate::llm_provider::provider_glm::GlmProvider;
@@ -18,6 +21,7 @@ use crate::llm_provider::{
 };
 
 const AI_PROVIDER_REQUEST_MAX_RETRIES: usize = 3;
+const AI_PROVIDER_RETRY_ON_HTTP_400: bool = true;
 
 pub struct BrainConfig {
     pub endpoint: String,
@@ -95,14 +99,18 @@ impl BottyBrain {
         let mut last_error: Option<io::Error> = None;
 
         for attempt in 0..=AI_PROVIDER_REQUEST_MAX_RETRIES {
+            let header_path = temp_provider_header_path();
             let mut command = Command::new("curl");
             command
-                .arg("-fsS")
+                .arg("--fail-with-body")
+                .arg("-sS")
                 .arg("-X")
                 .arg("POST")
                 .arg(&request.url)
                 .arg("-H")
-                .arg("Content-Type: application/json");
+                .arg("Content-Type: application/json")
+                .arg("-D")
+                .arg(&header_path);
 
             for (name, value) in &request.headers {
                 command.arg("-H").arg(format!("{name}: {value}"));
@@ -110,8 +118,18 @@ impl BottyBrain {
 
             match command.arg("-d").arg(&request.payload).output() {
                 Ok(output) => {
+                    let response_headers = read_provider_header_file(&header_path);
+                    let _ = fs::remove_file(&header_path);
                     let response_body = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let response_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let trace_id = extract_trace_id_from_headers(response_headers.as_deref())
+                        .map(str::to_string)
+                        .or_else(|| extract_trace_id_from_body(&response_body))
+                        .unwrap_or_else(|| "None".to_string());
+                    self.log_debug(
+                        "response-trace_id",
+                        &format!("trace_id={trace_id}"),
+                    )?;
 
                     if !response_body.is_empty() {
                         self.log_debug("response", &response_body)?;
@@ -124,15 +142,28 @@ impl BottyBrain {
                         return Ok(response_body);
                     }
 
+                    let retryable =
+                        should_retry_provider_error(response_error.as_str(), response_body.as_str());
                     last_error = Some(io::Error::other(classify_provider_error(
                         response_error.as_str(),
+                        response_body.as_str(),
                     )));
+
+                    if !retryable {
+                        break;
+                    }
                 }
                 Err(err) => {
+                    let _ = fs::remove_file(&header_path);
+                    let retryable = should_retry_provider_error(err.to_string().as_str(), "");
                     last_error = Some(io::Error::new(
                         err.kind(),
                         format!("failed to execute curl for AI provider request: {err}"),
                     ));
+
+                    if !retryable {
+                        break;
+                    }
                 }
             }
 
@@ -298,6 +329,39 @@ fn debug_log_path() -> PathBuf {
         .join(format!("brain-debug{}.log", runtime_suffix()))
 }
 
+fn temp_provider_header_path() -> PathBuf {
+    env::temp_dir().join(format!("mylittlebotty-provider-headers-{}.tmp", process::id()))
+}
+
+fn read_provider_header_file(path: &PathBuf) -> Option<String> {
+    fs::read_to_string(path).ok()
+}
+
+fn extract_trace_id_from_headers(headers: Option<&str>) -> Option<&str> {
+    let mut trace_id = None;
+    for line in headers.unwrap_or_default().lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("trace_id") {
+            let candidate = value.trim();
+            if !candidate.is_empty() {
+                trace_id = Some(candidate);
+            }
+        }
+    }
+    trace_id
+}
+
+fn extract_trace_id_from_body(body: &str) -> Option<String> {
+    let payload: Value = serde_json::from_str(body).ok()?;
+    payload
+        .get("trace_id")?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn setup_config_file() -> PathBuf {
     botty_root_dir()
         .join("config")
@@ -327,9 +391,15 @@ fn local_time_format(format: &str) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn classify_provider_error(detail: &str) -> String {
+fn classify_provider_error(detail: &str, response_body: &str) -> String {
     let trimmed = detail.trim();
     let lower = trimmed.to_ascii_lowercase();
+    if let Some(provider_message) = extract_provider_error_message(response_body) {
+        return format!(
+            "AI provider request failed. Details: {}",
+            provider_message.trim()
+        );
+    }
 
     if lower.contains(" 401") || lower.contains("error: 401") || lower.contains("unauthorized") {
         return "AI provider request was rejected with 401 Unauthorized. Please check your API key."
@@ -371,6 +441,66 @@ fn classify_provider_error(detail: &str) -> String {
     }
 
     format!("AI provider request failed. Please check your configuration. Details: {trimmed}")
+}
+
+fn should_retry_provider_error(detail: &str, response_body: &str) -> bool {
+    let lower = detail.trim().to_ascii_lowercase();
+    let body_lower = response_body.trim().to_ascii_lowercase();
+
+    if body_lower.contains("(2013)") || body_lower.contains("invalid_request_error") {
+        return false;
+    }
+
+    if lower.contains(" 400") || lower.contains("error: 400") {
+        return AI_PROVIDER_RETRY_ON_HTTP_400;
+    }
+    if lower.contains(" 408")
+        || lower.contains("error: 408")
+        || lower.contains(" 409")
+        || lower.contains("error: 409")
+        || lower.contains(" 425")
+        || lower.contains("error: 425")
+        || lower.contains(" 429")
+        || lower.contains("error: 429")
+        || lower.contains("could not resolve host")
+        || lower.contains("name or service not known")
+        || lower.contains("nodename nor servname provided")
+        || lower.contains("failed to connect")
+        || lower.contains("connection refused")
+        || lower.contains("couldn't connect")
+        || lower.contains("operation timed out")
+        || lower.contains("timed out")
+        || lower.contains("ssl")
+        || lower.contains("certificate")
+        || lower.contains("http2 framing layer")
+        || lower.contains("ssl_connect")
+    {
+        return true;
+    }
+
+    false
+}
+
+fn extract_provider_error_message(response_body: &str) -> Option<String> {
+    let payload: Value = serde_json::from_str(response_body).ok()?;
+    let error = payload.get("error")?;
+    let error_type = error.get("type").and_then(Value::as_str).unwrap_or("error");
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("").trim();
+    let request_id = payload
+        .get("request_id")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("trace_id").and_then(Value::as_str));
+
+    if message.is_empty() {
+        return request_id.map(|id| format!("{error_type} (request_id={id})"));
+    }
+
+    match request_id {
+        Some(id) if !id.trim().is_empty() => {
+            Some(format!("{error_type}: {message} (request_id={})", id.trim()))
+        }
+        _ => Some(format!("{error_type}: {message}")),
+    }
 }
 
 fn is_llm_connection_error_message(detail: &str) -> bool {

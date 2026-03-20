@@ -153,7 +153,9 @@ impl BottyBody {
                 thinking: reply.thinking,
                 control: None,
             }),
-            ProviderResponse::ToolUse(tool_use) => self.complete_tool_call(input, &tools, tool_use),
+            ProviderResponse::ToolUses(tool_uses) => {
+                self.complete_tool_call(input, &tools, tool_uses)
+            }
         }
     }
 
@@ -184,11 +186,11 @@ impl BottyBody {
         &self,
         input: &str,
         tools: &[ProviderToolDefinition],
-        first_tool_use: ProviderToolUse,
+        first_tool_uses: Vec<ProviderToolUse>,
     ) -> io::Result<AssistantReply> {
         let system_prompt = self.build_system_prompt()?;
         let conversation = vec![ProviderMessage::UserText(input.to_string())];
-        self.run_tool_call_loop(&system_prompt, tools, conversation, first_tool_use, Some(input))
+        self.run_tool_call_loop(&system_prompt, tools, conversation, first_tool_uses, Some(input))
     }
 
     fn continue_tool_call(
@@ -222,13 +224,13 @@ impl BottyBody {
                 thinking: reply.thinking,
                 control: None,
             }),
-            ProviderResponse::ToolUse(tool_use) => {
+            ProviderResponse::ToolUses(tool_uses) => {
                 let user_request = first_user_text(&conversation).map(|value| value.to_string());
                 self.run_tool_call_loop(
                     system_prompt,
                     tools,
                     conversation,
-                    tool_use,
+                    tool_uses,
                     user_request.as_deref(),
                 )
             }
@@ -240,38 +242,50 @@ impl BottyBody {
         system_prompt: &str,
         tools: &[ProviderToolDefinition],
         mut conversation: Vec<ProviderMessage>,
-        mut tool_use: ProviderToolUse,
+        mut tool_uses: Vec<ProviderToolUse>,
         user_request: Option<&str>,
     ) -> io::Result<AssistantReply> {
         for _ in 0..MAX_TOOL_CALL_STEPS {
-            let tool_result = self.execute_tool_with_recovery(
-                user_request,
-                tool_use.name.as_str(),
-                tool_use.input_json.as_str(),
-            )?;
             conversation.push(ProviderMessage::AssistantToolUse {
-                assistant_content_json: tool_use.assistant_content_json,
+                assistant_content_json: tool_uses
+                    .first()
+                    .map(|tool_use| tool_use.assistant_content_json.clone())
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing tool use"))?,
             });
-            if let Some(async_delegation) = parse_async_delegation_result(&tool_result)? {
-                let continuation_payload = serde_json::to_string(&ContinuationState {
-                    messages: conversation.clone(),
-                })
-                .map_err(|err| io::Error::other(format!("serialize continuation failed: {err}")))?;
-                return Ok(AssistantReply {
-                    text: String::new(),
-                    thinking: None,
-                    control: Some(AssistantControl::AwaitDelegation {
-                        child_role: async_delegation.child_role,
-                        child_message_id: async_delegation.child_message_id,
-                        continuation_payload,
-                        handoff_message: async_delegation.handoff_message,
-                    }),
+            for tool_use in &tool_uses {
+                let tool_result = self.execute_tool_with_recovery(
+                    user_request,
+                    tool_use.name.as_str(),
+                    tool_use.input_json.as_str(),
+                )?;
+                if let Some(async_delegation) = parse_async_delegation_result(&tool_result)? {
+                    if tool_uses.len() > 1 {
+                        return Err(io::Error::other(
+                            "async delegation cannot be mixed with multiple tool calls in one assistant turn",
+                        ));
+                    }
+                    let continuation_payload = serde_json::to_string(&ContinuationState {
+                        messages: conversation.clone(),
+                    })
+                    .map_err(|err| {
+                        io::Error::other(format!("serialize continuation failed: {err}"))
+                    })?;
+                    return Ok(AssistantReply {
+                        text: String::new(),
+                        thinking: None,
+                        control: Some(AssistantControl::AwaitDelegation {
+                            child_role: async_delegation.child_role,
+                            child_message_id: async_delegation.child_message_id,
+                            continuation_payload,
+                            handoff_message: async_delegation.handoff_message,
+                        }),
+                    });
+                }
+                conversation.push(ProviderMessage::UserToolResult {
+                    tool_use_id: tool_use.id.clone(),
+                    content: tool_result,
                 });
             }
-            conversation.push(ProviderMessage::UserToolResult {
-                tool_use_id: tool_use.id,
-                content: tool_result,
-            });
 
             match self.brain.think(system_prompt, &conversation, tools)? {
                 ProviderResponse::Text(reply) => {
@@ -281,8 +295,8 @@ impl BottyBody {
                         control: None,
                     });
                 }
-                ProviderResponse::ToolUse(next_tool_use) => {
-                    tool_use = next_tool_use;
+                ProviderResponse::ToolUses(next_tool_uses) => {
+                    tool_uses = next_tool_uses;
                 }
             }
         }
@@ -387,7 +401,9 @@ impl BottyBody {
                     Ok(text.to_string())
                 }
             }
-            Ok(ProviderResponse::ToolUse(_)) => Ok(default_tool_error_message(request_summary, name)),
+            Ok(ProviderResponse::ToolUses(_)) => {
+                Ok(default_tool_error_message(request_summary, name))
+            }
             Err(format_err) if is_llm_connection_error(&format_err) => Err(format_err),
             Err(_) => Ok(default_tool_error_message(request_summary, name)),
         }
@@ -471,7 +487,7 @@ impl BottyBody {
         existing_summary: Option<&str>,
         transcript: &str,
     ) -> io::Result<String> {
-        let output_instruction = "Write `remember.md` in Markdown.\nKeep it under 100 lines.\nKeep only key events and the user's recent important requests plus solution status.";
+        let output_instruction = "Write `remember.md` in Markdown.\nKeep it under 100 lines.\nKeep only key events, the user's recent important requests, and solution status.\nExplicitly preserve and emphasize anything the user clearly said should be remembered in future conversations.";
         let user_prompt = match existing_summary.filter(|text| !text.trim().is_empty()) {
             Some(summary) => prompt::render(
                 prompt::REMEMBER_UPDATE_PROMPT,
@@ -565,7 +581,7 @@ impl BottyBody {
         )?;
         match response {
             ProviderResponse::Text(reply) => Ok(reply.text.trim().to_string()),
-            ProviderResponse::ToolUse(_) => Err(io::Error::other(
+            ProviderResponse::ToolUses(_) => Err(io::Error::other(
                 "remember summary unexpectedly returned a tool call",
             )),
         }
@@ -605,7 +621,7 @@ impl BottyBody {
             &[],
         )? {
             ProviderResponse::Text(reply) => Ok(reply.text),
-            ProviderResponse::ToolUse(_) => Err(io::Error::other(
+            ProviderResponse::ToolUses(_) => Err(io::Error::other(
                 "reminder trigger unexpectedly returned a tool call",
             )),
         }
@@ -840,7 +856,7 @@ fn render_tool_usage_guidance(skills: &[String]) -> String {
         lines.push("Use `write` when the user asks to save, write, note, record, or persist text into a local file. Preserve the user's filename intent, but remember that write always remaps paths under the configured work dir.".to_string());
     }
     if skills.iter().any(|skill| skill == "crond") {
-        lines.push("Use `crond` only for reminder and scheduling requests. For create or edit actions, always provide exact local `schedule_at` in `YYYY-MM-DD HH:MM:SS`. For normal text reminders, set `task_type=\"ask_guy\"` and put the reminder text in `task_text`.".to_string());
+        lines.push("Use `crond` only for reminder and scheduling requests. For create or edit actions, always provide exact local `schedule_at` in `YYYY-MM-DD HH:MM:SS`. For normal text reminders, set `task_type=\"ask_guy\"` and put the reminder text in `task_text`. For scheduled tasks that should trigger leader routing and specialized work at execution time, set `task_type=\"assign_tasks\"` and put the actionable task in `task_text`. If the user wants Botty to actually perform work later and send back the result, `assign_tasks` is the default choice.".to_string());
     }
     if skills.iter().any(|skill| skill == "remember") {
         lines.push("Use `remember` only when the current topic may depend on older conversation memory not already covered by the provided summaries.".to_string());
