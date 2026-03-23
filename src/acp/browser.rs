@@ -359,6 +359,7 @@ struct BrowserSettings {
     chrome_command: Option<String>,
     headless: bool,
     user_data_dir: Option<PathBuf>,
+    max_tabs: usize,
 }
 
 fn session_for_action(
@@ -421,6 +422,7 @@ fn start_browser_session_with_id(
             .clone()
             .unwrap_or_else(default_browser_user_data_dir),
         headless: headless_override.unwrap_or(settings.headless),
+        max_page_tabs: settings.max_tabs,
     })?;
     let session = Arc::new(BrowserSession {
         id: session_id.to_string(),
@@ -526,6 +528,7 @@ fn load_browser_settings() -> io::Result<BrowserSettings> {
         chrome_command: None,
         headless: false,
         user_data_dir: Some(default_browser_user_data_dir()),
+        max_tabs: 10,
     };
 
     for line in content.lines() {
@@ -549,6 +552,11 @@ fn load_browser_settings() -> io::Result<BrowserSettings> {
             "browser.chrome.user_data_dir" => {
                 if !value.is_empty() {
                     settings.user_data_dir = Some(resolve_config_path(value));
+                }
+            }
+            "browser.chrome.max_tabs" => {
+                if let Ok(max_tabs) = value.parse::<usize>() {
+                    settings.max_tabs = max_tabs;
                 }
             }
             _ => {}
@@ -1118,6 +1126,7 @@ fn restore_singleton_browser_session() -> io::Result<Option<Arc<BrowserSession>>
         PathBuf::from(&meta.user_data_dir),
         meta.remote_debugging_port,
         meta.target_id.as_deref(),
+        load_browser_settings()?.max_tabs,
     ) {
         Ok(browser) => browser,
         Err(_) => return Ok(None),

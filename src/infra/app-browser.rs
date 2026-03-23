@@ -49,6 +49,7 @@ pub struct BrowserLaunchConfig {
     pub transcript_path: PathBuf,
     pub user_data_dir: PathBuf,
     pub headless: bool,
+    pub max_page_tabs: usize,
 }
 
 #[derive(Clone)]
@@ -124,6 +125,7 @@ impl AppBrowser {
 
         let startup_result = (|| -> io::Result<(TargetDescriptor, CdpSession)> {
             wait_for_debug_endpoint(remote_debugging_port)?;
+            prune_page_targets(remote_debugging_port, None, config.max_page_tabs)?;
             let target = create_page_target(remote_debugging_port)?;
             let (websocket, _) =
                 connect(target.web_socket_debugger_url.as_str()).map_err(ws_err)?;
@@ -161,12 +163,14 @@ impl AppBrowser {
         user_data_dir: PathBuf,
         remote_debugging_port: u16,
         target_id: Option<&str>,
+        max_page_tabs: usize,
     ) -> io::Result<Self> {
         if let Some(parent) = transcript_path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::create_dir_all(&user_data_dir)?;
         wait_for_debug_endpoint(remote_debugging_port)?;
+        prune_page_targets(remote_debugging_port, target_id, max_page_tabs)?;
         let target = find_or_create_page_target(remote_debugging_port, target_id)?;
         let (websocket, _) = connect(target.web_socket_debugger_url.as_str()).map_err(ws_err)?;
         let mut cdp = CdpSession::new(websocket);
@@ -555,16 +559,80 @@ fn create_page_target(port: u16) -> io::Result<TargetDescriptor> {
     })
 }
 
+fn close_page_target(port: u16, target_id: &str) -> io::Result<()> {
+    let url = format!("http://127.0.0.1:{port}/json/close/{target_id}");
+    let output = Command::new("curl")
+        .arg("--noproxy")
+        .arg("*")
+        .arg("-fsS")
+        .arg(url)
+        .output()?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "chrome target close failed: {}",
+            detail.trim()
+        )));
+    }
+    Ok(())
+}
+
 fn find_or_create_page_target(port: u16, target_id: Option<&str>) -> io::Result<TargetDescriptor> {
     if let Some(target_id) = target_id {
         if let Some(target) = find_page_target(port, target_id)? {
             return Ok(target);
         }
     }
+    if let Some(target) = find_first_page_target(port)? {
+        return Ok(target);
+    }
     create_page_target(port)
 }
 
 fn find_page_target(port: u16, target_id: &str) -> io::Result<Option<TargetDescriptor>> {
+    let list = list_targets(port)?;
+    for value in list {
+        let Some(id) = value.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if id != target_id {
+            continue;
+        }
+        let Some(websocket) = value.get("webSocketDebuggerUrl").and_then(Value::as_str) else {
+            continue;
+        };
+        return Ok(Some(TargetDescriptor {
+            id: id.to_string(),
+            web_socket_debugger_url: websocket.to_string(),
+        }));
+    }
+    Ok(None)
+}
+
+fn find_first_page_target(port: u16) -> io::Result<Option<TargetDescriptor>> {
+    let list = list_targets(port)?;
+    for value in list {
+        let Some(kind) = value.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if kind != "page" {
+            continue;
+        }
+        let Some(id) = value.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(websocket) = value.get("webSocketDebuggerUrl").and_then(Value::as_str) else {
+            continue;
+        };
+        return Ok(Some(TargetDescriptor {
+            id: id.to_string(),
+            web_socket_debugger_url: websocket.to_string(),
+        }));
+    }
+    Ok(None)
+}
+
+fn list_targets(port: u16) -> io::Result<Vec<Value>> {
     let url = format!("http://127.0.0.1:{port}/json/list");
     let output = Command::new("curl")
         .arg("--noproxy")
@@ -587,24 +655,47 @@ fn find_page_target(port: u16, target_id: &str) -> io::Result<Option<TargetDescr
         )
     })?;
     let Some(list) = values.as_array() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    for value in list {
-        let Some(id) = value.get("id").and_then(Value::as_str) else {
+    Ok(list.clone())
+}
+
+fn prune_page_targets(
+    port: u16,
+    preferred_target_id: Option<&str>,
+    max_page_tabs: usize,
+) -> io::Result<()> {
+    if max_page_tabs == 0 {
+        return Ok(());
+    }
+
+    let mut pages: Vec<Value> = list_targets(port)?
+        .into_iter()
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("page"))
+        .collect();
+    if pages.len() <= max_page_tabs {
+        return Ok(());
+    }
+
+    pages.sort_by_key(|value| {
+        value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| id != preferred_target_id.unwrap_or_default())
+            .unwrap_or(true)
+    });
+
+    let overflow = pages.len().saturating_sub(max_page_tabs);
+    for value in pages.into_iter().take(overflow) {
+        let Some(target_id) = value.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if id != target_id {
+        if Some(target_id) == preferred_target_id {
             continue;
         }
-        let Some(websocket) = value.get("webSocketDebuggerUrl").and_then(Value::as_str) else {
-            continue;
-        };
-        return Ok(Some(TargetDescriptor {
-            id: id.to_string(),
-            web_socket_debugger_url: websocket.to_string(),
-        }));
+        close_page_target(port, target_id)?;
     }
-    Ok(None)
+    Ok(())
 }
 
 fn page_state_json(cdp: &mut CdpSession) -> io::Result<Value> {

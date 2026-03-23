@@ -16,6 +16,10 @@ pub fn run_feishu_input() {
     botty_guy::run_feishu_input();
 }
 
+pub fn run_weixin_input() {
+    botty_guy::run_weixin_input();
+}
+
 pub fn run_crond() {
     botty_crond::run();
 }

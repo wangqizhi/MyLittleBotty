@@ -4,8 +4,12 @@ use crate::infra::chatbot_feishu::{
     FeishuClient, FeishuLongConnClient, DEFAULT_API_BASE as FEISHU_API_BASE,
 };
 use crate::infra::chatbot_telegram::{TelegramClient, DEFAULT_API_BASE as TELEGRAM_API_BASE};
+use crate::infra::chatbot_weixin::{
+    WeixinClient, DEFAULT_API_BASE as WEIXIN_API_BASE, SESSION_EXPIRED_ERRCODE,
+};
 use crate::prompt;
 use serde_json::{self, json, Value};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -26,6 +30,8 @@ pub(crate) const BOTTY_GUY_ROLE_ENV: &str = "BOTTY_GUY_ROLE";
 const BOTTY_GUY_DEFAULT_ROLE: &str = "leader";
 const TELEGRAM_POLL_INTERVAL_SECONDS_DEFAULT: u64 = 1;
 const FEISHU_POLL_INTERVAL_SECONDS_DEFAULT: u64 = 1;
+const WEIXIN_POLL_INTERVAL_SECONDS_DEFAULT: u64 = 1;
+const WEIXIN_LONG_POLL_TIMEOUT_MS_DEFAULT: u64 = 35_000;
 const FEISHU_SEEN_CACHE_LIMIT: usize = 200;
 const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
 const CHAT_META_PREFIX: &str = "__botty_meta__";
@@ -420,6 +426,38 @@ pub fn run_feishu_input() {
         config.feishu_access_token,
         config.feishu_api_base,
         interval,
+    );
+    run_input_provider_loop(&mut plugin);
+}
+
+pub fn run_weixin_input() {
+    set_process_name(weixin_input_process_name());
+
+    let config = match load_chatbot_config() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("Botty-input-weixin failed to load config: {err}");
+            return;
+        }
+    };
+
+    if !config.weixin_enabled {
+        return;
+    }
+    if config.weixin_apikey.is_empty() {
+        eprintln!("Botty-input-weixin skipped: chatbot.weixin.apikey is empty");
+        return;
+    }
+
+    let interval = config.weixin_poll_interval();
+    let sync_path = weixin_sync_file(&config.weixin_account_id);
+    let mut plugin = WeixinProviderPlugin::new(
+        config.weixin_apikey,
+        config.weixin_api_base,
+        interval,
+        config.weixin_whitelist_user_ids,
+        config.weixin_long_poll_timeout_ms,
+        sync_path,
     );
     run_input_provider_loop(&mut plugin);
 }
@@ -830,6 +868,116 @@ impl ChatbotProviderPlugin for FeishuProviderPlugin {
     }
 }
 
+struct WeixinProviderPlugin {
+    client: WeixinClient,
+    poll_interval: Duration,
+    whitelist_user_ids: HashSet<String>,
+    context_tokens: HashMap<String, String>,
+    get_updates_buf: String,
+    sync_file: PathBuf,
+    long_poll_timeout_ms: u64,
+}
+
+impl WeixinProviderPlugin {
+    fn new(
+        apikey: String,
+        api_base: String,
+        poll_interval: Duration,
+        whitelist_user_ids: HashSet<String>,
+        long_poll_timeout_ms: u64,
+        sync_file: PathBuf,
+    ) -> Self {
+        let get_updates_buf = load_weixin_sync_buf(&sync_file).unwrap_or_default();
+        Self {
+            client: WeixinClient::new(api_base, apikey),
+            poll_interval,
+            whitelist_user_ids,
+            context_tokens: HashMap::new(),
+            get_updates_buf,
+            sync_file,
+            long_poll_timeout_ms,
+        }
+    }
+}
+
+impl ChatbotProviderPlugin for WeixinProviderPlugin {
+    fn provider_name(&self) -> &'static str {
+        "weixin"
+    }
+
+    fn poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    fn fetch_messages(&mut self) -> io::Result<Vec<InboundMessage>> {
+        match self
+            .client
+            .fetch_updates(&self.get_updates_buf, self.long_poll_timeout_ms)
+        {
+            Ok(result) => {
+                if !result.get_updates_buf.is_empty() {
+                    self.get_updates_buf = result.get_updates_buf;
+                    let _ = save_weixin_sync_buf(&self.sync_file, &self.get_updates_buf);
+                }
+                if let Some(timeout_ms) = result.longpolling_timeout_ms {
+                    self.long_poll_timeout_ms = timeout_ms.max(1_000);
+                }
+
+                let mut messages = Vec::new();
+                for message in result.messages {
+                    self.context_tokens
+                        .insert(message.user_id.clone(), message.context_token);
+                    messages.push(InboundMessage {
+                        message_id: message.message_id,
+                        target: message.user_id.clone(),
+                        user_id: message.user_id,
+                        text: message.text,
+                    });
+                }
+                Ok(messages)
+            }
+            Err(err) => {
+                if err
+                    .to_string()
+                    .contains(&format!("errcode={SESSION_EXPIRED_ERRCODE}"))
+                {
+                    return Err(io::Error::other(format!(
+                        "weixin session expired, rerun `mylittlebotty weixin-login`: {err}"
+                    )));
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn user_id<'a>(&self, message: &'a InboundMessage) -> &'a str {
+        message.user_id.as_str()
+    }
+
+    fn should_skip_initial_messages(&self) -> bool {
+        false
+    }
+
+    fn is_user_allowed(&self, user_id: &str) -> bool {
+        self.whitelist_user_ids.is_empty() || self.whitelist_user_ids.contains(user_id)
+    }
+
+    fn send_reply(&mut self, target: &str, text: &str) -> io::Result<Option<String>> {
+        let (clean_text, _) = parse_outgoing_attachments(text);
+        if clean_text.trim().is_empty() {
+            return Ok(None);
+        }
+        let context_token = self.context_tokens.get(target).cloned().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("weixin context_token missing for target {target}"),
+            )
+        })?;
+        self.client.send_message(target, &clean_text, &context_token)?;
+        Ok(None)
+    }
+}
+
 fn guy_process_name() -> &'static str {
     if cfg!(debug_assertions) {
         "Botty-Guy-dev"
@@ -854,6 +1002,14 @@ fn feishu_input_process_name() -> &'static str {
     }
 }
 
+fn weixin_input_process_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "Botty-input-weixin-dev"
+    } else {
+        "Botty-input-weixin"
+    }
+}
+
 struct ChatbotConfig {
     enabled: bool,
     apikey: String,
@@ -866,6 +1022,14 @@ struct ChatbotConfig {
     feishu_api_base: String,
     feishu_chat_id: String,
     feishu_poll_interval_seconds: u64,
+    weixin_enabled: bool,
+    weixin_apikey: String,
+    weixin_api_base: String,
+    weixin_account_id: String,
+    weixin_user_id: String,
+    weixin_poll_interval_seconds: u64,
+    weixin_long_poll_timeout_ms: u64,
+    weixin_whitelist_user_ids: HashSet<String>,
     telegram_whitelist_user_ids: HashSet<String>,
 }
 
@@ -883,6 +1047,14 @@ impl Default for ChatbotConfig {
             feishu_api_base: FEISHU_API_BASE.to_string(),
             feishu_chat_id: String::new(),
             feishu_poll_interval_seconds: FEISHU_POLL_INTERVAL_SECONDS_DEFAULT,
+            weixin_enabled: false,
+            weixin_apikey: String::new(),
+            weixin_api_base: WEIXIN_API_BASE.to_string(),
+            weixin_account_id: String::new(),
+            weixin_user_id: String::new(),
+            weixin_poll_interval_seconds: WEIXIN_POLL_INTERVAL_SECONDS_DEFAULT,
+            weixin_long_poll_timeout_ms: WEIXIN_LONG_POLL_TIMEOUT_MS_DEFAULT,
+            weixin_whitelist_user_ids: HashSet::new(),
             telegram_whitelist_user_ids: HashSet::new(),
         }
     }
@@ -895,6 +1067,10 @@ impl ChatbotConfig {
 
     fn feishu_poll_interval(&self) -> Duration {
         Duration::from_secs(self.feishu_poll_interval_seconds.max(1))
+    }
+
+    fn weixin_poll_interval(&self) -> Duration {
+        Duration::from_secs(self.weixin_poll_interval_seconds.max(1))
     }
 }
 
@@ -926,6 +1102,10 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
                     .split(',')
                     .map(|s| s.trim())
                     .any(|provider| provider == "feishu");
+                config.weixin_enabled = value
+                    .split(',')
+                    .map(|s| s.trim())
+                    .any(|provider| provider == "weixin");
             }
             "chatbot.telegram.enabled" => config.enabled = parse_bool(value),
             "chatbot.telegram.apikey" => config.apikey = value.to_string(),
@@ -942,12 +1122,23 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
             "chatbot.feishu.apikey" => config.feishu_access_token = value.to_string(),
             "chatbot.feishu.api_base" => config.feishu_api_base = value.to_string(),
             "chatbot.feishu.chat_id" => config.feishu_chat_id = value.to_string(),
+            "chatbot.weixin.enabled" => config.weixin_enabled = parse_bool(value),
+            "chatbot.weixin.apikey" => config.weixin_apikey = value.to_string(),
+            "chatbot.weixin.api_base" => config.weixin_api_base = value.to_string(),
+            "chatbot.weixin.account_id" => config.weixin_account_id = value.to_string(),
+            "chatbot.weixin.user_id" => config.weixin_user_id = value.to_string(),
+            "chatbot.weixin.whitelist_user_ids" => {
+                config.weixin_whitelist_user_ids = parse_user_id_whitelist(value);
+            }
             "chatbot.apikey" => {
                 if config.apikey.is_empty() {
                     config.apikey = value.to_string();
                 }
                 if config.feishu_access_token.is_empty() {
                     config.feishu_access_token = value.to_string();
+                }
+                if config.weixin_apikey.is_empty() {
+                    config.weixin_apikey = value.to_string();
                 }
             }
             "chatbot.telegram.poll_interval_seconds" => {
@@ -958,6 +1149,16 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
             "chatbot.feishu.poll_interval_seconds" => {
                 if let Ok(seconds) = value.parse::<u64>() {
                     config.feishu_poll_interval_seconds = seconds.max(1);
+                }
+            }
+            "chatbot.weixin.poll_interval_seconds" => {
+                if let Ok(seconds) = value.parse::<u64>() {
+                    config.weixin_poll_interval_seconds = seconds.max(1);
+                }
+            }
+            "chatbot.weixin.long_poll_timeout_ms" => {
+                if let Ok(timeout_ms) = value.parse::<u64>() {
+                    config.weixin_long_poll_timeout_ms = timeout_ms.max(1_000);
                 }
             }
             _ => {}
@@ -1126,6 +1327,50 @@ fn parse_outgoing_attachments(text: &str) -> (String, Vec<OutgoingAttachment>) {
     }
 
     (clean_lines.join("\n").trim().to_string(), attachments)
+}
+
+fn weixin_sync_file(account_id: &str) -> PathBuf {
+    let name = if account_id.trim().is_empty() {
+        "default".to_string()
+    } else {
+        sanitize_filename_component(account_id)
+    };
+    botty_root_dir()
+        .join("config")
+        .join(format!("weixin-{name}{}.sync.json", runtime_suffix()))
+}
+
+fn load_weixin_sync_buf(path: &PathBuf) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("get_updates_buf")
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+}
+
+fn save_weixin_sync_buf(path: &PathBuf, get_updates_buf: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, json!({ "get_updates_buf": get_updates_buf }).to_string())
+}
+
+fn sanitize_filename_component(value: &str) -> String {
+    let mut result = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch);
+        } else {
+            result.push('-');
+        }
+    }
+    let trimmed = result.trim_matches('-');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn parse_bool(value: &str) -> bool {

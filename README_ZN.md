@@ -393,6 +393,7 @@ agent.claude.command=claude
 browser.chrome.command=
 browser.chrome.headless=false
 browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
+browser.chrome.max_tabs=10
 work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
@@ -421,6 +422,7 @@ chatbot.feishu.chat_id=
 - `browser.chrome.command`：Chrome/Chromium 的可执行文件名或路径；留空时自动探测
 - `browser.chrome.headless`：`browser` skill 默认是否以 headless 模式启动 Chrome
 - `browser.chrome.user_data_dir`：可选的持久 Chrome user-data 目录；相对路径会解析到 `~/.mylittlebotty/` 下
+- `browser.chrome.max_tabs`：连接 CDP 时允许保留的 Chrome page tab 最大数量；超过会自动关闭多余 tab；设为 `0` 表示不限制
 - `work_dir`：`write` 工具使用的根目录；在 TUI 中修改时会迁移旧工作目录内容
 - `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道

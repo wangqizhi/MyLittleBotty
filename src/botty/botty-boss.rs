@@ -1332,7 +1332,17 @@ fn feishu_input_process_state(config: &SetupConfig) -> InputProcessState {
     enabled_input_process("configured")
 }
 
-fn input_process_specs() -> [InputProcessSpec; 2] {
+fn weixin_input_process_state(config: &SetupConfig) -> InputProcessState {
+    if !config.weixin_enabled {
+        return disabled_input_process("chatbot.weixin.enabled=false");
+    }
+    if config.weixin_apikey.trim().is_empty() {
+        return disabled_input_process("chatbot.weixin.apikey is empty");
+    }
+    enabled_input_process("configured")
+}
+
+fn input_process_specs() -> [InputProcessSpec; 3] {
     [
         InputProcessSpec {
             name: "Botty-input-telegram",
@@ -1343,6 +1353,11 @@ fn input_process_specs() -> [InputProcessSpec; 2] {
             name: "Botty-input-feishu",
             arg: "--input-feishu",
             state: feishu_input_process_state,
+        },
+        InputProcessSpec {
+            name: "Botty-input-weixin",
+            arg: "--input-weixin",
+            state: weixin_input_process_state,
         },
     ]
 }
@@ -2299,6 +2314,8 @@ struct SetupConfig {
     feishu_app_secret: String,
     feishu_access_token: String,
     feishu_chat_id: String,
+    weixin_enabled: bool,
+    weixin_apikey: String,
 }
 
 impl Default for SetupConfig {
@@ -2312,6 +2329,8 @@ impl Default for SetupConfig {
             feishu_app_secret: String::new(),
             feishu_access_token: String::new(),
             feishu_chat_id: String::new(),
+            weixin_enabled: false,
+            weixin_apikey: String::new(),
         }
     }
 }
@@ -2344,6 +2363,10 @@ fn load_setup_config() -> io::Result<SetupConfig> {
                     .split(',')
                     .map(|s| s.trim())
                     .any(|provider| provider == "feishu");
+                config.weixin_enabled = value
+                    .split(',')
+                    .map(|s| s.trim())
+                    .any(|provider| provider == "weixin");
             }
             "ai.provider.debug" => config.ai_provider_debug = parse_bool(value),
             "provider.debug" => config.ai_provider_debug = parse_bool(value),
@@ -2354,12 +2377,17 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "chatbot.feishu.app_secret" => config.feishu_app_secret = value.to_string(),
             "chatbot.feishu.apikey" => config.feishu_access_token = value.to_string(),
             "chatbot.feishu.chat_id" => config.feishu_chat_id = value.to_string(),
+            "chatbot.weixin.enabled" => config.weixin_enabled = parse_bool(value),
+            "chatbot.weixin.apikey" => config.weixin_apikey = value.to_string(),
             "chatbot.apikey" => {
                 if config.telegram_apikey.is_empty() {
                     config.telegram_apikey = value.to_string();
                 }
                 if config.feishu_access_token.is_empty() {
                     config.feishu_access_token = value.to_string();
+                }
+                if config.weixin_apikey.is_empty() {
+                    config.weixin_apikey = value.to_string();
                 }
             }
             _ => {}

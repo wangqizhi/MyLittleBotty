@@ -37,8 +37,9 @@
 
 - Telegram: `TelegramProviderPlugin`
 - Feishu: `FeishuProviderPlugin`
+- Weixin: `WeixinProviderPlugin`
 
-这两个插件都复用了同一个 `run_input_provider_loop`。
+这三个插件都复用了同一个 `run_input_provider_loop`。
 
 ## 配置约定
 建议至少提供以下键：
@@ -51,6 +52,20 @@
 如果供应商还需要额外路由信息（例如 Feishu 需要 `chat_id`），再加：
 
 - `chatbot.<provider>.chat_id`
+
+微信个人号还需要补充一些 provider 自己的状态键：
+
+- `chatbot.weixin.account_id`
+- `chatbot.weixin.user_id`
+- `chatbot.weixin.long_poll_timeout_ms`
+- `chatbot.weixin.whitelist_user_ids`
+
+说明：
+
+- `chatbot.weixin.apikey` 存的是扫码登录后换到的 `bot_token`
+- `chatbot.weixin.account_id` 对应登录成功后返回的 `ilink_bot_id`
+- `chatbot.weixin.user_id` 是扫码绑定的微信用户 ID，可选
+- `chatbot.weixin.long_poll_timeout_ms` 控制 `getupdates` 长轮询超时
 
 ## 启动入口与进程注册
 
@@ -71,3 +86,18 @@ Boss 会统一按 `input_process_specs` 启动/停止这些输入进程。
 5. 在 `main.rs` + `botty-boss.rs` 完成入口与注册。
 
 完成后即拥有与 Telegram/Feishu 一样的输入对话能力。
+
+## Weixin 额外注意点
+
+个人微信的最小文本链路比 Telegram/Feishu 多两个关键状态：
+
+1. `get_updates_buf`
+2. `context_token`
+
+推荐做法：
+
+- `getupdates` 返回的新 `get_updates_buf` 要落盘保存，避免进程重启后从头拉历史消息
+- 每条入站消息里的 `context_token` 要按 `target/user_id` 缓存在插件内部
+- `sendmessage` 回复时必须原样带回对应的 `context_token`
+
+如果缺少 `context_token`，文本回复会失败；因此 Weixin provider 一般不能只靠统一的 `InboundMessage` 字段，还需要插件内部自管上下文状态。

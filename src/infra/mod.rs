@@ -6,3 +6,5 @@ pub mod app_terminal;
 pub mod chatbot_feishu;
 #[path = "chatbot-telegram.rs"]
 pub mod chatbot_telegram;
+#[path = "chatbot-weixin.rs"]
+pub mod chatbot_weixin;

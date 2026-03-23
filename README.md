@@ -396,6 +396,7 @@ agent.claude.command=claude
 browser.chrome.command=
 browser.chrome.headless=false
 browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
+browser.chrome.max_tabs=10
 work_dir=
 chatbot.provider=telegram
 chatbot.telegram.api_base=https://api.telegram.org
@@ -424,6 +425,7 @@ Common meanings:
 - `browser.chrome.command`: executable name or path for Chrome/Chromium; leave empty to auto-detect
 - `browser.chrome.headless`: whether the browser skill launches Chrome in headless mode by default
 - `browser.chrome.user_data_dir`: optional persistent Chrome user-data directory; relative paths are resolved under `~/.mylittlebotty/`
+- `browser.chrome.max_tabs`: max number of Chrome page tabs to keep when connecting to CDP; if the count exceeds this limit, extra tabs are closed automatically; set `0` to disable the limit
 - `work_dir`: root directory used by the `write` tool; changing it from the TUI migrates existing work dir content
 - `chatbot.provider`: selected chatbot provider, currently `telegram` or `feishu`
 - `chatbot.telegram.enabled`: enable Telegram input worker

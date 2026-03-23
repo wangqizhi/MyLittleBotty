@@ -26,7 +26,7 @@ pub const COMMANDS: [&str; 10] = [
     "/exit",
     "/quit",
 ];
-pub const CHATBOT_PROVIDERS: [&str; 2] = ["telegram", "feishu"];
+pub const CHATBOT_PROVIDERS: [&str; 3] = ["telegram", "feishu", "weixin"];
 const CHAT_META_PREFIX: &str = "__botty_meta__";
 const CONTROL_PREFIX: &str = "__botty_control__";
 
@@ -39,6 +39,7 @@ pub enum SetupFieldId {
     BrowserChromeCommand,
     BrowserChromeHeadless,
     BrowserChromeUserDataDir,
+    BrowserChromeMaxTabs,
     WorkDir,
     ChatbotProvider,
     TelegramEnabled,
@@ -53,7 +54,7 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 18] = [
+    pub const ALL: [SetupFieldId; 19] = [
         SetupFieldId::AiProfiles,
         SetupFieldId::AgentProvider,
         SetupFieldId::AgentCodexCommand,
@@ -61,6 +62,7 @@ impl SetupFieldId {
         SetupFieldId::BrowserChromeCommand,
         SetupFieldId::BrowserChromeHeadless,
         SetupFieldId::BrowserChromeUserDataDir,
+        SetupFieldId::BrowserChromeMaxTabs,
         SetupFieldId::WorkDir,
         SetupFieldId::ChatbotProvider,
         SetupFieldId::TelegramEnabled,
@@ -90,6 +92,7 @@ impl SetupFieldId {
             SetupFieldId::BrowserChromeCommand => "browser chrome command",
             SetupFieldId::BrowserChromeHeadless => "browser chrome headless",
             SetupFieldId::BrowserChromeUserDataDir => "browser chrome user data dir",
+            SetupFieldId::BrowserChromeMaxTabs => "browser chrome max tabs",
             SetupFieldId::WorkDir => "work dir",
             SetupFieldId::ChatbotProvider => "chatbot provider",
             SetupFieldId::TelegramEnabled => "telegram enabled",
@@ -158,6 +161,7 @@ pub struct SetupConfig {
     pub browser_chrome_command: String,
     pub browser_chrome_headless: bool,
     pub browser_chrome_user_data_dir: String,
+    pub browser_chrome_max_tabs: usize,
     pub work_dir: String,
     pub chatbot_provider: String,
     pub chatbot_telegram_api_base: String,
@@ -172,6 +176,14 @@ pub struct SetupConfig {
     pub chatbot_telegram_poll_interval_seconds: u64,
     pub chatbot_feishu_poll_interval_seconds: u64,
     pub chatbot_feishu_chat_id: String,
+    pub chatbot_weixin_enabled: bool,
+    pub chatbot_weixin_api_base: String,
+    pub chatbot_weixin_apikey: String,
+    pub chatbot_weixin_account_id: String,
+    pub chatbot_weixin_user_id: String,
+    pub chatbot_weixin_whitelist_user_ids: String,
+    pub chatbot_weixin_poll_interval_seconds: u64,
+    pub chatbot_weixin_long_poll_timeout_ms: u64,
 }
 
 impl Default for SetupConfig {
@@ -185,6 +197,7 @@ impl Default for SetupConfig {
             browser_chrome_command: String::new(),
             browser_chrome_headless: false,
             browser_chrome_user_data_dir: DEFAULT_BROWSER_USER_DATA_DIR.to_string(),
+            browser_chrome_max_tabs: 10,
             work_dir: botty_io::default_work_dir_display(),
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
@@ -199,6 +212,14 @@ impl Default for SetupConfig {
             chatbot_telegram_poll_interval_seconds: 1,
             chatbot_feishu_poll_interval_seconds: 1,
             chatbot_feishu_chat_id: String::new(),
+            chatbot_weixin_enabled: false,
+            chatbot_weixin_api_base: "https://ilinkai.weixin.qq.com".to_string(),
+            chatbot_weixin_apikey: String::new(),
+            chatbot_weixin_account_id: String::new(),
+            chatbot_weixin_user_id: String::new(),
+            chatbot_weixin_whitelist_user_ids: String::new(),
+            chatbot_weixin_poll_interval_seconds: 1,
+            chatbot_weixin_long_poll_timeout_ms: 35_000,
         }
     }
 }
@@ -238,6 +259,7 @@ impl SetupConfig {
                 }
             }
             SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
+            SetupFieldId::BrowserChromeMaxTabs => self.browser_chrome_max_tabs.to_string(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramEnabled => {
@@ -279,6 +301,7 @@ impl SetupConfig {
             SetupFieldId::BrowserChromeCommand => self.browser_chrome_command.clone(),
             SetupFieldId::BrowserChromeHeadless => String::new(),
             SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
+            SetupFieldId::BrowserChromeMaxTabs => self.browser_chrome_max_tabs.to_string(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
             SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey.clone(),
@@ -308,6 +331,11 @@ impl SetupConfig {
             SetupFieldId::BrowserChromeHeadless => {}
             SetupFieldId::BrowserChromeUserDataDir => {
                 self.browser_chrome_user_data_dir = value.to_string()
+            }
+            SetupFieldId::BrowserChromeMaxTabs => {
+                if let Ok(max_tabs) = value.trim().parse::<usize>() {
+                    self.browser_chrome_max_tabs = max_tabs;
+                }
             }
             SetupFieldId::WorkDir => {
                 self.work_dir = botty_io::normalize_work_dir_input(value);
@@ -765,6 +793,11 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "browser.chrome.user_data_dir" => {
                 config.browser_chrome_user_data_dir = value.to_string()
             }
+            "browser.chrome.max_tabs" => {
+                if let Ok(max_tabs) = value.parse::<usize>() {
+                    config.browser_chrome_max_tabs = max_tabs;
+                }
+            }
             "chatbot.provider" => apply_chatbot_provider_list(&mut config, value),
             "chatbot.telegram.api_base" => config.chatbot_telegram_api_base = value.to_string(),
             "chatbot.telegram.apikey" => config.chatbot_telegram_apikey = value.to_string(),
@@ -772,19 +805,29 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "chatbot.feishu.app_id" => config.chatbot_feishu_app_id = value.to_string(),
             "chatbot.feishu.app_secret" => config.chatbot_feishu_app_secret = value.to_string(),
             "chatbot.feishu.apikey" => config.chatbot_feishu_access_token = value.to_string(),
+            "chatbot.weixin.api_base" => config.chatbot_weixin_api_base = value.to_string(),
+            "chatbot.weixin.apikey" => config.chatbot_weixin_apikey = value.to_string(),
+            "chatbot.weixin.account_id" => config.chatbot_weixin_account_id = value.to_string(),
+            "chatbot.weixin.user_id" => config.chatbot_weixin_user_id = value.to_string(),
             "chatbot.apikey" => {
                 if config.chatbot_provider == "feishu" {
                     config.chatbot_feishu_access_token = value.to_string();
+                } else if config.chatbot_provider == "weixin" {
+                    config.chatbot_weixin_apikey = value.to_string();
                 } else {
                     config.chatbot_telegram_apikey = value.to_string();
                 }
             }
             "chatbot.telegram.enabled" => config.chatbot_telegram_enabled = parse_bool(value),
             "chatbot.feishu.enabled" => config.chatbot_feishu_enabled = parse_bool(value),
+            "chatbot.weixin.enabled" => config.chatbot_weixin_enabled = parse_bool(value),
             "chatbot.telegram.whitelist_user_ids" => {
                 config.chatbot_telegram_whitelist_user_ids = value.to_string()
             }
             "chatbot.feishu.chat_id" => config.chatbot_feishu_chat_id = value.to_string(),
+            "chatbot.weixin.whitelist_user_ids" => {
+                config.chatbot_weixin_whitelist_user_ids = value.to_string()
+            }
             "chatbot.telegram.poll_interval_seconds" => {
                 if let Ok(seconds) = value.parse::<u64>() {
                     config.chatbot_telegram_poll_interval_seconds = seconds.max(1);
@@ -793,6 +836,16 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "chatbot.feishu.poll_interval_seconds" => {
                 if let Ok(seconds) = value.parse::<u64>() {
                     config.chatbot_feishu_poll_interval_seconds = seconds.max(1);
+                }
+            }
+            "chatbot.weixin.poll_interval_seconds" => {
+                if let Ok(seconds) = value.parse::<u64>() {
+                    config.chatbot_weixin_poll_interval_seconds = seconds.max(1);
+                }
+            }
+            "chatbot.weixin.long_poll_timeout_ms" => {
+                if let Ok(timeout_ms) = value.parse::<u64>() {
+                    config.chatbot_weixin_long_poll_timeout_ms = timeout_ms.max(1_000);
                 }
             }
             "ai.provider.endpoint" | "provider.endpoint" => {
@@ -855,7 +908,7 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nbrowser.chrome.max_tabs={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.weixin.api_base={}\nchatbot.weixin.apikey={}\nchatbot.weixin.account_id={}\nchatbot.weixin.user_id={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.weixin.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.weixin.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.weixin.poll_interval_seconds={}\nchatbot.weixin.long_poll_timeout_ms={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_active,
         serialize_ai_profiles(&config.ai_provider_profiles),
         config.agent_provider,
@@ -864,6 +917,7 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
         config.browser_chrome_command,
         config.browser_chrome_headless,
         config.browser_chrome_user_data_dir,
+        config.browser_chrome_max_tabs,
         enabled_provider_list(config),
         config.chatbot_telegram_api_base,
         config.chatbot_telegram_apikey,
@@ -871,11 +925,19 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
         config.chatbot_feishu_app_id,
         config.chatbot_feishu_app_secret,
         config.chatbot_feishu_access_token,
+        config.chatbot_weixin_api_base,
+        config.chatbot_weixin_apikey,
+        config.chatbot_weixin_account_id,
+        config.chatbot_weixin_user_id,
         config.chatbot_telegram_enabled,
         config.chatbot_feishu_enabled,
+        config.chatbot_weixin_enabled,
         config.chatbot_telegram_whitelist_user_ids,
+        config.chatbot_weixin_whitelist_user_ids,
         config.chatbot_telegram_poll_interval_seconds,
         config.chatbot_feishu_poll_interval_seconds,
+        config.chatbot_weixin_poll_interval_seconds,
+        config.chatbot_weixin_long_poll_timeout_ms,
         config.chatbot_feishu_chat_id
     );
 
@@ -921,6 +983,13 @@ fn validate_setup_config(config: &SetupConfig) -> io::Result<()> {
                 "feishu is enabled but chatbot.feishu.app_id/app_secret is incomplete for long connection",
             ));
         }
+    }
+
+    if config.chatbot_weixin_enabled && config.chatbot_weixin_apikey.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "weixin is enabled but chatbot.weixin.apikey is empty",
+        ));
     }
 
     Ok(())
@@ -1027,6 +1096,7 @@ fn serialize_ai_profiles(profiles: &[AiProviderProfile]) -> String {
 fn apply_chatbot_provider_list(config: &mut SetupConfig, value: &str) {
     config.chatbot_telegram_enabled = false;
     config.chatbot_feishu_enabled = false;
+    config.chatbot_weixin_enabled = false;
 
     let mut first_enabled = None;
     for item in value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -1043,6 +1113,12 @@ fn apply_chatbot_provider_list(config: &mut SetupConfig, value: &str) {
                     first_enabled = Some("feishu");
                 }
             }
+            "weixin" => {
+                config.chatbot_weixin_enabled = true;
+                if first_enabled.is_none() {
+                    first_enabled = Some("weixin");
+                }
+            }
             _ => {}
         }
     }
@@ -1057,6 +1133,9 @@ fn enabled_provider_list(config: &SetupConfig) -> String {
     }
     if config.chatbot_feishu_enabled {
         list.push("feishu");
+    }
+    if config.chatbot_weixin_enabled {
+        list.push("weixin");
     }
     list.join(",")
 }

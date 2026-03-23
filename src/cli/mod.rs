@@ -24,6 +24,7 @@ struct Cli {
 enum Command {
     Start(commands::start::StartCommand),
     Version(commands::version::VersionCommand),
+    WeixinLogin(commands::weixin_login::WeixinLoginCommand),
     Status(commands::status::StatusCommand),
     Crond(commands::crond::CrondCommand),
     Stop(commands::stop::StopCommand),
@@ -51,6 +52,9 @@ struct InternalFlags {
     #[arg(long = "input-feishu", hide = true)]
     input_feishu: bool,
 
+    #[arg(long = "input-weixin", hide = true)]
+    input_weixin: bool,
+
     #[arg(long, hide = true)]
     crond: bool,
 }
@@ -69,6 +73,11 @@ impl InternalFlags {
 
         if self.input_feishu {
             commands::internal::run_feishu_input();
+            return true;
+        }
+
+        if self.input_weixin {
+            commands::internal::run_weixin_input();
             return true;
         }
 
@@ -96,6 +105,7 @@ pub fn run() -> io::Result<()> {
     match cli.command.unwrap_or_default() {
         Command::Start(command) => command.run(),
         Command::Version(command) => command.run(),
+        Command::WeixinLogin(command) => command.run(),
         Command::Status(command) => command.run(),
         Command::Crond(command) => command.run(),
         Command::Stop(command) => command.run(),
