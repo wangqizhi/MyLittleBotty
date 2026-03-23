@@ -155,19 +155,24 @@ pub enum AiProfileFieldId {
     Apikey,
     Model,
     Debug,
+    Vision,
 }
 
 impl AiProfileFieldId {
-    pub const ALL: [AiProfileFieldId; 5] = [
+    pub const ALL: [AiProfileFieldId; 6] = [
         AiProfileFieldId::Name,
         AiProfileFieldId::Endpoint,
         AiProfileFieldId::Apikey,
         AiProfileFieldId::Model,
         AiProfileFieldId::Debug,
+        AiProfileFieldId::Vision,
     ];
 
     pub fn from_index(index: usize) -> Self {
-        Self::ALL.get(index).copied().unwrap_or(AiProfileFieldId::Name)
+        Self::ALL
+            .get(index)
+            .copied()
+            .unwrap_or(AiProfileFieldId::Name)
     }
 
     pub fn label(self) -> &'static str {
@@ -177,11 +182,12 @@ impl AiProfileFieldId {
             AiProfileFieldId::Apikey => "apikey",
             AiProfileFieldId::Model => "model",
             AiProfileFieldId::Debug => "debug",
+            AiProfileFieldId::Vision => "image support",
         }
     }
 
     pub fn is_toggle(self) -> bool {
-        self == AiProfileFieldId::Debug
+        matches!(self, AiProfileFieldId::Debug | AiProfileFieldId::Vision)
     }
 }
 
@@ -553,9 +559,9 @@ impl FrontendApp {
         let previous = botty_io::resolve_work_dir_input(&original_work_dir);
         let next = botty_io::resolve_work_dir_input(&config.work_dir);
         self.pending_setup_save = Some(if previous != next {
-            "正在迁移 work dir...".to_string()
+            "Migrating work dir...".to_string()
         } else {
-            "正在保存 setup...".to_string()
+            "Saving setup...".to_string()
         });
         Some(config)
     }
@@ -676,7 +682,10 @@ impl FrontendApp {
     }
 
     pub fn setup_open_ai_profiles(&mut self) {
-        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+        let Mode::Setup {
+            config, overlay, ..
+        } = &mut self.mode
+        else {
             return;
         };
         *overlay = Some(SetupOverlay::AiProfiles(SetupProfilePanel {
@@ -739,7 +748,10 @@ impl FrontendApp {
     }
 
     pub fn setup_ai_profiles_activate(&mut self) {
-        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+        let Mode::Setup {
+            config, overlay, ..
+        } = &mut self.mode
+        else {
             return;
         };
         let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() else {
@@ -751,7 +763,10 @@ impl FrontendApp {
     }
 
     pub fn setup_ai_profiles_delete_selected(&mut self) {
-        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+        let Mode::Setup {
+            config, overlay, ..
+        } = &mut self.mode
+        else {
             return;
         };
         let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() else {
@@ -769,7 +784,8 @@ impl FrontendApp {
                 .unwrap_or_default();
             panel.message = Some(match err.kind() {
                 io::ErrorKind::InvalidInput if profile_name == config.ai_provider_active => {
-                    "当前 profile 正在使用中，请先切换到其他 profile 再删除".to_string()
+                    "The current profile is active. Switch to another profile before deleting it."
+                        .to_string()
                 }
                 io::ErrorKind::InvalidInput => err.to_string(),
                 _ => format!("delete AI profile failed: {err}"),
@@ -781,7 +797,10 @@ impl FrontendApp {
     }
 
     pub fn setup_ai_profiles_edit_selected(&mut self) {
-        let Mode::Setup { config, overlay, .. } = &mut self.mode else {
+        let Mode::Setup {
+            config, overlay, ..
+        } = &mut self.mode
+        else {
             return;
         };
         let Some(SetupOverlay::AiProfiles(panel)) = overlay.as_mut() else {
@@ -805,6 +824,7 @@ impl FrontendApp {
                     apikey: String::new(),
                     model: String::new(),
                     debug: false,
+                    vision: false,
                 },
                 selected_field: 0,
                 field_editor: None,
@@ -854,7 +874,11 @@ impl FrontendApp {
         };
         let field = AiProfileFieldId::from_index(editor.selected_field);
         if field.is_toggle() {
-            editor.draft.debug = !editor.draft.debug;
+            match field {
+                AiProfileFieldId::Debug => editor.draft.debug = !editor.draft.debug,
+                AiProfileFieldId::Vision => editor.draft.vision = !editor.draft.vision,
+                _ => {}
+            }
             return;
         }
 
@@ -864,6 +888,7 @@ impl FrontendApp {
             AiProfileFieldId::Apikey => editor.draft.apikey.clone(),
             AiProfileFieldId::Model => editor.draft.model.clone(),
             AiProfileFieldId::Debug => String::new(),
+            AiProfileFieldId::Vision => String::new(),
         };
         editor.field_editor = Some(ProfileFieldEdit {
             selected_field: field,
@@ -876,8 +901,10 @@ impl FrontendApp {
         let Some(editor) = self.setup_ai_profile_editor_mut() else {
             return;
         };
-        if AiProfileFieldId::from_index(editor.selected_field) == AiProfileFieldId::Debug {
-            editor.draft.debug = !editor.draft.debug;
+        match AiProfileFieldId::from_index(editor.selected_field) {
+            AiProfileFieldId::Debug => editor.draft.debug = !editor.draft.debug,
+            AiProfileFieldId::Vision => editor.draft.vision = !editor.draft.vision,
+            _ => {}
         }
     }
 
@@ -1260,7 +1287,9 @@ impl FrontendApp {
 
     pub fn editor_submit<R: FrontendRpc>(&mut self, rpc: &mut R) {
         match &mut self.mode {
-            Mode::Setup { overlay, config, .. } => {
+            Mode::Setup {
+                overlay, config, ..
+            } => {
                 let mut close_overlay = false;
                 match overlay.as_mut() {
                     Some(SetupOverlay::Field(field)) => {
@@ -1281,13 +1310,15 @@ impl FrontendApp {
                                     AiProfileFieldId::Apikey => editor.draft.apikey = field.input,
                                     AiProfileFieldId::Model => editor.draft.model = field.input,
                                     AiProfileFieldId::Debug => {}
+                                    AiProfileFieldId::Vision => {}
                                 }
                                 return;
                             }
 
-                            match config
-                                .upsert_ai_profile(editor.original_name.as_deref(), editor.draft.clone())
-                            {
+                            match config.upsert_ai_profile(
+                                editor.original_name.as_deref(),
+                                editor.draft.clone(),
+                            ) {
                                 Ok(()) => {
                                     let selected_name = editor.draft.name.clone();
                                     panel.editor = None;

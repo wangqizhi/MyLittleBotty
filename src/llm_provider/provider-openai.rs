@@ -1,7 +1,7 @@
 use crate::botty_brain::BrainConfig;
 use crate::llm_provider::{
-    LlmProvider, ProviderMessage, ProviderRequest, ProviderResponse, ProviderTextResponse,
-    ProviderToolDefinition,
+    LlmProvider, ProviderContentPart, ProviderMessage, ProviderRequest, ProviderResponse,
+    ProviderTextResponse, ProviderToolDefinition,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -38,7 +38,7 @@ impl LlmProvider for OpenAiProvider {
         for message in messages {
             serialized_messages.push(json!({
                 "role": openai_role(message),
-                "content": flatten_message_content(message),
+                "content": build_message_content(message),
             }));
         }
 
@@ -160,21 +160,40 @@ fn normalize_endpoint(endpoint: &str) -> String {
 
 fn openai_role(message: &ProviderMessage) -> &'static str {
     match message {
-        ProviderMessage::UserText(_) | ProviderMessage::UserToolResult { .. } => "user",
+        ProviderMessage::UserText(_)
+        | ProviderMessage::User { .. }
+        | ProviderMessage::UserToolResult { .. } => "user",
         ProviderMessage::AssistantToolUse { .. } => "assistant",
     }
 }
 
-fn flatten_message_content(message: &ProviderMessage) -> String {
+fn build_message_content(message: &ProviderMessage) -> Value {
     match message {
-        ProviderMessage::UserText(text) => text.clone(),
+        ProviderMessage::UserText(text) => Value::String(text.clone()),
+        ProviderMessage::User { parts } => Value::Array(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ProviderContentPart::Text(text) => json!({
+                        "type": "text",
+                        "text": text,
+                    }),
+                    ProviderContentPart::ImageBase64 { media_type, data } => json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{media_type};base64,{data}")
+                        },
+                    }),
+                })
+                .collect(),
+        ),
         ProviderMessage::UserToolResult {
             tool_use_id,
             content,
-        } => format!("tool_result {tool_use_id}: {content}"),
+        } => Value::String(format!("tool_result {tool_use_id}: {content}")),
         ProviderMessage::AssistantToolUse {
             assistant_content_json,
-        } => assistant_content_json.clone(),
+        } => Value::String(assistant_content_json.clone()),
     }
 }
 

@@ -325,12 +325,10 @@ fn summarize_debug_error_response(value: &Value) -> Option<String> {
 
     let message = truncate_text(message, CONTENT_PREVIEW_LIMIT * 2);
     match request_id {
-        Some(request_id) if !request_id.trim().is_empty() => {
-            Some(format!(
-                "response error_type={error_type} request_id={} message={message}",
-                request_id.trim()
-            ))
-        }
+        Some(request_id) if !request_id.trim().is_empty() => Some(format!(
+            "response error_type={error_type} request_id={} message={message}",
+            request_id.trim()
+        )),
         _ => Some(format!(
             "response error_type={error_type} message={message}"
         )),

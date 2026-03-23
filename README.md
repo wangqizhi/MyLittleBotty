@@ -2,11 +2,11 @@
 
 [中文说明 / Chinese README](./README_ZN.md)
 
-MyLittleBotty is a local AI assistant that runs as a background service. Its current architecture is built around `Botty-Boss` as the supervisor daemon, `Botty-Guy` as the chat worker, and `Botty-crond` as the reminder and system scheduler. The current implementation focuses on local chat, TUI-based setup, Telegram/Feishu message integration, reminder scheduling, built-in system cron tasks, self-update, and process management.
+MyLittleBotty is a local AI assistant that runs as a background service. Its current architecture is built around `Botty-Boss` as the supervisor daemon, `Botty-Guy` as the chat worker, and `Botty-crond` as the reminder and system scheduler. The current implementation focuses on local chat, TUI-based setup, Telegram/Feishu/Weixin message integration, image-aware chatbot routing, reminder scheduling, built-in system cron tasks, self-update, and process management.
 
 ## Recent Updates
 
-- `2026-03-18`: `/setup` now supports multiple AI provider profiles. AI profiles are managed in an overlay panel with create, edit, activate, and delete actions; deleting the active profile is blocked until another profile is activated.
+- `2026-03-23`: chatbot inbound image support is now implemented for Telegram, Feishu, and Weixin. Botty waits briefly for follow-up text, routes image requests through `vision=true` AI profiles, uses a built-in `image` skill when image and active providers differ, and supports direct multimodal requests when they are the same.
 
 Older release notes are tracked in [doc/release.md](./doc/release.md).
 
@@ -61,6 +61,7 @@ Runtime behavior depends on these config keys:
 - `ai.provider.<profile>.apikey`
 - `ai.provider.<profile>.model`
 - `ai.provider.<profile>.debug`
+- `ai.provider.<profile>.vision`
 
 The loader remains backward-compatible with legacy single-provider keys such as `ai.provider.endpoint`, `ai.provider.apikey`, `ai.provider.model`, and `ai.provider.debug`.
 
@@ -131,24 +132,31 @@ Botty currently exposes seven built-in tools, though role access differs:
 - The first built-in system task is `remember-hourly`, which triggers `/remember` once per hour.
 - Built-in system task execution is logged to `~/.mylittlebotty/log/system-crond.log` and deduplicated across restarts with `~/.mylittlebotty/run/system-crond-state.json`.
 
-### 8. Telegram / Feishu integration
+### 8. Telegram / Feishu / Weixin integration
 
-Two input channels are currently implemented:
+Three input channels are currently implemented:
 
 - Telegram polling and reply
 - Feishu long-connection receive and reply
+- Weixin polling and reply
 
 Support status:
 
-- Telegram is fully supported for polling, reply, whitelist control, and reminder push.
-- Feishu is formally supported for long-connection message receive, in-chat reply, and proactive push to a configured chat.
+- Telegram is supported for polling, reply, whitelist control, reminder push, and inbound image handling.
+- Feishu is supported for long-connection message receive, in-chat reply, proactive push to a configured chat, and inbound image handling.
+- Weixin is supported for polling, in-chat reply with preserved `context_token`, whitelist control, and inbound image handling through the current CDN/AES media flow.
 
 Supported behavior:
 
 - Telegram user whitelist
-- Configurable Telegram / Feishu polling interval
+- Weixin user whitelist
+- Configurable Telegram / Feishu / Weixin polling interval
 - Feishu `chat_id` targeting for proactive push such as reminders
 - Incoming external messages are forwarded to local `Botty-Guy` and replies are sent back to the source chat
+- Telegram / Feishu / Weixin inbound images are downloaded to local temp storage before entering the shared Botty image pipeline
+- If a user sends an image, Botty waits `4` seconds for follow-up text; otherwise it handles the image alone
+- If the active AI profile and image profile differ, Botty first calls the built-in `image` skill with the image-capable provider, then forwards the summarized result to the active provider
+- If the active profile also has `vision=true`, Botty sends the image directly as a multimodal request to the active provider
 
 ### 9. Long-term memory summary
 
@@ -399,16 +407,24 @@ browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
 browser.chrome.max_tabs=10
 work_dir=
 chatbot.provider=telegram
+ai.provider.default.vision=false
 chatbot.telegram.api_base=https://api.telegram.org
 chatbot.telegram.apikey=
 chatbot.feishu.api_base=https://open.feishu.cn/open-apis
 chatbot.feishu.app_id=
 chatbot.feishu.app_secret=
+chatbot.weixin.api_base=https://ilinkai.weixin.qq.com
+chatbot.weixin.cdn_base=https://novac2c.cdn.weixin.qq.com/c2c
+chatbot.weixin.apikey=
 chatbot.telegram.enabled=true
 chatbot.feishu.enabled=false
+chatbot.weixin.enabled=false
 chatbot.telegram.whitelist_user_ids=
+chatbot.weixin.whitelist_user_ids=
 chatbot.telegram.poll_interval_seconds=1
 chatbot.feishu.poll_interval_seconds=1
+chatbot.weixin.poll_interval_seconds=1
+chatbot.weixin.long_poll_timeout_ms=35000
 chatbot.feishu.chat_id=
 ```
 
@@ -419,6 +435,7 @@ Common meanings:
 - `ai.provider.<profile>.apikey`: model API key for a named profile
 - `ai.provider.<profile>.model`: model name for a named profile
 - `ai.provider.<profile>.debug`: enable request/response debug logging for a named profile
+- `ai.provider.<profile>.vision`: whether this profile can be selected for image understanding
 - `agent.provider`: terminal-agent provider used by the `terminal` skill, currently `codex` by default
 - `agent.codex.command`: executable name or path for Codex CLI
 - `agent.claude.command`: executable name or path reserved for a Claude terminal agent
@@ -427,13 +444,19 @@ Common meanings:
 - `browser.chrome.user_data_dir`: optional persistent Chrome user-data directory; relative paths are resolved under `~/.mylittlebotty/`
 - `browser.chrome.max_tabs`: max number of Chrome page tabs to keep when connecting to CDP; if the count exceeds this limit, extra tabs are closed automatically; set `0` to disable the limit
 - `work_dir`: root directory used by the `write` tool; changing it from the TUI migrates existing work dir content
-- `chatbot.provider`: selected chatbot provider, currently `telegram` or `feishu`
+- `chatbot.provider`: enabled chatbot providers, currently `telegram`, `feishu`, and `weixin`
 - `chatbot.telegram.enabled`: enable Telegram input worker
 - `chatbot.telegram.apikey`: Telegram bot token
 - `chatbot.feishu.enabled`: enable Feishu input worker
 - `chatbot.feishu.app_id`: Feishu app ID used to obtain a tenant access token
 - `chatbot.feishu.app_secret`: Feishu app secret used to obtain a tenant access token
+- `chatbot.weixin.enabled`: enable Weixin input worker
+- `chatbot.weixin.api_base`: Weixin bot API base used for `getupdates` and `sendmessage`
+- `chatbot.weixin.cdn_base`: Weixin CDN base used for media upload/download, default `https://novac2c.cdn.weixin.qq.com/c2c`
+- `chatbot.weixin.apikey`: Weixin `bot_token`
 - `chatbot.telegram.whitelist_user_ids`: comma-separated Telegram user IDs allowed to access the bot
+- `chatbot.weixin.whitelist_user_ids`: comma-separated Weixin user IDs allowed to access the bot
+- `chatbot.weixin.long_poll_timeout_ms`: Weixin long-poll timeout for `getupdates`
 - `chatbot.feishu.chat_id`: target Feishu chat ID for proactive push such as reminders
 
 Notes:
@@ -442,6 +465,8 @@ Notes:
 - You cannot delete the currently active AI profile; activate another one first.
 - The config loader is backward-compatible with legacy single-provider `ai.provider.*` keys.
 - For GLM Claude-compatible access, use `https://open.bigmodel.cn/api/anthropic` with a model such as `glm-4.7`.
+- If no `vision=true` profile exists, chatbot image requests return `暂不支持图像识别，请配置支持图像的 provider。`
+- For private/local HTTP model endpoints such as `localhost`, `127.0.0.1`, `10.x`, `192.168.x`, or `172.16-31.x`, Botty does not force a non-empty API key.
 
 Saving from the TUI automatically triggers a service restart.
 
@@ -486,6 +511,7 @@ These flags are mainly used by the supervisor and are not intended for normal ma
 | `--crond` | Start the `Botty-crond` scheduler | Internal process |
 | `--input-telegram` | Start the Telegram polling worker | Internal process |
 | `--input-feishu` | Start the Feishu polling worker | Internal process |
+| `--input-weixin` | Start the Weixin polling worker | Internal process |
 
 ## Runtime Paths and Data Files
 
@@ -519,4 +545,4 @@ Built-in system-crond implementation notes are documented in `doc/system-crond.m
 2. Run `mylittlebotty`.
 3. Run `mylittlebotty tui`.
 4. Open `/setup` in the TUI and finish provider/channel configuration.
-5. Save the config and continue using the TUI, Telegram, or Feishu.
+5. Save the config and continue using the TUI, Telegram, Feishu, or Weixin.

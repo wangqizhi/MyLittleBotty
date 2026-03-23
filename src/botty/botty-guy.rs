@@ -5,9 +5,11 @@ use crate::infra::chatbot_feishu::{
 };
 use crate::infra::chatbot_telegram::{TelegramClient, DEFAULT_API_BASE as TELEGRAM_API_BASE};
 use crate::infra::chatbot_weixin::{
-    WeixinClient, DEFAULT_API_BASE as WEIXIN_API_BASE, SESSION_EXPIRED_ERRCODE,
+    WeixinClient, DEFAULT_API_BASE as WEIXIN_API_BASE, DEFAULT_CDN_BASE as WEIXIN_CDN_BASE,
+    SESSION_EXPIRED_ERRCODE,
 };
 use crate::prompt;
+use serde::Serialize;
 use serde_json::{self, json, Value};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,7 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) const BOTTY_GUY_ROLE_ENV: &str = "BOTTY_GUY_ROLE";
 const BOTTY_GUY_DEFAULT_ROLE: &str = "leader";
@@ -37,6 +39,8 @@ const CHAT_MEMORY_MAX_BYTES: u64 = 200 * 1024;
 const CHAT_META_PREFIX: &str = "__botty_meta__";
 const CONTROL_PREFIX: &str = "__botty_control__";
 const ATTACHMENT_PREFIX: &str = "__botty_attachment__";
+const IMAGE_REQUEST_PREFIX: &str = "__botty_image_request__";
+const IMAGE_WAIT_WINDOW_SECONDS: u64 = 4;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BottyGuyRoleSpec {
@@ -454,6 +458,7 @@ pub fn run_weixin_input() {
     let mut plugin = WeixinProviderPlugin::new(
         config.weixin_apikey,
         config.weixin_api_base,
+        config.weixin_cdn_base,
         interval,
         config.weixin_whitelist_user_ids,
         config.weixin_long_poll_timeout_ms,
@@ -467,6 +472,14 @@ struct InboundMessage {
     target: String,
     user_id: String,
     text: String,
+    images: Vec<InboundImage>,
+}
+
+#[derive(Clone, Serialize)]
+struct InboundImage {
+    kind: String,
+    local_path: Option<String>,
+    mime_type: Option<String>,
 }
 
 struct PendingLeaderReply {
@@ -474,6 +487,15 @@ struct PendingLeaderReply {
     user_id: String,
     job_message_id: String,
     notice_sent: bool,
+}
+
+struct PendingInboundImage {
+    target: String,
+    user_id: String,
+    source: String,
+    text: String,
+    images: Vec<InboundImage>,
+    received_at: Instant,
 }
 
 trait ChatbotProviderPlugin {
@@ -500,10 +522,18 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
     let mut seen = HashSet::new();
     let mut seen_order = VecDeque::new();
     let mut pending_replies = Vec::new();
+    let mut pending_images: HashMap<String, PendingInboundImage> = HashMap::new();
     let mut initialized = false;
 
     loop {
         flush_pending_leader_replies(plugin, &mut pending_replies, &mut seen, &mut seen_order);
+        flush_pending_inbound_images(
+            plugin,
+            &mut pending_images,
+            &mut pending_replies,
+            &mut seen,
+            &mut seen_order,
+        );
 
         let messages = match plugin.fetch_messages() {
             Ok(messages) => messages,
@@ -550,43 +580,61 @@ fn run_input_provider_loop(plugin: &mut impl ChatbotProviderPlugin) {
             }
 
             let normalized = normalize_line_message(&message.text);
-            if normalized.is_empty() {
+            if normalized.is_empty() && message.images.is_empty() {
                 continue;
             }
-            let prefixed = format!("{}: {normalized}", plugin.provider_name());
 
-            let job_message_id = match enqueue_leader_guy(
+            let pending_key = format!(
+                "{}|{}|{}",
                 plugin.provider_name(),
-                user_id,
-                &message.target,
-                &prefixed,
-            ) {
-                Ok(job_message_id) => job_message_id,
-                Err(err) => {
-                    eprintln!("{} enqueue leader failed: {err}", plugin.provider_name());
-                    let reply = err.to_string();
-                    let _ =
-                        persist_chat_message("assistant", plugin.provider_name(), user_id, &reply);
-                    if !reply.trim().is_empty() {
-                        match plugin.send_reply(&message.target, &reply) {
-                            Ok(Some(sent_id)) => {
-                                let _ = remember_message_id(&mut seen, &mut seen_order, &sent_id);
-                            }
-                            Ok(None) => {}
-                            Err(err) => {
-                                eprintln!("{} send message failed: {err}", plugin.provider_name())
-                            }
-                        }
+                message.target,
+                plugin.user_id(&message)
+            );
+            if message.images.is_empty() {
+                if let Some(mut pending) = pending_images.remove(&pending_key) {
+                    pending.text = normalized.clone();
+                    if enqueue_inbound_request(
+                        plugin,
+                        &message.target,
+                        plugin.user_id(&message),
+                        pending.source.as_str(),
+                        pending.text.as_str(),
+                        pending.images,
+                        &mut pending_replies,
+                        &mut seen,
+                        &mut seen_order,
+                    ) {
+                        continue;
                     }
-                    continue;
                 }
-            };
-            pending_replies.push(PendingLeaderReply {
-                target: message.target.clone(),
-                user_id: user_id.to_string(),
-                job_message_id,
-                notice_sent: false,
-            });
+            } else if normalized.is_empty() {
+                pending_images.insert(
+                    pending_key,
+                    PendingInboundImage {
+                        target: message.target.clone(),
+                        user_id: plugin.user_id(&message).to_string(),
+                        source: plugin.provider_name().to_string(),
+                        text: String::new(),
+                        images: message.images.clone(),
+                        received_at: Instant::now(),
+                    },
+                );
+                continue;
+            }
+
+            if enqueue_inbound_request(
+                plugin,
+                &message.target,
+                user_id,
+                plugin.provider_name(),
+                &normalized,
+                message.images.clone(),
+                &mut pending_replies,
+                &mut seen,
+                &mut seen_order,
+            ) {
+                continue;
+            }
         }
 
         flush_pending_leader_replies(plugin, &mut pending_replies, &mut seen, &mut seen_order);
@@ -669,6 +717,79 @@ fn flush_pending_leader_replies(
             Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
         }
     }
+}
+
+fn flush_pending_inbound_images(
+    plugin: &mut impl ChatbotProviderPlugin,
+    pending_images: &mut HashMap<String, PendingInboundImage>,
+    pending_replies: &mut Vec<PendingLeaderReply>,
+    seen: &mut HashSet<String>,
+    seen_order: &mut VecDeque<String>,
+) {
+    let now = Instant::now();
+    let mut ready_keys = Vec::new();
+    for (key, pending) in pending_images.iter() {
+        if now.duration_since(pending.received_at) >= Duration::from_secs(IMAGE_WAIT_WINDOW_SECONDS)
+        {
+            ready_keys.push(key.clone());
+        }
+    }
+
+    for key in ready_keys {
+        let Some(pending) = pending_images.remove(&key) else {
+            continue;
+        };
+        let _ = enqueue_inbound_request(
+            plugin,
+            &pending.target,
+            &pending.user_id,
+            &pending.source,
+            pending.text.as_str(),
+            pending.images,
+            pending_replies,
+            seen,
+            seen_order,
+        );
+    }
+}
+
+fn enqueue_inbound_request(
+    plugin: &mut impl ChatbotProviderPlugin,
+    target: &str,
+    user_id: &str,
+    source: &str,
+    text: &str,
+    images: Vec<InboundImage>,
+    pending_replies: &mut Vec<PendingLeaderReply>,
+    seen: &mut HashSet<String>,
+    seen_order: &mut VecDeque<String>,
+) -> bool {
+    let message = encode_inbound_request(source, text, &images);
+    let job_message_id = match enqueue_leader_guy(source, user_id, target, &message) {
+        Ok(job_message_id) => job_message_id,
+        Err(err) => {
+            eprintln!("{} enqueue leader failed: {err}", plugin.provider_name());
+            let reply = err.to_string();
+            let _ = persist_chat_message("assistant", plugin.provider_name(), user_id, &reply);
+            if !reply.trim().is_empty() {
+                match plugin.send_reply(target, &reply) {
+                    Ok(Some(sent_id)) => {
+                        let _ = remember_message_id(seen, seen_order, &sent_id);
+                    }
+                    Ok(None) => {}
+                    Err(err) => eprintln!("{} send message failed: {err}", plugin.provider_name()),
+                }
+            }
+            return true;
+        }
+    };
+    pending_replies.push(PendingLeaderReply {
+        target: target.to_string(),
+        user_id: user_id.to_string(),
+        job_message_id,
+        notice_sent: false,
+    });
+    true
 }
 
 fn try_load_leader_job_notice(message_id: &str) -> io::Result<Option<String>> {
@@ -780,6 +901,15 @@ impl ChatbotProviderPlugin for TelegramProviderPlugin {
                 target: update.chat_id.to_string(),
                 user_id: update.user_id.to_string(),
                 text: update.text,
+                images: update
+                    .images
+                    .into_iter()
+                    .map(|image| InboundImage {
+                        kind: "photo".to_string(),
+                        local_path: Some(image.local_path),
+                        mime_type: image.mime_type,
+                    })
+                    .collect(),
             });
         }
         Ok(messages)
@@ -846,11 +976,28 @@ impl ChatbotProviderPlugin for FeishuProviderPlugin {
         let Some(message) = self.events.poll_message()? else {
             return Ok(Vec::new());
         };
+        let mut images = Vec::new();
+        for image_key in &message.image_keys {
+            match self
+                .client
+                .download_message_image(&message.message_id, image_key)
+            {
+                Ok(image) => images.push(InboundImage {
+                    kind: "photo".to_string(),
+                    local_path: Some(image.local_path),
+                    mime_type: image.mime_type,
+                }),
+                Err(err) => {
+                    eprintln!("feishu download image failed: {err}");
+                }
+            }
+        }
         Ok(vec![InboundMessage {
             message_id: message.message_id,
             target: message.chat_id,
             user_id: message.user_id,
             text: message.text,
+            images,
         }])
     }
 
@@ -882,6 +1029,7 @@ impl WeixinProviderPlugin {
     fn new(
         apikey: String,
         api_base: String,
+        cdn_base: String,
         poll_interval: Duration,
         whitelist_user_ids: HashSet<String>,
         long_poll_timeout_ms: u64,
@@ -889,7 +1037,7 @@ impl WeixinProviderPlugin {
     ) -> Self {
         let get_updates_buf = load_weixin_sync_buf(&sync_file).unwrap_or_default();
         Self {
-            client: WeixinClient::new(api_base, apikey),
+            client: WeixinClient::new(api_base, cdn_base, apikey),
             poll_interval,
             whitelist_user_ids,
             context_tokens: HashMap::new(),
@@ -932,6 +1080,15 @@ impl ChatbotProviderPlugin for WeixinProviderPlugin {
                         target: message.user_id.clone(),
                         user_id: message.user_id,
                         text: message.text,
+                        images: message
+                            .images
+                            .into_iter()
+                            .map(|image| InboundImage {
+                                kind: "photo".to_string(),
+                                local_path: Some(image.local_path),
+                                mime_type: image.mime_type,
+                            })
+                            .collect(),
                     });
                 }
                 Ok(messages)
@@ -973,7 +1130,8 @@ impl ChatbotProviderPlugin for WeixinProviderPlugin {
                 format!("weixin context_token missing for target {target}"),
             )
         })?;
-        self.client.send_message(target, &clean_text, &context_token)?;
+        self.client
+            .send_message(target, &clean_text, &context_token)?;
         Ok(None)
     }
 }
@@ -1025,6 +1183,7 @@ struct ChatbotConfig {
     weixin_enabled: bool,
     weixin_apikey: String,
     weixin_api_base: String,
+    weixin_cdn_base: String,
     weixin_account_id: String,
     weixin_user_id: String,
     weixin_poll_interval_seconds: u64,
@@ -1050,6 +1209,7 @@ impl Default for ChatbotConfig {
             weixin_enabled: false,
             weixin_apikey: String::new(),
             weixin_api_base: WEIXIN_API_BASE.to_string(),
+            weixin_cdn_base: WEIXIN_CDN_BASE.to_string(),
             weixin_account_id: String::new(),
             weixin_user_id: String::new(),
             weixin_poll_interval_seconds: WEIXIN_POLL_INTERVAL_SECONDS_DEFAULT,
@@ -1125,6 +1285,7 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
             "chatbot.weixin.enabled" => config.weixin_enabled = parse_bool(value),
             "chatbot.weixin.apikey" => config.weixin_apikey = value.to_string(),
             "chatbot.weixin.api_base" => config.weixin_api_base = value.to_string(),
+            "chatbot.weixin.cdn_base" => config.weixin_cdn_base = value.to_string(),
             "chatbot.weixin.account_id" => config.weixin_account_id = value.to_string(),
             "chatbot.weixin.user_id" => config.weixin_user_id = value.to_string(),
             "chatbot.weixin.whitelist_user_ids" => {
@@ -1281,6 +1442,20 @@ fn normalize_line_message(message: &str) -> String {
         .to_string()
 }
 
+fn encode_inbound_request(source: &str, text: &str, images: &[InboundImage]) -> String {
+    if images.is_empty() {
+        return format!("{source}: {text}");
+    }
+
+    let payload = json!({
+        "source": source,
+        "user_text": text,
+        "images": images,
+    })
+    .to_string();
+    format!("{IMAGE_REQUEST_PREFIX}{payload}")
+}
+
 fn remember_message_id(
     seen: &mut HashSet<String>,
     seen_order: &mut VecDeque<String>,
@@ -1353,7 +1528,10 @@ fn save_weixin_sync_buf(path: &PathBuf, get_updates_buf: &str) -> io::Result<()>
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, json!({ "get_updates_buf": get_updates_buf }).to_string())
+    fs::write(
+        path,
+        json!({ "get_updates_buf": get_updates_buf }).to_string(),
+    )
 }
 
 fn sanitize_filename_component(value: &str) -> String {

@@ -110,7 +110,8 @@ impl SetupFieldId {
     pub fn is_toggle(self) -> bool {
         matches!(
             self,
-            SetupFieldId::TelegramEnabled | SetupFieldId::BrowserChromeHeadless
+            SetupFieldId::TelegramEnabled
+                | SetupFieldId::BrowserChromeHeadless
                 | SetupFieldId::FeishuEnabled
         )
     }
@@ -130,6 +131,7 @@ pub struct AiProviderProfile {
     pub apikey: String,
     pub model: String,
     pub debug: bool,
+    pub vision: bool,
 }
 
 impl Default for AiProviderProfile {
@@ -140,6 +142,7 @@ impl Default for AiProviderProfile {
             apikey: String::new(),
             model: String::new(),
             debug: false,
+            vision: false,
         }
     }
 }
@@ -178,6 +181,7 @@ pub struct SetupConfig {
     pub chatbot_feishu_chat_id: String,
     pub chatbot_weixin_enabled: bool,
     pub chatbot_weixin_api_base: String,
+    pub chatbot_weixin_cdn_base: String,
     pub chatbot_weixin_apikey: String,
     pub chatbot_weixin_account_id: String,
     pub chatbot_weixin_user_id: String,
@@ -214,6 +218,7 @@ impl Default for SetupConfig {
             chatbot_feishu_chat_id: String::new(),
             chatbot_weixin_enabled: false,
             chatbot_weixin_api_base: "https://ilinkai.weixin.qq.com".to_string(),
+            chatbot_weixin_cdn_base: "https://novac2c.cdn.weixin.qq.com/c2c".to_string(),
             chatbot_weixin_apikey: String::new(),
             chatbot_weixin_account_id: String::new(),
             chatbot_weixin_user_id: String::new(),
@@ -389,6 +394,18 @@ impl SetupConfig {
         &self.ai_provider_profiles[index.min(self.ai_provider_profiles.len().saturating_sub(1))]
     }
 
+    pub fn image_ai_profile_name(&self) -> Option<&str> {
+        let active = self.active_ai_profile();
+        if active.vision {
+            return Some(active.name.as_str());
+        }
+
+        self.ai_provider_profiles
+            .iter()
+            .find(|profile| profile.vision)
+            .map(|profile| profile.name.as_str())
+    }
+
     pub fn ai_profile_summary(&self) -> String {
         format!(
             "active: {} ({} profiles)",
@@ -410,9 +427,11 @@ impl SetupConfig {
     ) -> io::Result<()> {
         profile.name = profile.name.trim().to_string();
         validate_ai_profile_name(profile.name.as_str())?;
-        if self.ai_provider_profiles.iter().any(|saved| {
-            saved.name == profile.name && Some(saved.name.as_str()) != original_name
-        }) {
+        if self
+            .ai_provider_profiles
+            .iter()
+            .any(|saved| saved.name == profile.name && Some(saved.name.as_str()) != original_name)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("AI profile '{}' already exists", profile.name),
@@ -806,6 +825,7 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "chatbot.feishu.app_secret" => config.chatbot_feishu_app_secret = value.to_string(),
             "chatbot.feishu.apikey" => config.chatbot_feishu_access_token = value.to_string(),
             "chatbot.weixin.api_base" => config.chatbot_weixin_api_base = value.to_string(),
+            "chatbot.weixin.cdn_base" => config.chatbot_weixin_cdn_base = value.to_string(),
             "chatbot.weixin.apikey" => config.chatbot_weixin_apikey = value.to_string(),
             "chatbot.weixin.account_id" => config.chatbot_weixin_account_id = value.to_string(),
             "chatbot.weixin.user_id" => config.chatbot_weixin_user_id = value.to_string(),
@@ -864,14 +884,20 @@ fn load_setup_config() -> io::Result<SetupConfig> {
                 legacy_profile.debug = parse_bool(value);
                 saw_legacy_ai_profile = true;
             }
+            "ai.provider.vision" | "provider.vision" => {
+                legacy_profile.vision = parse_bool(value);
+                saw_legacy_ai_profile = true;
+            }
             other => {
                 if let Some((profile_name, field_name)) = parse_ai_profile_key(other) {
-                    let profile = ensure_ai_profile_slot(&mut config.ai_provider_profiles, profile_name);
+                    let profile =
+                        ensure_ai_profile_slot(&mut config.ai_provider_profiles, profile_name);
                     match field_name {
                         "endpoint" => profile.endpoint = value.to_string(),
                         "apikey" => profile.apikey = value.to_string(),
                         "model" => profile.model = value.to_string(),
                         "debug" => profile.debug = parse_bool(value),
+                        "vision" => profile.vision = parse_bool(value),
                         _ => {}
                     }
                 }
@@ -883,7 +909,9 @@ fn load_setup_config() -> io::Result<SetupConfig> {
         config.ai_provider_profiles.push(legacy_profile);
     }
     if config.ai_provider_profiles.is_empty() {
-        config.ai_provider_profiles.push(AiProviderProfile::default());
+        config
+            .ai_provider_profiles
+            .push(AiProviderProfile::default());
     }
     config
         .ai_provider_profiles
@@ -908,7 +936,7 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nbrowser.chrome.max_tabs={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.weixin.api_base={}\nchatbot.weixin.apikey={}\nchatbot.weixin.account_id={}\nchatbot.weixin.user_id={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.weixin.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.weixin.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.weixin.poll_interval_seconds={}\nchatbot.weixin.long_poll_timeout_ms={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nbrowser.chrome.max_tabs={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.weixin.api_base={}\nchatbot.weixin.cdn_base={}\nchatbot.weixin.apikey={}\nchatbot.weixin.account_id={}\nchatbot.weixin.user_id={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.weixin.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.weixin.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.weixin.poll_interval_seconds={}\nchatbot.weixin.long_poll_timeout_ms={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_active,
         serialize_ai_profiles(&config.ai_provider_profiles),
         config.agent_provider,
@@ -926,6 +954,7 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
         config.chatbot_feishu_app_secret,
         config.chatbot_feishu_access_token,
         config.chatbot_weixin_api_base,
+        config.chatbot_weixin_cdn_base,
         config.chatbot_weixin_apikey,
         config.chatbot_weixin_account_id,
         config.chatbot_weixin_user_id,
@@ -1070,7 +1099,10 @@ fn ensure_ai_profile_slot<'a>(
     profiles: &'a mut Vec<AiProviderProfile>,
     profile_name: &str,
 ) -> &'a mut AiProviderProfile {
-    if let Some(index) = profiles.iter().position(|profile| profile.name == profile_name) {
+    if let Some(index) = profiles
+        .iter()
+        .position(|profile| profile.name == profile_name)
+    {
         return &mut profiles[index];
     }
 
@@ -1086,8 +1118,17 @@ fn serialize_ai_profiles(profiles: &[AiProviderProfile]) -> String {
     let mut lines = String::new();
     for profile in profiles {
         lines.push_str(&format!(
-            "ai.provider.{}.endpoint={}\nai.provider.{}.apikey={}\nai.provider.{}.model={}\nai.provider.{}.debug={}\n",
-            profile.name, profile.endpoint, profile.name, profile.apikey, profile.name, profile.model, profile.name, profile.debug
+            "ai.provider.{}.endpoint={}\nai.provider.{}.apikey={}\nai.provider.{}.model={}\nai.provider.{}.debug={}\nai.provider.{}.vision={}\n",
+            profile.name,
+            profile.endpoint,
+            profile.name,
+            profile.apikey,
+            profile.name,
+            profile.model,
+            profile.name,
+            profile.debug,
+            profile.name,
+            profile.vision
         ));
     }
     lines

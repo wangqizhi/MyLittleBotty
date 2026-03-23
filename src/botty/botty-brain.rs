@@ -23,20 +23,25 @@ use crate::llm_provider::{
 const AI_PROVIDER_REQUEST_MAX_RETRIES: usize = 3;
 const AI_PROVIDER_RETRY_ON_HTTP_400: bool = true;
 
+#[derive(Clone)]
 pub struct BrainConfig {
+    pub profile_name: String,
     pub endpoint: String,
     pub apikey: String,
     pub model: String,
     pub debug_enabled: bool,
+    pub vision_enabled: bool,
 }
 
 impl Default for BrainConfig {
     fn default() -> Self {
         Self {
+            profile_name: String::new(),
             endpoint: String::new(),
             apikey: String::new(),
             model: String::new(),
             debug_enabled: false,
+            vision_enabled: false,
         }
     }
 }
@@ -54,7 +59,18 @@ pub struct BottyBrain {
 impl BottyBrain {
     pub fn from_setup() -> io::Result<Self> {
         Ok(Self {
-            config: load_brain_config()?,
+            config: load_active_brain_config()?,
+        })
+    }
+
+    pub fn from_image_setup() -> io::Result<Self> {
+        Ok(Self {
+            config: load_image_brain_config()?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "暂不支持图像识别，请配置支持图像的 provider。",
+                )
+            })?,
         })
     }
 
@@ -70,7 +86,8 @@ impl BottyBrain {
                 "AI provider endpoint is not configured. Please update your setup.",
             ));
         }
-        if self.config.apikey.is_empty() {
+        if self.config.apikey.is_empty() && endpoint_requires_apikey(self.config.endpoint.as_str())
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "AI provider API key is not configured. Please update your setup.",
@@ -126,10 +143,7 @@ impl BottyBrain {
                         .map(str::to_string)
                         .or_else(|| extract_trace_id_from_body(&response_body))
                         .unwrap_or_else(|| "None".to_string());
-                    self.log_debug(
-                        "response-trace_id",
-                        &format!("trace_id={trace_id}"),
-                    )?;
+                    self.log_debug("response-trace_id", &format!("trace_id={trace_id}"))?;
 
                     if !response_body.is_empty() {
                         self.log_debug("response", &response_body)?;
@@ -142,8 +156,10 @@ impl BottyBrain {
                         return Ok(response_body);
                     }
 
-                    let retryable =
-                        should_retry_provider_error(response_error.as_str(), response_body.as_str());
+                    let retryable = should_retry_provider_error(
+                        response_error.as_str(),
+                        response_body.as_str(),
+                    );
                     last_error = Some(io::Error::other(classify_provider_error(
                         response_error.as_str(),
                         response_body.as_str(),
@@ -188,6 +204,18 @@ impl BottyBrain {
     }
 }
 
+pub fn active_and_image_providers_differ() -> io::Result<bool> {
+    let selection = load_brain_profile_selection()?;
+    let Some(image) = selection.image else {
+        return Ok(false);
+    };
+    Ok(selection.active.profile_name != image.profile_name)
+}
+
+pub fn active_supports_vision() -> io::Result<bool> {
+    Ok(load_brain_profile_selection()?.active.vision_enabled)
+}
+
 pub fn is_llm_connection_error(err: &io::Error) -> bool {
     is_llm_connection_error_message(&err.to_string())
 }
@@ -197,22 +225,40 @@ pub fn log_debug_line_if_enabled(
     content: &str,
     user_id_override: Option<&str>,
 ) -> io::Result<()> {
-    if !load_brain_config()?.debug_enabled {
+    if !load_active_brain_config()?.debug_enabled {
         return Ok(());
     }
 
     append_debug_log_line(direction, content, user_id_override)
 }
 
-fn load_brain_config() -> io::Result<BrainConfig> {
+struct BrainProfileSelection {
+    active: BrainConfig,
+    image: Option<BrainConfig>,
+}
+
+fn load_active_brain_config() -> io::Result<BrainConfig> {
+    Ok(load_brain_profile_selection()?.active)
+}
+
+fn load_image_brain_config() -> io::Result<Option<BrainConfig>> {
+    Ok(load_brain_profile_selection()?.image)
+}
+
+fn load_brain_profile_selection() -> io::Result<BrainProfileSelection> {
     let path = setup_config_file();
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(BrainConfig::default()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(BrainProfileSelection {
+                active: BrainConfig::default(),
+                image: None,
+            });
+        }
         Err(err) => return Err(err),
     };
 
-    let mut config = BrainConfig::default();
+    let mut legacy = BrainConfig::default();
     let mut active_profile = String::new();
     let mut profiles: Vec<(String, BrainConfig)> = Vec::new();
     for line in content.lines() {
@@ -227,19 +273,24 @@ fn load_brain_config() -> io::Result<BrainConfig> {
         match key.trim() {
             "ai.provider.active" => active_profile = value.trim().to_string(),
             "ai.provider.endpoint" | "provider.endpoint" => {
-                config.endpoint = value.trim().to_string()
+                legacy.endpoint = value.trim().to_string()
             }
-            "ai.provider.apikey" | "provider.apikey" => config.apikey = value.trim().to_string(),
-            "ai.provider.model" | "provider.model" => config.model = value.trim().to_string(),
-            "ai.provider.debug" | "provider.debug" => config.debug_enabled = parse_bool(value),
+            "ai.provider.apikey" | "provider.apikey" => legacy.apikey = value.trim().to_string(),
+            "ai.provider.model" | "provider.model" => legacy.model = value.trim().to_string(),
+            "ai.provider.debug" | "provider.debug" => legacy.debug_enabled = parse_bool(value),
+            "ai.provider.vision" | "provider.vision" => legacy.vision_enabled = parse_bool(value),
             other => {
                 if let Some((profile_name, field_name)) = parse_ai_profile_key(other) {
                     let profile = ensure_brain_profile_slot(&mut profiles, profile_name);
+                    if profile.profile_name.is_empty() {
+                        profile.profile_name = profile_name.to_string();
+                    }
                     match field_name {
                         "endpoint" => profile.endpoint = value.trim().to_string(),
                         "apikey" => profile.apikey = value.trim().to_string(),
                         "model" => profile.model = value.trim().to_string(),
                         "debug" => profile.debug_enabled = parse_bool(value),
+                        "vision" => profile.vision_enabled = parse_bool(value),
                         _ => {}
                     }
                 }
@@ -247,16 +298,40 @@ fn load_brain_config() -> io::Result<BrainConfig> {
         }
     }
 
-    if !profiles.is_empty() {
-        if active_profile.trim().is_empty() {
-            return Ok(profiles.remove(0).1);
-        }
-        if let Some((_, active)) = profiles.into_iter().find(|(name, _)| name == &active_profile) {
-            return Ok(active);
-        }
+    if profiles.is_empty() {
+        return Ok(BrainProfileSelection {
+            active: legacy.clone(),
+            image: if legacy.vision_enabled {
+                Some(legacy)
+            } else {
+                None
+            },
+        });
     }
 
-    Ok(config)
+    let active = if active_profile.trim().is_empty() {
+        profiles
+            .first()
+            .map(|(_, profile)| profile.clone())
+            .unwrap_or_default()
+    } else {
+        profiles
+            .iter()
+            .find(|(name, _)| name == &active_profile)
+            .map(|(_, profile)| profile.clone())
+            .or_else(|| profiles.first().map(|(_, profile)| profile.clone()))
+            .unwrap_or_default()
+    };
+    let image = if active.vision_enabled {
+        Some(active.clone())
+    } else {
+        profiles
+            .iter()
+            .find(|(_, profile)| profile.vision_enabled)
+            .map(|(_, profile)| profile.clone())
+    };
+
+    Ok(BrainProfileSelection { active, image })
 }
 
 fn parse_ai_profile_key(key: &str) -> Option<(&str, &str)> {
@@ -282,6 +357,38 @@ fn ensure_brain_profile_slot<'a>(
 
 fn parse_bool(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "yes" | "on")
+}
+
+fn endpoint_requires_apikey(endpoint: &str) -> bool {
+    let trimmed = endpoint.trim().to_ascii_lowercase();
+    if trimmed.starts_with("http://localhost")
+        || trimmed.starts_with("http://127.0.0.1")
+        || trimmed.starts_with("http://[::1]")
+    {
+        return false;
+    }
+    if trimmed.starts_with("http://10.")
+        || trimmed.starts_with("http://192.168.")
+        || trimmed.starts_with("http://172.16.")
+        || trimmed.starts_with("http://172.17.")
+        || trimmed.starts_with("http://172.18.")
+        || trimmed.starts_with("http://172.19.")
+        || trimmed.starts_with("http://172.20.")
+        || trimmed.starts_with("http://172.21.")
+        || trimmed.starts_with("http://172.22.")
+        || trimmed.starts_with("http://172.23.")
+        || trimmed.starts_with("http://172.24.")
+        || trimmed.starts_with("http://172.25.")
+        || trimmed.starts_with("http://172.26.")
+        || trimmed.starts_with("http://172.27.")
+        || trimmed.starts_with("http://172.28.")
+        || trimmed.starts_with("http://172.29.")
+        || trimmed.starts_with("http://172.30.")
+        || trimmed.starts_with("http://172.31.")
+    {
+        return false;
+    }
+    true
 }
 
 fn append_debug_log_line(
@@ -330,7 +437,10 @@ fn debug_log_path() -> PathBuf {
 }
 
 fn temp_provider_header_path() -> PathBuf {
-    env::temp_dir().join(format!("mylittlebotty-provider-headers-{}.tmp", process::id()))
+    env::temp_dir().join(format!(
+        "mylittlebotty-provider-headers-{}.tmp",
+        process::id()
+    ))
 }
 
 fn read_provider_header_file(path: &PathBuf) -> Option<String> {
@@ -485,7 +595,11 @@ fn extract_provider_error_message(response_body: &str) -> Option<String> {
     let payload: Value = serde_json::from_str(response_body).ok()?;
     let error = payload.get("error")?;
     let error_type = error.get("type").and_then(Value::as_str).unwrap_or("error");
-    let message = error.get("message").and_then(Value::as_str).unwrap_or("").trim();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     let request_id = payload
         .get("request_id")
         .and_then(Value::as_str)
@@ -496,9 +610,10 @@ fn extract_provider_error_message(response_body: &str) -> Option<String> {
     }
 
     match request_id {
-        Some(id) if !id.trim().is_empty() => {
-            Some(format!("{error_type}: {message} (request_id={})", id.trim()))
-        }
+        Some(id) if !id.trim().is_empty() => Some(format!(
+            "{error_type}: {message} (request_id={})",
+            id.trim()
+        )),
         _ => Some(format!("{error_type}: {message}")),
     }
 }

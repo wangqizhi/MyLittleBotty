@@ -338,7 +338,13 @@ fn handle_panel_key<R: FrontendRpc>(
                 }
             }
             KeyCode::Up => {
-                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                if matches!(
+                    overlay,
+                    Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
                     app.setup_ai_profile_editor_prev_field();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_prev();
@@ -347,7 +353,13 @@ fn handle_panel_key<R: FrontendRpc>(
                 }
             }
             KeyCode::Down | KeyCode::Tab => {
-                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                if matches!(
+                    overlay,
+                    Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
                     app.setup_ai_profile_editor_next_field();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_next();
@@ -356,7 +368,13 @@ fn handle_panel_key<R: FrontendRpc>(
                 }
             }
             KeyCode::BackTab => {
-                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                if matches!(
+                    overlay,
+                    Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
                     app.setup_ai_profile_editor_prev_field();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_prev();
@@ -375,7 +393,13 @@ fn handle_panel_key<R: FrontendRpc>(
                 }
             }
             KeyCode::Enter => {
-                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                if matches!(
+                    overlay,
+                    Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
                     app.setup_ai_profile_editor_activate();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_edit_selected();
@@ -384,7 +408,13 @@ fn handle_panel_key<R: FrontendRpc>(
                 }
             }
             KeyCode::Char(' ') => {
-                if matches!(overlay, Some(SetupOverlay::AiProfiles(SetupProfilePanel { editor: Some(_), .. }))) {
+                if matches!(
+                    overlay,
+                    Some(SetupOverlay::AiProfiles(SetupProfilePanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
                     app.setup_ai_profile_editor_toggle_selected();
                 } else {
                     app.setup_toggle_selected();
@@ -713,12 +743,17 @@ fn render_ai_profiles_panel(frame: &mut Frame, panel: &SetupProfilePanel, config
         .split(inner);
 
     let mut items = Vec::new();
+    let image_profile_name = config.image_ai_profile_name();
     for (idx, profile) in config.ai_provider_profiles.iter().enumerate() {
-        let suffix = if profile.name == config.ai_provider_active {
-            " [active]"
-        } else {
-            ""
-        };
+        let mut suffix = String::new();
+        if profile.name == config.ai_provider_active {
+            suffix.push_str(" [active]");
+            if image_profile_name == Some(profile.name.as_str()) {
+                suffix.push_str("[img]");
+            }
+        } else if image_profile_name == Some(profile.name.as_str()) {
+            suffix.push_str(" [img]");
+        }
         let style = if idx == panel.selected_profile {
             Style::default()
                 .fg(Color::Black)
@@ -731,16 +766,16 @@ fn render_ai_profiles_panel(frame: &mut Frame, panel: &SetupProfilePanel, config
     }
 
     let new_index = config.ai_provider_profiles.len();
-    items.push(
-        ListItem::new(Line::raw("+ New profile")).style(if panel.selected_profile == new_index {
+    items.push(ListItem::new(Line::raw("+ New profile")).style(
+        if panel.selected_profile == new_index {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-        }),
-    );
+        },
+    ));
 
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title("Profiles")),
@@ -756,7 +791,19 @@ fn render_ai_profiles_panel(frame: &mut Frame, panel: &SetupProfilePanel, config
             Line::raw(format!("model: {}", profile.model)),
             Line::raw(format!(
                 "debug: {}",
-                if profile.debug { "[x] true" } else { "[ ] false" }
+                if profile.debug {
+                    "[x] true"
+                } else {
+                    "[ ] false"
+                }
+            )),
+            Line::raw(format!(
+                "image support: {}",
+                if profile.vision {
+                    "[x] true"
+                } else {
+                    "[ ] false"
+                }
             )),
             Line::raw(""),
             Line::raw("Deleting the active profile is blocked."),
@@ -772,6 +819,7 @@ fn render_ai_profiles_panel(frame: &mut Frame, panel: &SetupProfilePanel, config
             Line::raw("- apikey"),
             Line::raw("- model"),
             Line::raw("- debug"),
+            Line::raw("- image support"),
         ]
     };
     frame.render_widget(
@@ -797,10 +845,7 @@ fn render_ai_profile_editor(frame: &mut Frame, editor: &SetupProfileEditor) {
     } else {
         "New AI Profile | Enter Edit/Toggle | Ctrl+S Save | Esc Cancel"
     };
-    frame.render_widget(
-        Block::default().borders(Borders::ALL).title(title),
-        area,
-    );
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), area);
 
     let inner = Rect {
         x: area.x + 1,
@@ -836,14 +881,32 @@ fn render_ai_profile_editor(frame: &mut Frame, editor: &SetupProfileEditor) {
         ),
         profile_editor_item(
             "debug",
-            if editor.draft.debug { "[x] true" } else { "[ ] false" },
+            if editor.draft.debug {
+                "[x] true"
+            } else {
+                "[ ] false"
+            },
             editor.selected_field == 4,
+            false,
+        ),
+        profile_editor_item(
+            "image support",
+            if editor.draft.vision {
+                "[x] true"
+            } else {
+                "[ ] false"
+            },
+            editor.selected_field == 5,
             false,
         ),
     ];
 
     frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title("Profile Fields")),
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Profile Fields"),
+        ),
         inner,
     );
 
@@ -858,7 +921,11 @@ fn profile_editor_item<'a>(
     selected: bool,
     masked: bool,
 ) -> ListItem<'a> {
-    let shown = if masked { mask_secret(value) } else { value.to_string() };
+    let shown = if masked {
+        mask_secret(value)
+    } else {
+        value.to_string()
+    };
     ListItem::new(Line::raw(format!("{label}: {shown}"))).style(if selected {
         Style::default()
             .fg(Color::Black)

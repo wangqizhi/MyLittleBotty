@@ -29,3 +29,4 @@ base64 = "0.22"
 tungstenite = { version = "0.21", features = ["native-tls"] }
 native-tls = "0.2"
 percent-encoding = "2.3"
+openssl = "0.10"

@@ -168,7 +168,7 @@ fn execute_reminder(reminder: &ReminderRecord, due_at: &str, now: &str) -> io::R
         }
         "assign_tasks" => {
             let start_notice = format!(
-                "定时任务已开始执行，我处理完后再把结果发给你。\n任务内容：{}",
+                "The scheduled task has started. I will send the result after it finishes.\nTask: {}",
                 reminder.task_text
             );
             let _ = push_text_notification(reminder, &start_notice);
@@ -194,7 +194,7 @@ fn push_result_notifications(
     let text = if status == "ok" {
         output.to_string()
     } else {
-        format!("提醒执行失败：{}", output)
+        format!("Scheduled task failed: {}", output)
     };
 
     push_text_notification(reminder, &text)

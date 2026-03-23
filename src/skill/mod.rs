@@ -2,6 +2,8 @@
 pub mod buildin_browser;
 #[path = "buildin-crond.rs"]
 pub mod buildin_crond;
+#[path = "buildin-image.rs"]
+pub mod buildin_image;
 #[path = "buildin-leader.rs"]
 pub mod buildin_leader;
 #[path = "buildin-list.rs"]
@@ -25,6 +27,7 @@ use std::io;
 
 use crate::skill::buildin_browser::BuildinBrowserSkill;
 use crate::skill::buildin_crond::BuildinCrondSkill;
+use crate::skill::buildin_image::BuildinImageSkill;
 use crate::skill::buildin_leader::BuildinLeaderSkill;
 use crate::skill::buildin_list::BuildinListSkill;
 use crate::skill::buildin_remember::BuildinRememberSkill;
@@ -50,6 +53,7 @@ pub const BUILDIN_SKILL_NAMES: &[&str] = &[
     "remember",
     "crond",
     "leader",
+    "image",
     "terminal",
     "browser",
     "web-search",
@@ -67,6 +71,7 @@ pub fn build_skill(name: &str) -> Option<Box<dyn BottySkill>> {
         "remember" => Some(Box::new(BuildinRememberSkill::new())),
         "crond" => Some(Box::new(BuildinCrondSkill::new())),
         "leader" => Some(Box::new(BuildinLeaderSkill::new())),
+        "image" => Some(Box::new(BuildinImageSkill::new())),
         _ => build_custom_skill(name),
     }
 }

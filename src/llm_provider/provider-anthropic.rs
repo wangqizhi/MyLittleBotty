@@ -1,7 +1,7 @@
 use crate::botty_brain::BrainConfig;
 use crate::llm_provider::{
-    LlmProvider, ProviderMessage, ProviderRequest, ProviderResponse, ProviderTextResponse,
-    ProviderToolDefinition, ProviderToolUse,
+    LlmProvider, ProviderContentPart, ProviderMessage, ProviderRequest, ProviderResponse,
+    ProviderTextResponse, ProviderToolDefinition, ProviderToolUse,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -97,7 +97,7 @@ impl LlmProvider for AnthropicProvider {
                     })?,
                     assistant_content_json: serde_json::to_string(content).map_err(|err| {
                         io::Error::new(
-                        io::ErrorKind::InvalidData,
+                            io::ErrorKind::InvalidData,
                             format!("serialize assistant content failed: {err}"),
                         )
                     })?,
@@ -163,6 +163,10 @@ fn build_messages(messages: &[ProviderMessage]) -> io::Result<Vec<Value>> {
                 "role": "user",
                 "content": [{"type": "text", "text": text}],
             })),
+            ProviderMessage::User { parts } => serialized.push(json!({
+                "role": "user",
+                "content": build_user_content(parts),
+            })),
             ProviderMessage::UserToolResult {
                 tool_use_id,
                 content,
@@ -192,6 +196,26 @@ fn build_messages(messages: &[ProviderMessage]) -> io::Result<Vec<Value>> {
         }
     }
     Ok(serialized)
+}
+
+fn build_user_content(parts: &[ProviderContentPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ProviderContentPart::Text(text) => json!({
+                "type": "text",
+                "text": text,
+            }),
+            ProviderContentPart::ImageBase64 { media_type, data } => json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            }),
+        })
+        .collect()
 }
 
 fn build_tools(tools: &[ProviderToolDefinition]) -> io::Result<Vec<Value>> {

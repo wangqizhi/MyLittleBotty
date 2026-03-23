@@ -1,4 +1,4 @@
-use crate::infra::chatbot_weixin::{WeixinClient, DEFAULT_API_BASE};
+use crate::infra::chatbot_weixin::{WeixinClient, DEFAULT_API_BASE, DEFAULT_CDN_BASE};
 use clap::Args;
 use std::fs;
 use std::io;
@@ -18,7 +18,11 @@ pub struct WeixinLoginCommand {
 
 impl WeixinLoginCommand {
     pub fn run(self) -> io::Result<()> {
-        let client = WeixinClient::new(self.api_base.clone(), String::new());
+        let client = WeixinClient::new(
+            self.api_base.clone(),
+            DEFAULT_CDN_BASE.to_string(),
+            String::new(),
+        );
         let start = client.start_login()?;
         println!("Scan this QR code with Weixin:");
         println!("{}", start.qrcode_url);

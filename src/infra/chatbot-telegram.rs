@@ -1,7 +1,15 @@
+use serde::Deserialize;
+use std::fs;
 use std::io;
 use std::process::Command;
 
 pub const DEFAULT_API_BASE: &str = "https://api.telegram.org";
+
+#[derive(Clone, Debug)]
+pub struct TelegramInboundImage {
+    pub local_path: String,
+    pub mime_type: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct TelegramInboundMessage {
@@ -9,6 +17,7 @@ pub struct TelegramInboundMessage {
     pub chat_id: i64,
     pub user_id: i64,
     pub text: String,
+    pub images: Vec<TelegramInboundImage>,
 }
 
 pub struct TelegramClient {
@@ -38,7 +47,16 @@ impl TelegramClient {
             )));
         }
         let body = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_telegram_updates(&body))
+        let response: TelegramUpdatesResponse = serde_json::from_str(&body).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse telegram updates failed: {err}"),
+            )
+        })?;
+        if !response.ok {
+            return Err(io::Error::other("telegram getUpdates returned ok=false"));
+        }
+        response.into_messages(self)
     }
 
     pub fn send_message(&self, chat_id: i64, text: &str) -> io::Result<()> {
@@ -90,6 +108,123 @@ impl TelegramClient {
         }
         Ok(())
     }
+
+    fn download_photo(&self, file_id: &str, update_id: i64) -> io::Result<TelegramInboundImage> {
+        let file_path = self.resolve_file_path(file_id)?;
+        let ext = file_path
+            .rsplit('.')
+            .next()
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_else(|| "jpg".to_string());
+        let mime_type = Some(
+            match ext.as_str() {
+                "png" => "image/png",
+                "webp" => "image/webp",
+                "gif" => "image/gif",
+                _ => "image/jpeg",
+            }
+            .to_string(),
+        );
+        let dir = std::env::temp_dir().join("mylittlebotty-chatbot-images");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{update_id}-{file_id}.{ext}"));
+        let url = format!(
+            "{}/file/bot{}/{}",
+            self.api_base,
+            self.bot_token,
+            file_path.trim_start_matches('/')
+        );
+        let output = Command::new("curl")
+            .arg("-fsS")
+            .arg("-o")
+            .arg(&path)
+            .arg(url)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format_curl_failure(
+                "download telegram photo",
+                &self.api_base,
+                &output,
+            )));
+        }
+        Ok(TelegramInboundImage {
+            local_path: path.to_string_lossy().to_string(),
+            mime_type,
+        })
+    }
+
+    fn resolve_file_path(&self, file_id: &str) -> io::Result<String> {
+        let url = format!(
+            "{}/bot{}/getFile?file_id={}",
+            self.api_base, self.bot_token, file_id
+        );
+        let output = Command::new("curl").arg("-fsS").arg(url).output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format_curl_failure(
+                "getFile",
+                &self.api_base,
+                &output,
+            )));
+        }
+        let body = String::from_utf8_lossy(&output.stdout);
+        let response: TelegramGetFileResponse = serde_json::from_str(&body).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse telegram getFile response failed: {err}"),
+            )
+        })?;
+        if !response.ok {
+            return Err(io::Error::other("telegram getFile returned ok=false"));
+        }
+        response
+            .result
+            .and_then(|result| result.file_path)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "telegram file_path missing"))
+    }
+}
+
+#[derive(Deserialize)]
+struct TelegramUpdatesResponse {
+    ok: bool,
+    result: Vec<TelegramUpdate>,
+}
+
+#[derive(Deserialize)]
+struct TelegramUpdate {
+    update_id: i64,
+    message: Option<TelegramMessage>,
+}
+
+#[derive(Deserialize)]
+struct TelegramMessage {
+    chat: TelegramPeer,
+    from: Option<TelegramPeer>,
+    text: Option<String>,
+    caption: Option<String>,
+    photo: Option<Vec<TelegramPhotoSize>>,
+}
+
+#[derive(Deserialize)]
+struct TelegramPeer {
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct TelegramPhotoSize {
+    file_id: String,
+    file_size: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TelegramGetFileResponse {
+    ok: bool,
+    result: Option<TelegramFileResult>,
+}
+
+#[derive(Deserialize)]
+struct TelegramFileResult {
+    file_path: Option<String>,
 }
 
 fn format_curl_failure(action: &str, api_base: &str, output: &std::process::Output) -> String {
@@ -132,151 +267,42 @@ fn describe_proxy_env() -> String {
     }
 }
 
-fn parse_telegram_updates(body: &str) -> Vec<TelegramInboundMessage> {
-    let mut updates = Vec::new();
-    let mut start = 0usize;
-
-    while let Some(rel) = body[start..].find("\"update_id\"") {
-        let abs = start + rel;
-        let end = match body[abs + 1..].find("\"update_id\"") {
-            Some(next_rel) => abs + 1 + next_rel,
-            None => body.len(),
-        };
-        let chunk = &body[abs..end];
-
-        if let (Some(update_id), Some(chat_id), Some(user_id), Some(text)) = (
-            parse_number_field(chunk, "\"update_id\""),
-            parse_number_field(chunk, "\"chat\""),
-            parse_number_field(chunk, "\"from\""),
-            parse_string_field(chunk, "\"text\""),
-        ) {
-            updates.push(TelegramInboundMessage {
-                update_id,
-                chat_id,
-                user_id,
-                text,
-            });
-        }
-
-        start = end;
-    }
-    updates
-}
-
-fn parse_number_field(chunk: &str, field_name: &str) -> Option<i64> {
-    if field_name == "\"chat\"" || field_name == "\"from\"" {
-        let object_idx = chunk.find(field_name)?;
-        let object_part = &chunk[object_idx..];
-        let id_idx = object_part.find("\"id\"")?;
-        parse_number_after_colon(&object_part[id_idx + 4..])
-    } else {
-        let idx = chunk.find(field_name)?;
-        parse_number_after_colon(&chunk[idx + field_name.len()..])
-    }
-}
-
-fn parse_number_after_colon(s: &str) -> Option<i64> {
-    let colon = s.find(':')?;
-    let rest = s[colon + 1..].trim_start();
-    let mut end = 0usize;
-    for (i, ch) in rest.char_indices() {
-        if ch.is_ascii_digit() || (i == 0 && ch == '-') {
-            end = i + ch.len_utf8();
-            continue;
-        }
-        break;
-    }
-    if end == 0 {
-        return None;
-    }
-    rest[..end].parse::<i64>().ok()
-}
-
-fn parse_string_field(chunk: &str, field_name: &str) -> Option<String> {
-    let idx = chunk.find(field_name)?;
-    let after = &chunk[idx + field_name.len()..];
-    let colon = after.find(':')?;
-    let value = after[colon + 1..].trim_start();
-    if !value.starts_with('"') {
-        return None;
-    }
-    let mut out = String::new();
-    let mut chars = value[1..].chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '"' {
-            return Some(out);
-        }
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let escaped = chars.next()?;
-        match escaped {
-            'n' => out.push('\n'),
-            'r' => out.push('\r'),
-            't' => out.push('\t'),
-            '"' => out.push('"'),
-            '\\' => out.push('\\'),
-            '/' => out.push('/'),
-            'b' => out.push('\u{0008}'),
-            'f' => out.push('\u{000C}'),
-            'u' => {
-                let cp1 = parse_u16_hex_from_chars(&mut chars)?;
-                if (0xD800..=0xDBFF).contains(&cp1) {
-                    let backslash = chars.next()?;
-                    let u = chars.next()?;
-                    if backslash != '\\' || u != 'u' {
-                        return None;
-                    }
-                    let cp2 = parse_u16_hex_from_chars(&mut chars)?;
-                    if !(0xDC00..=0xDFFF).contains(&cp2) {
-                        return None;
-                    }
-                    let high = (cp1 as u32) - 0xD800;
-                    let low = (cp2 as u32) - 0xDC00;
-                    let code = 0x10000 + ((high << 10) | low);
-                    out.push(char::from_u32(code)?);
-                } else if (0xDC00..=0xDFFF).contains(&cp1) {
-                    return None;
-                } else {
-                    out.push(char::from_u32(cp1 as u32)?);
+impl TelegramUpdatesResponse {
+    fn into_messages(self, client: &TelegramClient) -> io::Result<Vec<TelegramInboundMessage>> {
+        let mut messages = Vec::new();
+        for update in self.result {
+            let Some(message) = update.message else {
+                continue;
+            };
+            let Some(from) = message.from else {
+                continue;
+            };
+            let text = message
+                .caption
+                .or(message.text)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let mut images = Vec::new();
+            if let Some(photo_sizes) = message.photo {
+                if let Some(best) = photo_sizes
+                    .into_iter()
+                    .max_by_key(|item| item.file_size.unwrap_or_default())
+                {
+                    images.push(client.download_photo(&best.file_id, update.update_id)?);
                 }
             }
-            _ => return None,
+            if text.is_empty() && images.is_empty() {
+                continue;
+            }
+            messages.push(TelegramInboundMessage {
+                update_id: update.update_id,
+                chat_id: message.chat.id,
+                user_id: from.id,
+                text,
+                images,
+            });
         }
-    }
-    None
-}
-
-fn parse_u16_hex_from_chars(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u16> {
-    let mut hex = String::with_capacity(4);
-    for _ in 0..4 {
-        let ch = chars.next()?;
-        if !ch.is_ascii_hexdigit() {
-            return None;
-        }
-        hex.push(ch);
-    }
-    u16::from_str_radix(&hex, 16).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_telegram_updates;
-
-    #[test]
-    fn parses_unicode_escaped_text() {
-        let body = r#"{"ok":true,"result":[{"update_id":1,"message":{"message_id":2,"from":{"id":3},"chat":{"id":4},"text":"\u4f60\u597d"}}]}"#;
-        let updates = parse_telegram_updates(body);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].text, "你好");
-    }
-
-    #[test]
-    fn parses_surrogate_pair_text() {
-        let body = r#"{"ok":true,"result":[{"update_id":1,"message":{"message_id":2,"from":{"id":3},"chat":{"id":4},"text":"\ud83d\ude80"}}]}"#;
-        let updates = parse_telegram_updates(body);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].text, "🚀");
+        Ok(messages)
     }
 }

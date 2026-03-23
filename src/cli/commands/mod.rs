@@ -11,5 +11,5 @@ pub mod update;
 pub mod version;
 pub mod watchapp;
 pub mod watchjobs;
-pub mod weixin_login;
 pub mod webui;
+pub mod weixin_login;

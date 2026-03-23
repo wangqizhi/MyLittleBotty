@@ -749,6 +749,7 @@ dependencies = [
  "crossterm",
  "libc",
  "native-tls",
+ "openssl",
  "percent-encoding",
  "portable-pty",
  "ratatui",

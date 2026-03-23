@@ -30,6 +30,13 @@ pub struct FeishuInboundMessage {
     pub chat_id: String,
     pub user_id: String,
     pub text: String,
+    pub image_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FeishuInboundImage {
+    pub local_path: String,
+    pub mime_type: Option<String>,
 }
 
 pub struct FeishuClient {
@@ -73,6 +80,38 @@ impl FeishuClient {
         }
         ensure_feishu_success(&response.body, "feishu send message")?;
         Ok(parse_string_field(&response.body, "\"message_id\""))
+    }
+
+    pub fn download_message_image(
+        &mut self,
+        message_id: &str,
+        image_key: &str,
+    ) -> io::Result<FeishuInboundImage> {
+        let token = self.bearer_token()?.to_string();
+        let url = format!(
+            "{}/im/v1/messages/{}/resources/{}?type=image",
+            self.api_base, message_id, image_key
+        );
+        let path = temp_image_path("feishu", message_id, "jpg");
+        let output = Command::new("curl")
+            .arg("-fsS")
+            .arg("-L")
+            .arg("-H")
+            .arg(format!("Authorization: Bearer {token}"))
+            .arg("-o")
+            .arg(&path)
+            .arg(url)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "curl feishu download image failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(FeishuInboundImage {
+            local_path: path.to_string_lossy().to_string(),
+            mime_type: Some("image/jpeg".to_string()),
+        })
     }
 
     fn bearer_token(&mut self) -> io::Result<&str> {
@@ -710,7 +749,7 @@ fn parse_long_conn_message(payload: &[u8]) -> io::Result<Option<FeishuInboundMes
         .get("message_type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if message_type != "text" {
+    if message_type != "text" && message_type != "image" {
         return Ok(None);
     }
 
@@ -720,8 +759,17 @@ fn parse_long_conn_message(payload: &[u8]) -> io::Result<Option<FeishuInboundMes
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let text = parse_message_text(content);
-    if text.trim().is_empty() {
+    let text = if message_type == "text" {
+        parse_message_text(content)
+    } else {
+        String::new()
+    };
+    let image_keys = if message_type == "image" {
+        parse_message_image_keys(content)
+    } else {
+        Vec::new()
+    };
+    if text.trim().is_empty() && image_keys.is_empty() {
         return Ok(None);
     }
 
@@ -746,6 +794,7 @@ fn parse_long_conn_message(payload: &[u8]) -> io::Result<Option<FeishuInboundMes
         chat_id,
         user_id,
         text,
+        image_keys,
     }))
 }
 
@@ -772,6 +821,31 @@ fn parse_message_text(content: &str) -> String {
                 .map(|text| text.to_string())
         })
         .unwrap_or_else(|| content.to_string())
+}
+
+fn parse_message_image_keys(content: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let Ok(value) = serde_json::from_str::<Value>(content) else {
+        return keys;
+    };
+    for pointer in ["/image_key", "/file_key", "/key"] {
+        if let Some(key) = value.pointer(pointer).and_then(Value::as_str) {
+            let key = key.trim();
+            if !key.is_empty() && !keys.iter().any(|item| item == key) {
+                keys.push(key.to_string());
+            }
+        }
+    }
+    keys
+}
+
+fn temp_image_path(source: &str, message_id: &str, ext: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("mylittlebotty-chatbot-images");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!(
+        "{source}-{}.{ext}",
+        message_id.replace('/', "-").replace(':', "-")
+    ))
 }
 
 fn header_value<'a>(headers: &'a [PbHeader], key: &str) -> Option<&'a str> {

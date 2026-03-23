@@ -1,11 +1,11 @@
 #[path = "provider-anthropic.rs"]
 pub mod provider_anthropic;
+#[path = "provider-glm.rs"]
+pub mod provider_glm;
 #[path = "provider-minimax.rs"]
 pub mod provider_minimax;
 #[path = "provider-openai.rs"]
 pub mod provider_openai;
-#[path = "provider-glm.rs"]
-pub mod provider_glm;
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -34,8 +34,17 @@ pub struct ProviderTextResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ProviderContentPart {
+    Text(String),
+    ImageBase64 { media_type: String, data: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ProviderMessage {
     UserText(String),
+    User {
+        parts: Vec<ProviderContentPart>,
+    },
     UserToolResult {
         tool_use_id: String,
         content: String,

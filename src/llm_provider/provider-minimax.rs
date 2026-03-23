@@ -1,7 +1,7 @@
 use crate::botty_brain::BrainConfig;
 use crate::llm_provider::{
-    LlmProvider, ProviderMessage, ProviderRequest, ProviderResponse, ProviderTextResponse,
-    ProviderToolDefinition, ProviderToolUse,
+    LlmProvider, ProviderContentPart, ProviderMessage, ProviderRequest, ProviderResponse,
+    ProviderTextResponse, ProviderToolDefinition, ProviderToolUse,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -44,7 +44,9 @@ impl LlmProvider for MinimaxProvider {
         tools: &[ProviderToolDefinition],
     ) -> io::Result<ProviderRequest> {
         match self.protocol {
-            MinimaxProtocol::Anthropic => self.build_anthropic_request(system_prompt, messages, tools),
+            MinimaxProtocol::Anthropic => {
+                self.build_anthropic_request(system_prompt, messages, tools)
+            }
             MinimaxProtocol::OpenAi => self.build_openai_request(system_prompt, messages),
         }
     }
@@ -86,8 +88,9 @@ impl MinimaxProvider {
                     ANTHROPIC_VERSION.to_string(),
                 ),
             ],
-            payload: serde_json::to_string(&payload)
-                .map_err(|err| io::Error::other(format!("serialize minimax payload failed: {err}")))?,
+            payload: serde_json::to_string(&payload).map_err(|err| {
+                io::Error::other(format!("serialize minimax payload failed: {err}"))
+            })?,
         })
     }
 
@@ -115,7 +118,10 @@ impl MinimaxProvider {
 
         Ok(ProviderRequest {
             url: self.endpoint.clone(),
-            headers: vec![("Authorization".to_string(), format!("Bearer {}", self.apikey))],
+            headers: vec![(
+                "Authorization".to_string(),
+                format!("Bearer {}", self.apikey),
+            )],
             payload: serde_json::to_string(&payload).map_err(|err| {
                 io::Error::other(format!("serialize minimax openai payload failed: {err}"))
             })?,
@@ -167,6 +173,13 @@ fn build_anthropic_messages(messages: &[ProviderMessage]) -> io::Result<Vec<Valu
                 serialized.push(json!({
                     "role": "user",
                     "content": [{ "type": "text", "text": text }],
+                }));
+                index += 1;
+            }
+            ProviderMessage::User { parts } => {
+                serialized.push(json!({
+                    "role": "user",
+                    "content": build_anthropic_user_content(parts),
                 }));
                 index += 1;
             }
@@ -265,9 +278,10 @@ fn parse_anthropic_response(response_body: &str) -> io::Result<ProviderResponse>
     let mut tool_uses = Vec::new();
     for block in content {
         if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-            let id = block.get("id").and_then(Value::as_str).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "tool_use missing id")
-            })?;
+            let id = block
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "tool_use missing id"))?;
             let name = block.get("name").and_then(Value::as_str).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "tool_use missing name")
             })?;
@@ -460,22 +474,61 @@ fn extract_openai_thinking(message: &Value) -> Option<String> {
 
 fn openai_role(message: &ProviderMessage) -> &'static str {
     match message {
-        ProviderMessage::UserText(_) | ProviderMessage::UserToolResult { .. } => "user",
+        ProviderMessage::UserText(_)
+        | ProviderMessage::User { .. }
+        | ProviderMessage::UserToolResult { .. } => "user",
         ProviderMessage::AssistantToolUse { .. } => "assistant",
     }
 }
 
-fn flatten_openai_message_content(message: &ProviderMessage) -> String {
+fn flatten_openai_message_content(message: &ProviderMessage) -> Value {
     match message {
-        ProviderMessage::UserText(text) => text.clone(),
+        ProviderMessage::UserText(text) => Value::String(text.clone()),
+        ProviderMessage::User { parts } => Value::Array(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ProviderContentPart::Text(text) => json!({
+                        "type": "text",
+                        "text": text,
+                    }),
+                    ProviderContentPart::ImageBase64 { media_type, data } => json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{media_type};base64,{data}")
+                        },
+                    }),
+                })
+                .collect(),
+        ),
         ProviderMessage::UserToolResult {
             tool_use_id,
             content,
-        } => format!("tool_result {tool_use_id}: {content}"),
+        } => Value::String(format!("tool_result {tool_use_id}: {content}")),
         ProviderMessage::AssistantToolUse {
             assistant_content_json,
-        } => assistant_content_json.clone(),
+        } => Value::String(assistant_content_json.clone()),
     }
+}
+
+fn build_anthropic_user_content(parts: &[ProviderContentPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ProviderContentPart::Text(text) => json!({
+                "type": "text",
+                "text": text,
+            }),
+            ProviderContentPart::ImageBase64 { media_type, data } => json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            }),
+        })
+        .collect()
 }
 
 fn default_minimax_model(model: &str) -> &str {

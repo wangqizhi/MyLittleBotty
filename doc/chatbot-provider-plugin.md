@@ -57,6 +57,7 @@
 
 - `chatbot.weixin.account_id`
 - `chatbot.weixin.user_id`
+- `chatbot.weixin.cdn_base`
 - `chatbot.weixin.long_poll_timeout_ms`
 - `chatbot.weixin.whitelist_user_ids`
 
@@ -65,6 +66,7 @@
 - `chatbot.weixin.apikey` 存的是扫码登录后换到的 `bot_token`
 - `chatbot.weixin.account_id` 对应登录成功后返回的 `ilink_bot_id`
 - `chatbot.weixin.user_id` 是扫码绑定的微信用户 ID，可选
+- `chatbot.weixin.cdn_base` 是微信 CDN 媒体下载/上传地址，默认 `https://novac2c.cdn.weixin.qq.com/c2c`
 - `chatbot.weixin.long_poll_timeout_ms` 控制 `getupdates` 长轮询超时
 
 ## 启动入口与进程注册

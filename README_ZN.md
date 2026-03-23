@@ -1,10 +1,10 @@
 # MyLittleBotty
 
-MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 守护进程、`Botty-Guy` 对话执行进程、`Botty-crond` 定时提醒与系统调度进程组成。当前版本主要提供本地聊天、TUI 配置、Telegram/飞书消息接入、提醒调度、内置系统定时任务、版本更新和进程管理能力。
+MyLittleBotty 是一个本地常驻的 AI 助手程序，核心由 `Botty-Boss` 守护进程、`Botty-Guy` 对话执行进程、`Botty-crond` 定时提醒与系统调度进程组成。当前版本主要提供本地聊天、TUI 配置、Telegram/飞书/微信消息接入、图片理解路由、提醒调度、内置系统定时任务、版本更新和进程管理能力。
 
 ## 最近更新
 
-- `2026-03-18`：`/setup` 现在支持多个 AI provider profile。AI profile 在覆盖式弹层中管理，支持创建、编辑、激活和删除；当前激活的 profile 不能直接删除，必须先切换。
+- `2026-03-23`：chatbot 已支持 Telegram、飞书、微信三端图片入站。Botty 会短暂等待图片后的补充文本，按 `vision=true` profile 选择图像 provider，在图像 provider 和 active provider 不同的时候先走内置 `image` skill，总结图片内容后再交给 active provider；相同时则直接走 active provider 的多模态能力。
 
 更早的发布记录见 [doc/release.md](./doc/release.md)。
 
@@ -59,6 +59,7 @@ TUI 内置命令：
 - `ai.provider.<profile>.apikey`
 - `ai.provider.<profile>.model`
 - `ai.provider.<profile>.debug`
+- `ai.provider.<profile>.vision`
 
 配置读取仍兼容老版本单 provider 的 `ai.provider.endpoint`、`ai.provider.apikey`、`ai.provider.model`、`ai.provider.debug`。
 
@@ -128,24 +129,31 @@ TUI 内置命令：
 - 当前第一个内置 system 任务是 `remember-hourly`，会每小时触发一次 `/remember`。
 - 内置 system 任务执行日志写入 `~/.mylittlebotty/log/system-crond.log`，并通过 `~/.mylittlebotty/run/system-crond-state.json` 避免服务重启后在同一时间槽重复执行。
 
-### 8. Telegram / 飞书接入
+### 8. Telegram / 飞书 / 微信接入
 
-当前实现了两个输入通道：
+当前实现了三个输入通道：
 
 - Telegram 轮询收消息并回消息
 - 飞书长连接收消息并回消息
+- 微信轮询收消息并回消息
 
 支持状态：
 
-- Telegram 已正式支持轮询收发、用户白名单和提醒推送。
-- 飞书已正式支持长连接收消息、原会话回消息，以及按配置会话主动推送。
+- Telegram 已支持轮询收发、用户白名单、提醒推送和图片入站。
+- 飞书已支持长连接收消息、原会话回消息、按配置会话主动推送，以及图片入站。
+- 微信已支持轮询收消息、保留 `context_token` 的原会话回复、白名单控制，以及基于当前 CDN/AES 协议的图片入站。
 
 支持能力：
 
 - Telegram 用户白名单
-- Telegram / 飞书轮询间隔配置
+- 微信用户白名单
+- Telegram / 飞书 / 微信轮询间隔配置
 - 飞书 `chat_id` 可用于提醒等主动推送目标会话
 - 接收到外部消息后转发给本地 `Botty-Guy` 处理，并把回复发回原会话
+- Telegram / 飞书 / 微信入站图片会先下载到本地临时目录，再进入统一图片处理链路
+- 用户发图后，Botty 会等待 `4` 秒，看是否有补充文本一起合并
+- 如果 active AI profile 和 image profile 不同，会先调用内置 `image` skill，让图像 provider 总结图片、提取可见文字并推测用户意图，再把结果转发给 active provider
+- 如果 active profile 自身有 `vision=true`，则直接把图片作为多模态请求发给 active provider
 
 ### 9. 长期记忆摘要
 
@@ -387,6 +395,7 @@ ai.provider.default.endpoint=
 ai.provider.default.apikey=
 ai.provider.default.model=
 ai.provider.default.debug=false
+ai.provider.default.vision=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
@@ -401,11 +410,18 @@ chatbot.telegram.apikey=
 chatbot.feishu.api_base=https://open.feishu.cn/open-apis
 chatbot.feishu.app_id=
 chatbot.feishu.app_secret=
+chatbot.weixin.api_base=https://ilinkai.weixin.qq.com
+chatbot.weixin.cdn_base=https://novac2c.cdn.weixin.qq.com/c2c
+chatbot.weixin.apikey=
 chatbot.telegram.enabled=true
 chatbot.feishu.enabled=false
+chatbot.weixin.enabled=false
 chatbot.telegram.whitelist_user_ids=
+chatbot.weixin.whitelist_user_ids=
 chatbot.telegram.poll_interval_seconds=1
 chatbot.feishu.poll_interval_seconds=1
+chatbot.weixin.poll_interval_seconds=1
+chatbot.weixin.long_poll_timeout_ms=35000
 chatbot.feishu.chat_id=
 ```
 
@@ -416,6 +432,7 @@ chatbot.feishu.chat_id=
 - `ai.provider.<profile>.apikey`：某个命名 profile 的模型 API Key
 - `ai.provider.<profile>.model`：某个命名 profile 的模型名
 - `ai.provider.<profile>.debug`：某个命名 profile 是否记录调试日志
+- `ai.provider.<profile>.vision`：该 profile 是否可被选为图像理解 provider
 - `agent.provider`：`terminal` skill 使用的终端代理提供方，当前默认是 `codex`
 - `agent.codex.command`：Codex CLI 的可执行文件名或路径
 - `agent.claude.command`：预留给 Claude 终端代理的可执行文件名或路径
@@ -424,13 +441,19 @@ chatbot.feishu.chat_id=
 - `browser.chrome.user_data_dir`：可选的持久 Chrome user-data 目录；相对路径会解析到 `~/.mylittlebotty/` 下
 - `browser.chrome.max_tabs`：连接 CDP 时允许保留的 Chrome page tab 最大数量；超过会自动关闭多余 tab；设为 `0` 表示不限制
 - `work_dir`：`write` 工具使用的根目录；在 TUI 中修改时会迁移旧工作目录内容
-- `chatbot.provider`：当前聊天渠道，代码中支持 `telegram` 或 `feishu`
+- `chatbot.provider`：当前启用的聊天渠道，代码中支持 `telegram`、`feishu`、`weixin`
 - `chatbot.telegram.enabled`：是否启用 Telegram 输入通道
 - `chatbot.telegram.apikey`：Telegram 机器人 token
 - `chatbot.feishu.enabled`：是否启用飞书输入通道
 - `chatbot.feishu.app_id`：用于换取 tenant access token 的飞书 app id
 - `chatbot.feishu.app_secret`：用于换取 tenant access token 的飞书 app secret
+- `chatbot.weixin.enabled`：是否启用微信输入通道
+- `chatbot.weixin.api_base`：微信 `getupdates` / `sendmessage` 使用的 API 地址
+- `chatbot.weixin.cdn_base`：微信媒体上传下载使用的 CDN 地址，默认 `https://novac2c.cdn.weixin.qq.com/c2c`
+- `chatbot.weixin.apikey`：微信 `bot_token`
 - `chatbot.telegram.whitelist_user_ids`：Telegram 允许访问的用户 ID，多个值用逗号分隔
+- `chatbot.weixin.whitelist_user_ids`：微信允许访问的用户 ID，多个值用逗号分隔
+- `chatbot.weixin.long_poll_timeout_ms`：微信 `getupdates` 长轮询超时
 - `chatbot.feishu.chat_id`：飞书主动推送目标会话 ID，例如提醒回发
 
 补充说明：
@@ -439,6 +462,8 @@ chatbot.feishu.chat_id=
 - 当前激活的 AI profile 不能直接删除，需要先切换到其他 profile。
 - 配置读取仍兼容老版本单 provider 的 `ai.provider.*` 键。
 - 如果要接入智谱 Claude 兼容接口，可使用 `https://open.bigmodel.cn/api/anthropic`，模型建议填 `glm-4.7`。
+- 如果没有任何 `vision=true` 的 profile，chatbot 收到图片时会返回 `暂不支持图像识别，请配置支持图像的 provider。`
+- 对于 `localhost`、`127.0.0.1`、`10.x`、`192.168.x`、`172.16-31.x` 这类本地或内网 HTTP 模型地址，Botty 不再强制要求非空 API key。
 
 修改完配置后，TUI 保存时会自动触发一次服务重启。
 
@@ -483,6 +508,7 @@ chatbot.feishu.chat_id=
 | `--crond` | 启动 `Botty-crond` 定时提醒进程 | 内部进程 |
 | `--input-telegram` | 启动 Telegram 输入轮询进程 | 内部进程 |
 | `--input-feishu` | 启动飞书输入轮询进程 | 内部进程 |
+| `--input-weixin` | 启动微信输入轮询进程 | 内部进程 |
 
 ## 运行目录与数据文件
 
@@ -516,4 +542,4 @@ chatbot.feishu.chat_id=
 2. 运行 `mylittlebotty`
 3. 执行 `mylittlebotty tui`
 4. 在 TUI 中输入 `/setup` 完成模型和聊天渠道配置
-5. 保存配置后继续在 TUI 中聊天，或接入 Telegram / 飞书使用
+5. 保存配置后继续在 TUI 中聊天，或接入 Telegram / 飞书 / 微信使用

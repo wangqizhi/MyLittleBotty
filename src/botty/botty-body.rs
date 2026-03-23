@@ -1,14 +1,17 @@
-use crate::botty_brain::{is_llm_connection_error, BottyBrain};
+use crate::botty_brain::{
+    active_and_image_providers_differ, active_supports_vision, is_llm_connection_error, BottyBrain,
+};
 use crate::botty_guy::{
     builtin_role_specs, expand_custom_role_skill_names, expand_role_skill_names,
     resolve_role_spec_or_custom, BottyGuyRoleSpec, CustomRoleConfig, ResolvedRole,
 };
 use crate::io as botty_io;
 use crate::llm_provider::{
-    ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
+    ProviderContentPart, ProviderMessage, ProviderResponse, ProviderToolDefinition, ProviderToolUse,
 };
 use crate::prompt;
 use crate::skill::{build_skill, BottySkill};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -23,6 +26,8 @@ const ROLE_EXPERIENCE_MAX_LINES: usize = 60;
 const REMINDER_TRIGGER_COMMAND: &str = "/reminder-now";
 const MAX_TOOL_CALL_STEPS: usize = 50;
 const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
+const IMAGE_REQUEST_PREFIX: &str = "__botty_image_request__";
+const IMAGE_ONLY_DEFAULT_PROMPT: &str = "总结图片的内容，并猜测用户的需求。";
 const TOOL_ERROR_FORMATTER_SYSTEM_PROMPT: &str = "You rewrite internal tool execution failures into short, user-facing assistant replies. Explain the failure naturally, avoid stack traces or internal implementation details, and keep the reply actionable. If the next step is obvious, mention it briefly. Reply in the same language as the user's request. Keep the reply under 4 sentences.";
 
 pub struct AssistantReply {
@@ -51,6 +56,25 @@ struct AsyncDelegationResult {
     child_role: String,
     child_message_id: String,
     handoff_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct InboundImageEnvelope {
+    source: String,
+    user_text: String,
+    images: Vec<InboundImagePayload>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct InboundImagePayload {
+    kind: String,
+    local_path: Option<String>,
+    mime_type: Option<String>,
+}
+
+struct ParsedInput {
+    display_text: String,
+    llm_message: ProviderMessage,
 }
 
 enum RoleInfo {
@@ -85,6 +109,14 @@ impl BottyBody {
                     })?;
                     skills.push(skill);
                 }
+                if active_and_image_providers_differ()?
+                    && !skills.iter().any(|skill| skill.name() == "image")
+                {
+                    let skill = build_skill("image").ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "unknown built-in image skill")
+                    })?;
+                    skills.push(skill);
+                }
                 (RoleInfo::Builtin(spec), skills)
             }
             ResolvedRole::Custom(config) => {
@@ -101,6 +133,14 @@ impl BottyBody {
                     })?;
                     skills.push(skill);
                 }
+                if active_and_image_providers_differ()?
+                    && !skills.iter().any(|skill| skill.name() == "image")
+                {
+                    let skill = build_skill("image").ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "unknown built-in image skill")
+                    })?;
+                    skills.push(skill);
+                }
                 (RoleInfo::Custom(config), skills)
             }
         };
@@ -113,28 +153,32 @@ impl BottyBody {
     }
 
     pub fn think(&self, input: &str) -> io::Result<AssistantReply> {
+        let parsed_input = self.parse_input_message(input)?;
+        let normalized_input = parsed_input.display_text.as_str();
         if let Some((name, argument)) = parse_debug_tool_call(input) {
             return Ok(AssistantReply {
-                text: self.execute_tool_with_recovery(Some(input), name, &argument)?,
+                text: self.execute_tool_with_recovery(Some(normalized_input), name, &argument)?,
                 thinking: None,
                 control: None,
             });
         }
-        if let Some(interrupt_result) = self.try_handle_interrupt_shortcut(input)? {
+        if let Some(interrupt_result) = self.try_handle_interrupt_shortcut(normalized_input)? {
             return Ok(AssistantReply {
                 text: interrupt_result,
                 thinking: None,
                 control: None,
             });
         }
-        if let Some(payload) = parse_special_command_argument(input, REMINDER_TRIGGER_COMMAND) {
+        if let Some(payload) =
+            parse_special_command_argument(normalized_input, REMINDER_TRIGGER_COMMAND)
+        {
             return Ok(AssistantReply {
                 text: self.think_due_reminder(payload)?,
                 thinking: None,
                 control: None,
             });
         }
-        if matches_special_command(input, "/remember") {
+        if matches_special_command(normalized_input, "/remember") {
             return Ok(AssistantReply {
                 text: self.remember_deep_memory()?,
                 thinking: None,
@@ -144,7 +188,7 @@ impl BottyBody {
 
         let tools = self.tool_definitions();
         let system_prompt = self.build_system_prompt()?;
-        let conversation = [ProviderMessage::UserText(input.to_string())];
+        let conversation = [parsed_input.llm_message];
         let first_response = self.brain.think(&system_prompt, &conversation, &tools)?;
 
         match first_response {
@@ -189,8 +233,15 @@ impl BottyBody {
         first_tool_uses: Vec<ProviderToolUse>,
     ) -> io::Result<AssistantReply> {
         let system_prompt = self.build_system_prompt()?;
-        let conversation = vec![ProviderMessage::UserText(input.to_string())];
-        self.run_tool_call_loop(&system_prompt, tools, conversation, first_tool_uses, Some(input))
+        let parsed_input = self.parse_input_message(input)?;
+        let conversation = vec![parsed_input.llm_message];
+        self.run_tool_call_loop(
+            &system_prompt,
+            tools,
+            conversation,
+            first_tool_uses,
+            Some(parsed_input.display_text.as_str()),
+        )
     }
 
     fn continue_tool_call(
@@ -250,7 +301,9 @@ impl BottyBody {
                 assistant_content_json: tool_uses
                     .first()
                     .map(|tool_use| tool_use.assistant_content_json.clone())
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing tool use"))?,
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "missing tool use")
+                    })?,
             });
             for tool_use in &tool_uses {
                 let tool_result = self.execute_tool_with_recovery(
@@ -360,9 +413,11 @@ impl BottyBody {
         let Some(argument) = parse_leader_interrupt_shortcut(input) else {
             return Ok(None);
         };
-        Ok(Some(
-            self.execute_tool_with_recovery(Some(input), "leader", &argument)?,
-        ))
+        Ok(Some(self.execute_tool_with_recovery(
+            Some(input),
+            "leader",
+            &argument,
+        )?))
     }
 
     fn execute_tool_with_recovery(
@@ -628,6 +683,69 @@ impl BottyBody {
     }
 }
 
+impl BottyBody {
+    fn parse_input_message(&self, input: &str) -> io::Result<ParsedInput> {
+        let Some(payload) = input.trim().strip_prefix(IMAGE_REQUEST_PREFIX) else {
+            return Ok(ParsedInput {
+                display_text: input.to_string(),
+                llm_message: ProviderMessage::UserText(input.to_string()),
+            });
+        };
+        let envelope: InboundImageEnvelope = serde_json::from_str(payload).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse inbound image payload failed: {err}"),
+            )
+        })?;
+        let source = envelope.source.trim();
+        let user_text = envelope.user_text.trim();
+        let display_text = if user_text.is_empty() {
+            format!("{source}: {IMAGE_ONLY_DEFAULT_PROMPT}")
+        } else {
+            format!("{source}: {user_text}")
+        };
+
+        if active_and_image_providers_differ()? {
+            let summary = self.execute_tool_with_recovery(
+                Some(display_text.as_str()),
+                "image",
+                &serde_json::json!({
+                    "source": source,
+                    "user_text": user_text,
+                    "images": envelope.images,
+                })
+                .to_string(),
+            )?;
+            let forwarded = build_forwarded_image_text(source, user_text, &summary);
+            return Ok(ParsedInput {
+                display_text,
+                llm_message: ProviderMessage::UserText(forwarded),
+            });
+        }
+
+        if !active_supports_vision()? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "暂不支持图像识别，请配置支持图像的 provider。",
+            ));
+        }
+
+        let mut parts = Vec::new();
+        parts.push(ProviderContentPart::Text(if user_text.is_empty() {
+            format!("{source}: {IMAGE_ONLY_DEFAULT_PROMPT}")
+        } else {
+            format!("{source}: {user_text}")
+        }));
+        for image in &envelope.images {
+            parts.push(load_image_part(image)?);
+        }
+        Ok(ParsedInput {
+            display_text,
+            llm_message: ProviderMessage::User { parts },
+        })
+    }
+}
+
 fn parse_debug_tool_call(input: &str) -> Option<(&str, String)> {
     let trimmed = input.trim();
     let rest = trimmed.strip_prefix("/test ")?;
@@ -685,20 +803,47 @@ fn matches_special_command(input: &str, command: &str) -> bool {
 fn first_user_text(messages: &[ProviderMessage]) -> Option<&str> {
     messages.iter().find_map(|message| match message {
         ProviderMessage::UserText(text) => Some(text.as_str()),
+        ProviderMessage::User { parts } => parts.iter().find_map(|part| match part {
+            ProviderContentPart::Text(text) => Some(text.as_str()),
+            _ => None,
+        }),
         _ => None,
     })
 }
 
-fn default_tool_error_message(user_request: &str, tool_name: &str) -> String {
-    if contains_cjk(user_request) {
-        format!("处理你的请求时，工具 `{tool_name}` 执行失败了。我没有继续暴露内部报错；如果你愿意，我可以换一种方式继续尝试。")
+fn load_image_part(image: &InboundImagePayload) -> io::Result<ProviderContentPart> {
+    let local_path = image.local_path.as_deref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inbound image local_path is missing",
+        )
+    })?;
+    let bytes = fs::read(local_path)?;
+    Ok(ProviderContentPart::ImageBase64 {
+        media_type: image
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| "image/jpeg".to_string()),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn build_forwarded_image_text(source: &str, user_text: &str, summary: &str) -> String {
+    if user_text.trim().is_empty() {
+        format!(
+            "{source}: 用户发送了一张图片。\n\n图片解析结果：\n{summary}\n\n用户没有提供额外文字需求。请根据图片内容猜测其意图并直接帮助。"
+        )
     } else {
-        format!("The `{tool_name}` tool failed while I was handling your request. I am not surfacing the internal error directly; if you want, I can try a different approach.")
+        format!(
+            "{source}: 用户请求：{user_text}\n\n图片解析结果：\n{summary}\n\n请结合以上图片解析结果继续处理用户请求。"
+        )
     }
 }
 
-fn contains_cjk(text: &str) -> bool {
-    text.chars().any(|ch| matches!(ch as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF))
+fn default_tool_error_message(_user_request: &str, tool_name: &str) -> String {
+    format!(
+        "The `{tool_name}` tool failed while I was handling your request. I am not surfacing the internal error directly; if you want, I can try a different approach."
+    )
 }
 
 fn parse_special_command_argument<'a>(input: &'a str, command: &str) -> Option<&'a str> {

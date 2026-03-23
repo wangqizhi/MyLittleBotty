@@ -1,5 +1,13 @@
 # Release History
 
+## 2026-03-23
+
+- Added chatbot inbound image support for Telegram, Feishu, and Weixin.
+- Added `ai.provider.<profile>.vision` routing, runtime image-profile selection, and direct multimodal requests when the active profile already supports vision.
+- Added the built-in `image` skill for the split-provider path, so an image-capable provider can summarize image content and OCR text before forwarding the result to the active provider.
+- Added a 4-second pending-image merge window so follow-up text can be combined with an inbound image into one request.
+- Added Weixin inbound image download and decrypt flow based on CDN `encrypt_query_param` plus AES-128-ECB, and introduced `chatbot.weixin.cdn_base` with default `https://novac2c.cdn.weixin.qq.com/c2c`.
+
 ## 2026-03-18
 
 - `/setup` now supports multiple AI provider profiles. AI profiles are managed in an overlay panel with create, edit, activate, and delete actions; deleting the active profile is blocked until another profile is activated.
