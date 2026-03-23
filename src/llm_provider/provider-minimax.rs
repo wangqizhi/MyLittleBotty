@@ -3,7 +3,9 @@ use crate::llm_provider::{
     LlmProvider, ProviderContentPart, ProviderMessage, ProviderRequest, ProviderResponse,
     ProviderTextResponse, ProviderToolDefinition, ProviderToolUse,
 };
+use base64::Engine;
 use serde_json::{json, Value};
+use std::fs;
 use std::io;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -498,6 +500,12 @@ fn flatten_openai_message_content(message: &ProviderMessage) -> Value {
                             "url": format!("data:{media_type};base64,{data}")
                         },
                     }),
+                    ProviderContentPart::ImageFilePath { path, .. } => json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("file://{path}")
+                        },
+                    }),
                 })
                 .collect(),
         ),
@@ -527,6 +535,19 @@ fn build_anthropic_user_content(parts: &[ProviderContentPart]) -> Vec<Value> {
                     "data": data,
                 },
             }),
+            ProviderContentPart::ImageFilePath { media_type, path } => {
+                let data = fs::read(path)
+                    .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+                    .unwrap_or_default();
+                json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    },
+                })
+            }
         })
         .collect()
 }

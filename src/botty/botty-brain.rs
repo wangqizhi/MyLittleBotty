@@ -21,7 +21,7 @@ use crate::llm_provider::{
 };
 
 const AI_PROVIDER_REQUEST_MAX_RETRIES: usize = 3;
-const AI_PROVIDER_RETRY_ON_HTTP_400: bool = true;
+const AI_PROVIDER_RETRY_ON_HTTP_400: bool = false;
 
 #[derive(Clone)]
 pub struct BrainConfig {
@@ -147,6 +147,12 @@ impl BottyBrain {
 
                     if !response_body.is_empty() {
                         self.log_debug("response", &response_body)?;
+                    }
+                    if let Some(headers) = response_headers.as_deref() {
+                        let trimmed = headers.trim();
+                        if !trimmed.is_empty() {
+                            self.log_debug("response-headers", trimmed)?;
+                        }
                     }
                     if !response_error.is_empty() {
                         self.log_debug("response-stderr", &response_error)?;
@@ -390,6 +396,7 @@ fn endpoint_requires_apikey(endpoint: &str) -> bool {
     }
     true
 }
+
 
 fn append_debug_log_line(
     direction: &str,

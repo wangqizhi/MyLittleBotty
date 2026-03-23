@@ -37,6 +37,7 @@ pub struct ProviderTextResponse {
 pub enum ProviderContentPart {
     Text(String),
     ImageBase64 { media_type: String, data: String },
+    ImageFilePath { media_type: String, path: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

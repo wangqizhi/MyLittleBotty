@@ -1,5 +1,6 @@
 use crate::botty_brain::{
-    active_and_image_providers_differ, active_supports_vision, is_llm_connection_error, BottyBrain,
+    active_and_image_providers_differ, active_supports_vision, is_llm_connection_error,
+    BottyBrain,
 };
 use crate::botty_guy::{
     builtin_role_specs, expand_custom_role_skill_names, expand_role_skill_names,
@@ -19,6 +20,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEEP_MEMORY_CONTEXT_ROUNDS: usize = 10;
 const REMEMBER_MAX_LINES: usize = 100;
@@ -29,6 +31,9 @@ const ASYNC_DELEGATION_PREFIX: &str = "__botty_async_delegate__";
 const IMAGE_REQUEST_PREFIX: &str = "__botty_image_request__";
 const IMAGE_ONLY_DEFAULT_PROMPT: &str = "总结图片的内容，并猜测用户的需求。";
 const TOOL_ERROR_FORMATTER_SYSTEM_PROMPT: &str = "You rewrite internal tool execution failures into short, user-facing assistant replies. Explain the failure naturally, avoid stack traces or internal implementation details, and keep the reply actionable. If the next step is obvious, mention it briefly. Reply in the same language as the user's request. Keep the reply under 4 sentences.";
+const ACTIVE_VISION_COMPRESS_THRESHOLD_BYTES: u64 = 120 * 1024;
+const ACTIVE_VISION_MAX_DIMENSION: u32 = 768;
+const ACTIVE_VISION_JPEG_QUALITY: u32 = 55;
 
 pub struct AssistantReply {
     pub text: String,
@@ -818,14 +823,67 @@ fn load_image_part(image: &InboundImagePayload) -> io::Result<ProviderContentPar
             "inbound image local_path is missing",
         )
     })?;
-    let bytes = fs::read(local_path)?;
+    let media_type = image
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "image/jpeg".to_string());
+    let bytes = prepare_image_bytes_for_vision(local_path)?;
     Ok(ProviderContentPart::ImageBase64 {
-        media_type: image
-            .mime_type
-            .clone()
-            .unwrap_or_else(|| "image/jpeg".to_string()),
+        media_type,
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
+}
+
+fn prepare_image_bytes_for_vision(local_path: &str) -> io::Result<Vec<u8>> {
+    let metadata = fs::metadata(local_path)?;
+    if metadata.len() <= ACTIVE_VISION_COMPRESS_THRESHOLD_BYTES {
+        return fs::read(local_path);
+    }
+
+    let compressed_path = compressed_vision_image_output_path(local_path);
+    let output = Command::new("sips")
+        .arg("-Z")
+        .arg(ACTIVE_VISION_MAX_DIMENSION.to_string())
+        .arg("-s")
+        .arg("format")
+        .arg("jpeg")
+        .arg("--setProperty")
+        .arg("formatOptions")
+        .arg(ACTIVE_VISION_JPEG_QUALITY.to_string())
+        .arg(local_path)
+        .arg("--out")
+        .arg(&compressed_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(io::Error::other(format!(
+            "compress inbound image failed: {detail}"
+        )));
+    }
+
+    fs::read(compressed_path)
+}
+
+fn compressed_vision_image_output_path(local_path: &str) -> PathBuf {
+    let input = Path::new(local_path);
+    let stem = input
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("image");
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!(
+        "mylittlebotty-active-vision-{}-{}-{}.jpg",
+        std::process::id(),
+        stem,
+        millis
+    ))
 }
 
 fn build_forwarded_image_text(source: &str, user_text: &str, summary: &str) -> String {

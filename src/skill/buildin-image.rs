@@ -1,13 +1,21 @@
 use base64::Engine;
 use serde::Deserialize;
+use std::env;
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::botty_brain::BottyBrain;
+use crate::botty_brain::{log_debug_line_if_enabled, BottyBrain};
 use crate::llm_provider::{ProviderContentPart, ProviderMessage, ProviderResponse};
 use crate::skill::BottySkill;
 
 pub struct BuildinImageSkill;
+
+const IMAGE_PROVIDER_COMPRESS_THRESHOLD_BYTES: u64 = 120 * 1024;
+const IMAGE_PROVIDER_MAX_DIMENSION: u32 = 768;
+const IMAGE_PROVIDER_JPEG_QUALITY: u32 = 55;
 
 #[derive(Deserialize)]
 struct ImageSkillInput {
@@ -55,6 +63,8 @@ impl BottySkill for BuildinImageSkill {
             ));
         }
 
+        log_image_request_debug(&input)?;
+
         let mut parts = Vec::new();
         parts.push(ProviderContentPart::Text(build_image_prompt(
             input.source.as_deref(),
@@ -64,13 +74,14 @@ impl BottySkill for BuildinImageSkill {
             let local_path = image.local_path.as_deref().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "image local_path is required")
             })?;
-            let bytes = fs::read(local_path)?;
+            let media_type = image
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string());
+            let prepared = prepare_image_for_provider(local_path)?;
             parts.push(ProviderContentPart::ImageBase64 {
-                media_type: image
-                    .mime_type
-                    .clone()
-                    .unwrap_or_else(|| "image/jpeg".to_string()),
-                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                media_type,
+                data: base64::engine::general_purpose::STANDARD.encode(prepared.bytes),
             });
         }
 
@@ -100,4 +111,106 @@ fn build_image_prompt(source: Option<&str>, user_text: Option<&str>) -> String {
             "Source: {source}\nUser request: {user_text}\nPlease summarize the image content, extract any visible text, and explain which parts of the image are relevant to the user's request."
         )
     }
+}
+
+fn log_image_request_debug(input: &ImageSkillInput) -> io::Result<()> {
+    let source = input.source.as_deref().unwrap_or("chatbot").trim();
+    let user_text = input.user_text.as_deref().unwrap_or("").trim();
+    let mut lines = vec![format!(
+        "source={source} user_text_len={} image_count={}",
+        user_text.len(),
+        input.images.len()
+    )];
+
+    for (index, image) in input.images.iter().enumerate() {
+        let local_path = image.local_path.as_deref().unwrap_or("").trim();
+        let mime_type = image.mime_type.as_deref().unwrap_or("image/jpeg").trim();
+        let file_size = if local_path.is_empty() {
+            "unknown".to_string()
+        } else {
+            fs::metadata(local_path)
+                .map(|meta| meta.len().to_string())
+                .unwrap_or_else(|_| "unavailable".to_string())
+        };
+        lines.push(format!(
+            "image[{index}] path={local_path} mime_type={mime_type} size_bytes={file_size}"
+        ));
+    }
+
+    log_debug_line_if_enabled("image-request-meta", &lines.join("\n"), None)
+}
+
+struct PreparedImage {
+    bytes: Vec<u8>,
+}
+
+fn prepare_image_for_provider(local_path: &str) -> io::Result<PreparedImage> {
+    let metadata = fs::metadata(local_path)?;
+    if metadata.len() <= IMAGE_PROVIDER_COMPRESS_THRESHOLD_BYTES {
+        return Ok(PreparedImage {
+            bytes: fs::read(local_path)?,
+        });
+    }
+
+    let compressed_path = compressed_image_output_path(local_path);
+    let output = Command::new("sips")
+        .arg("-Z")
+        .arg(IMAGE_PROVIDER_MAX_DIMENSION.to_string())
+        .arg("-s")
+        .arg("format")
+        .arg("jpeg")
+        .arg("--setProperty")
+        .arg("formatOptions")
+        .arg(IMAGE_PROVIDER_JPEG_QUALITY.to_string())
+        .arg(local_path)
+        .arg("--out")
+        .arg(&compressed_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(io::Error::other(format!(
+            "compress image for provider failed: {detail}"
+        )));
+    }
+
+    let compressed_meta = fs::metadata(&compressed_path)?;
+    log_debug_line_if_enabled(
+        "image-compress",
+        &format!(
+            "source_path={} compressed_path={} original_size_bytes={} compressed_size_bytes={} max_dimension={} jpeg_quality={}",
+            local_path,
+            compressed_path.display(),
+            metadata.len(),
+            compressed_meta.len(),
+            IMAGE_PROVIDER_MAX_DIMENSION,
+            IMAGE_PROVIDER_JPEG_QUALITY
+        ),
+        None,
+    )?;
+
+    Ok(PreparedImage {
+        bytes: fs::read(compressed_path)?,
+    })
+}
+
+fn compressed_image_output_path(local_path: &str) -> PathBuf {
+    let input = Path::new(local_path);
+    let stem = input
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("image");
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!(
+        "mylittlebotty-image-provider-{}-{}-{}.jpg",
+        std::process::id(),
+        stem,
+        millis
+    ))
 }

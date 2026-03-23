@@ -3,7 +3,9 @@ use crate::llm_provider::{
     LlmProvider, ProviderContentPart, ProviderMessage, ProviderRequest, ProviderResponse,
     ProviderTextResponse, ProviderToolDefinition, ProviderToolUse,
 };
+use base64::Engine;
 use serde_json::{json, Value};
+use std::fs;
 use std::io;
 
 const DEFAULT_GLM_MODEL: &str = "glm-4.7";
@@ -212,6 +214,17 @@ fn build_glm_user_content(parts: &[ProviderContentPart]) -> Value {
                         "url": format!("data:{media_type};base64,{data}")
                     },
                 }),
+                ProviderContentPart::ImageFilePath { media_type, path } => {
+                    let data = fs::read(path)
+                        .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+                        .unwrap_or_default();
+                    json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{media_type};base64,{data}")
+                        },
+                    })
+                }
             })
             .collect(),
     )

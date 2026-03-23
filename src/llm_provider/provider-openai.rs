@@ -184,6 +184,12 @@ fn build_message_content(message: &ProviderMessage) -> Value {
                             "url": format!("data:{media_type};base64,{data}")
                         },
                     }),
+                    ProviderContentPart::ImageFilePath { path, .. } => json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("file://{path}")
+                        },
+                    }),
                 })
                 .collect(),
         ),
