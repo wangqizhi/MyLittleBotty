@@ -42,19 +42,10 @@ pub enum SetupFieldId {
     BrowserChromeMaxTabs,
     WorkDir,
     ChatbotProvider,
-    TelegramEnabled,
-    TelegramApikey,
-    TelegramPollSeconds,
-    TelegramWhitelistUserIds,
-    FeishuEnabled,
-    FeishuAppId,
-    FeishuAppSecret,
-    FeishuPollSeconds,
-    FeishuChatId,
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 19] = [
+    pub const ALL: [SetupFieldId; 10] = [
         SetupFieldId::AiProfiles,
         SetupFieldId::AgentProvider,
         SetupFieldId::AgentCodexCommand,
@@ -65,15 +56,6 @@ impl SetupFieldId {
         SetupFieldId::BrowserChromeMaxTabs,
         SetupFieldId::WorkDir,
         SetupFieldId::ChatbotProvider,
-        SetupFieldId::TelegramEnabled,
-        SetupFieldId::TelegramApikey,
-        SetupFieldId::TelegramPollSeconds,
-        SetupFieldId::TelegramWhitelistUserIds,
-        SetupFieldId::FeishuEnabled,
-        SetupFieldId::FeishuAppId,
-        SetupFieldId::FeishuAppSecret,
-        SetupFieldId::FeishuPollSeconds,
-        SetupFieldId::FeishuChatId,
     ];
 
     pub fn from_index(index: usize) -> Self {
@@ -94,33 +76,16 @@ impl SetupFieldId {
             SetupFieldId::BrowserChromeUserDataDir => "browser chrome user data dir",
             SetupFieldId::BrowserChromeMaxTabs => "browser chrome max tabs",
             SetupFieldId::WorkDir => "work dir",
-            SetupFieldId::ChatbotProvider => "chatbot provider",
-            SetupFieldId::TelegramEnabled => "telegram enabled",
-            SetupFieldId::TelegramApikey => "telegram bot token",
-            SetupFieldId::TelegramPollSeconds => "telegram poll seconds",
-            SetupFieldId::TelegramWhitelistUserIds => "telegram whitelist user_ids",
-            SetupFieldId::FeishuEnabled => "feishu enabled",
-            SetupFieldId::FeishuAppId => "feishu app id",
-            SetupFieldId::FeishuAppSecret => "feishu app secret",
-            SetupFieldId::FeishuPollSeconds => "feishu poll seconds",
-            SetupFieldId::FeishuChatId => "feishu chat id",
+            SetupFieldId::ChatbotProvider => "chatbot providers",
         }
     }
 
     pub fn is_toggle(self) -> bool {
-        matches!(
-            self,
-            SetupFieldId::TelegramEnabled
-                | SetupFieldId::BrowserChromeHeadless
-                | SetupFieldId::FeishuEnabled
-        )
+        matches!(self, SetupFieldId::BrowserChromeHeadless)
     }
 
     pub fn is_masked(self) -> bool {
-        matches!(
-            self,
-            SetupFieldId::TelegramApikey | SetupFieldId::FeishuAppSecret
-        )
+        false
     }
 }
 
@@ -266,34 +231,7 @@ impl SetupConfig {
             SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
             SetupFieldId::BrowserChromeMaxTabs => self.browser_chrome_max_tabs.to_string(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
-            SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
-            SetupFieldId::TelegramEnabled => {
-                if self.chatbot_telegram_enabled {
-                    "[x] true".to_string()
-                } else {
-                    "[ ] false".to_string()
-                }
-            }
-            SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey.clone(),
-            SetupFieldId::TelegramPollSeconds => {
-                self.chatbot_telegram_poll_interval_seconds.to_string()
-            }
-            SetupFieldId::TelegramWhitelistUserIds => {
-                self.chatbot_telegram_whitelist_user_ids.clone()
-            }
-            SetupFieldId::FeishuEnabled => {
-                if self.chatbot_feishu_enabled {
-                    "[x] true".to_string()
-                } else {
-                    "[ ] false".to_string()
-                }
-            }
-            SetupFieldId::FeishuAppId => self.chatbot_feishu_app_id.clone(),
-            SetupFieldId::FeishuAppSecret => self.chatbot_feishu_app_secret.clone(),
-            SetupFieldId::FeishuPollSeconds => {
-                self.chatbot_feishu_poll_interval_seconds.to_string()
-            }
-            SetupFieldId::FeishuChatId => self.chatbot_feishu_chat_id.clone(),
+            SetupFieldId::ChatbotProvider => self.chatbot_provider_summary(),
         }
     }
 
@@ -309,20 +247,6 @@ impl SetupConfig {
             SetupFieldId::BrowserChromeMaxTabs => self.browser_chrome_max_tabs.to_string(),
             SetupFieldId::WorkDir => self.work_dir.clone(),
             SetupFieldId::ChatbotProvider => self.chatbot_provider.clone(),
-            SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey.clone(),
-            SetupFieldId::TelegramPollSeconds => {
-                self.chatbot_telegram_poll_interval_seconds.to_string()
-            }
-            SetupFieldId::TelegramWhitelistUserIds => {
-                self.chatbot_telegram_whitelist_user_ids.clone()
-            }
-            SetupFieldId::FeishuAppId => self.chatbot_feishu_app_id.clone(),
-            SetupFieldId::FeishuAppSecret => self.chatbot_feishu_app_secret.clone(),
-            SetupFieldId::FeishuPollSeconds => {
-                self.chatbot_feishu_poll_interval_seconds.to_string()
-            }
-            SetupFieldId::FeishuChatId => self.chatbot_feishu_chat_id.clone(),
-            SetupFieldId::TelegramEnabled | SetupFieldId::FeishuEnabled => String::new(),
         }
     }
 
@@ -346,37 +270,13 @@ impl SetupConfig {
                 self.work_dir = botty_io::normalize_work_dir_input(value);
             }
             SetupFieldId::ChatbotProvider => self.chatbot_provider = value.to_string(),
-            SetupFieldId::TelegramApikey => self.chatbot_telegram_apikey = value.to_string(),
-            SetupFieldId::TelegramPollSeconds => {
-                if let Ok(seconds) = value.trim().parse::<u64>() {
-                    self.chatbot_telegram_poll_interval_seconds = seconds.max(1);
-                }
-            }
-            SetupFieldId::TelegramWhitelistUserIds => {
-                self.chatbot_telegram_whitelist_user_ids = value.to_string()
-            }
-            SetupFieldId::FeishuAppId => self.chatbot_feishu_app_id = value.to_string(),
-            SetupFieldId::FeishuAppSecret => self.chatbot_feishu_app_secret = value.to_string(),
-            SetupFieldId::FeishuPollSeconds => {
-                if let Ok(seconds) = value.trim().parse::<u64>() {
-                    self.chatbot_feishu_poll_interval_seconds = seconds.max(1);
-                }
-            }
-            SetupFieldId::FeishuChatId => self.chatbot_feishu_chat_id = value.to_string(),
-            SetupFieldId::TelegramEnabled | SetupFieldId::FeishuEnabled => {}
         }
     }
 
     pub fn toggle_field(&mut self, field: SetupFieldId) {
         match field {
-            SetupFieldId::TelegramEnabled => {
-                self.chatbot_telegram_enabled = !self.chatbot_telegram_enabled
-            }
             SetupFieldId::BrowserChromeHeadless => {
                 self.browser_chrome_headless = !self.browser_chrome_headless
-            }
-            SetupFieldId::FeishuEnabled => {
-                self.chatbot_feishu_enabled = !self.chatbot_feishu_enabled
             }
             _ => {}
         }
@@ -412,6 +312,15 @@ impl SetupConfig {
             self.ai_provider_active,
             self.ai_provider_profiles.len()
         )
+    }
+
+    pub fn chatbot_provider_summary(&self) -> String {
+        let enabled = enabled_provider_list(self);
+        if enabled.is_empty() {
+            "none enabled".to_string()
+        } else {
+            enabled
+        }
     }
 
     pub fn activate_ai_profile_by_index(&mut self, index: usize) {

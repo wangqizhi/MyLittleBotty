@@ -1,4 +1,5 @@
 use crate::frontend::frontend_app::{
+    ChatbotFieldEdit, ChatbotProviderEditor, ChatbotProviderFieldId, ChatbotProviderPanel,
     CreateSkillEditorFocus, FieldEdit, FrontendApp, GuyEnvEditor, GuyEnvEditorFocus, Mode,
     ProfileFieldEdit, Role, SetupOverlay, SetupProfileEditor, SetupProfilePanel,
     SubAgentDeleteConfirm, SubAgentEditor, SubAgentEditorFocus, SubmitOutcome,
@@ -247,6 +248,17 @@ fn handle_panel_key<R: FrontendRpc>(
         }
     );
 
+    let chatbot_editor_open = matches!(
+        app.mode(),
+        Mode::Setup {
+            overlay: Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                editor: Some(_),
+                ..
+            })),
+            ..
+        }
+    );
+
     let editor_open = matches!(
         app.mode(),
         Mode::Setup {
@@ -258,6 +270,18 @@ fn handle_panel_key<R: FrontendRpc>(
         Mode::Setup {
             overlay: Some(SetupOverlay::AiProfiles(SetupProfilePanel {
                 editor: Some(SetupProfileEditor {
+                    field_editor: Some(_),
+                    ..
+                }),
+                ..
+            })),
+            ..
+        }
+    ) || matches!(
+        app.mode(),
+        Mode::Setup {
+            overlay: Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                editor: Some(ChatbotProviderEditor {
                     field_editor: Some(_),
                     ..
                 }),
@@ -321,6 +345,16 @@ fn handle_panel_key<R: FrontendRpc>(
         }
     }
 
+    if chatbot_editor_open {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') | KeyCode::Char('S') => app.editor_submit(rpc),
+                _ => {}
+            }
+            return Ok(None);
+        }
+    }
+
     match app.mode() {
         Mode::Setup { overlay, .. } => match key.code {
             KeyCode::Esc => {
@@ -346,6 +380,16 @@ fn handle_panel_key<R: FrontendRpc>(
                     }))
                 ) {
                     app.setup_ai_profile_editor_prev_field();
+                } else if matches!(
+                    overlay,
+                    Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
+                    app.setup_chatbot_provider_editor_prev_field();
+                } else if matches!(overlay, Some(SetupOverlay::ChatbotProviders(_))) {
+                    app.setup_chatbot_providers_prev();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_prev();
                 } else {
@@ -361,6 +405,16 @@ fn handle_panel_key<R: FrontendRpc>(
                     }))
                 ) {
                     app.setup_ai_profile_editor_next_field();
+                } else if matches!(
+                    overlay,
+                    Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
+                    app.setup_chatbot_provider_editor_next_field();
+                } else if matches!(overlay, Some(SetupOverlay::ChatbotProviders(_))) {
+                    app.setup_chatbot_providers_next();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_next();
                 } else {
@@ -376,22 +430,24 @@ fn handle_panel_key<R: FrontendRpc>(
                     }))
                 ) {
                     app.setup_ai_profile_editor_prev_field();
+                } else if matches!(
+                    overlay,
+                    Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
+                    app.setup_chatbot_provider_editor_prev_field();
+                } else if matches!(overlay, Some(SetupOverlay::ChatbotProviders(_))) {
+                    app.setup_chatbot_providers_prev();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_prev();
                 } else {
                     app.setup_prev_field();
                 }
             }
-            KeyCode::Left => {
-                if overlay.is_none() {
-                    app.setup_cycle_provider(-1);
-                }
-            }
-            KeyCode::Right => {
-                if overlay.is_none() {
-                    app.setup_cycle_provider(1);
-                }
-            }
+            KeyCode::Left => {}
+            KeyCode::Right => {}
             KeyCode::Enter => {
                 if matches!(
                     overlay,
@@ -401,6 +457,16 @@ fn handle_panel_key<R: FrontendRpc>(
                     }))
                 ) {
                     app.setup_ai_profile_editor_activate();
+                } else if matches!(
+                    overlay,
+                    Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
+                    app.setup_chatbot_provider_editor_activate();
+                } else if matches!(overlay, Some(SetupOverlay::ChatbotProviders(_))) {
+                    app.setup_chatbot_providers_edit_selected();
                 } else if overlay.is_some() {
                     app.setup_ai_profiles_edit_selected();
                 } else {
@@ -416,22 +482,30 @@ fn handle_panel_key<R: FrontendRpc>(
                     }))
                 ) {
                     app.setup_ai_profile_editor_toggle_selected();
+                } else if matches!(
+                    overlay,
+                    Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                        editor: Some(_),
+                        ..
+                    }))
+                ) {
+                    app.setup_chatbot_provider_editor_toggle_selected();
                 } else {
                     app.setup_toggle_selected();
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
-                if overlay.is_some() {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(_))) {
                     app.setup_ai_profiles_activate();
                 }
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
-                if overlay.is_some() {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(_))) {
                     app.setup_ai_profiles_delete_selected();
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                if overlay.is_some() {
+                if matches!(overlay, Some(SetupOverlay::AiProfiles(_))) {
                     app.setup_ai_profiles_new();
                 } else {
                     app.setup_open_ai_profiles();
@@ -476,14 +550,13 @@ fn render(app: &FrontendApp, frame: &mut Frame) {
         Mode::Chat => render_chat_page(app, frame),
         Mode::Setup {
             selected_field,
-            selected_provider,
+            selected_provider: _,
             overlay,
             config,
             ..
         } => render_setup_page(
             frame,
             *selected_field,
-            *selected_provider,
             overlay.as_ref(),
             config,
             app.pending_setup_save_text(),
@@ -632,7 +705,6 @@ fn spawn_setup_save_request(
 fn render_setup_page(
     frame: &mut Frame,
     selected_field: usize,
-    selected_provider: usize,
     overlay: Option<&SetupOverlay>,
     config: &SetupConfig,
     pending_message: Option<&str>,
@@ -677,14 +749,13 @@ fn render_setup_page(
     );
     frame.render_widget(field_list, top[0]);
 
-    let selected =
-        CHATBOT_PROVIDERS[selected_provider.min(CHATBOT_PROVIDERS.len().saturating_sub(1))];
     let side = Paragraph::new(Text::from(vec![
         Line::raw("Actions:"),
         Line::raw("- Ctrl+S: Save and return"),
         Line::raw("- Esc: Cancel"),
         Line::raw("- Tab / Shift+Tab: Next/Prev field"),
         Line::raw("- Enter on AI profiles opens profile manager"),
+        Line::raw("- Enter on chatbot providers opens provider manager"),
         Line::raw(""),
         Line::raw("Work dir:"),
         Line::raw("- default: ~/opt/mylittlebotty-workdir"),
@@ -692,12 +763,13 @@ fn render_setup_page(
         Line::raw(""),
         Line::raw("Chatbot provider:"),
         Line::raw(format!("- {}", CHATBOT_PROVIDERS.join(", "))),
-        Line::raw(format!("- current: {selected}")),
-        Line::raw("- Enter edits current field"),
-        Line::raw("- On chatbot provider, Enter/Left/Right switches provider"),
+        Line::raw(format!("- current: {}", config.chatbot_provider)),
+        Line::raw("- enabled providers are shown in the field value"),
+        Line::raw("- configure provider details inside the panel"),
         Line::raw("- telegram whitelist user_ids supports comma-separated IDs"),
         Line::raw("- feishu input uses long connection and needs app id + app secret"),
         Line::raw("- feishu chat id is only needed for proactive push like reminders"),
+        Line::raw("- weixin panel supports enable/apikey/account_id/user_id edits"),
     ]))
     .wrap(Wrap { trim: false })
     .block(Block::default().borders(Borders::ALL).title("Help"));
@@ -718,7 +790,77 @@ fn render_setup_page(
         match overlay {
             SetupOverlay::Field(editor) => render_field_editor(frame, editor),
             SetupOverlay::AiProfiles(panel) => render_ai_profiles_panel(frame, panel, config),
+            SetupOverlay::ChatbotProviders(panel) => {
+                render_chatbot_providers_panel(frame, panel, config)
+            }
         }
+    }
+}
+
+fn render_chatbot_providers_panel(
+    frame: &mut Frame,
+    panel: &ChatbotProviderPanel,
+    config: &SetupConfig,
+) {
+    let area = centered_rect(frame.area(), 80, 74);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Chatbot Providers | Enter Edit | Up/Down Switch Provider | Esc Close");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let parts = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(inner);
+
+    let provider_items: Vec<ListItem> = CHATBOT_PROVIDERS
+        .iter()
+        .map(|provider| {
+            let enabled = match *provider {
+                "telegram" => config.chatbot_telegram_enabled,
+                "feishu" => config.chatbot_feishu_enabled,
+                "weixin" => config.chatbot_weixin_enabled,
+                _ => false,
+            };
+            let suffix = if enabled { " [enabled]" } else { "" };
+            let style = if *provider == config.chatbot_provider {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::raw(format!("{provider}{suffix}"))).style(style)
+        })
+        .collect();
+
+    frame.render_widget(
+        List::new(provider_items).block(Block::default().borders(Borders::ALL).title("Providers")),
+        parts[0],
+    );
+
+    let details: Vec<Line> = chatbot_provider_detail_lines(config, config.chatbot_provider.as_str());
+    frame.render_widget(
+        Paragraph::new(Text::from(details))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Details")),
+        parts[1],
+    );
+
+    if let Some(editor) = panel.editor.as_ref() {
+        render_chatbot_provider_editor(frame, editor, config);
+    }
+    if let Some(message) = panel.message.as_deref() {
+        render_message_modal(frame, "Chatbot Provider Message", message);
     }
 }
 
@@ -976,6 +1118,183 @@ fn render_profile_field_editor(frame: &mut Frame, editor: &ProfileFieldEdit) {
         parts[1],
         text_display_width_at(editor.input.as_str(), editor.cursor),
     );
+}
+
+fn render_chatbot_provider_editor(
+    frame: &mut Frame,
+    editor: &ChatbotProviderEditor,
+    config: &SetupConfig,
+) {
+    let area = centered_rect(frame.area(), 72, 68);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).title(
+            "Edit Chatbot Provider | Enter Edit/Toggle | Ctrl+S Save | Esc Cancel",
+        ),
+        area,
+    );
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let items: Vec<ListItem> = chatbot_provider_field_ids(editor.provider.as_str())
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let value = chatbot_provider_display_value(
+                config,
+                editor.provider.as_str(),
+                *field,
+            );
+            let shown = if field.is_masked() {
+                mask_secret(&value)
+            } else {
+                value
+            };
+            ListItem::new(Line::raw(format!(
+                "{}: {}",
+                field.label(editor.provider.as_str()),
+                shown
+            )))
+            .style(if editor.selected_field == idx {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            })
+        })
+        .collect();
+
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{} fields", editor.provider)),
+        ),
+        inner,
+    );
+
+    if let Some(field_editor) = editor.field_editor.as_ref() {
+        render_chatbot_field_editor(frame, field_editor, editor.provider.as_str());
+    }
+}
+
+fn render_chatbot_field_editor(frame: &mut Frame, editor: &ChatbotFieldEdit, provider: &str) {
+    let area = centered_rect(frame.area(), 68, 24);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Edit Chatbot Field | Ctrl+A Home | <- -> Move | Ctrl+C Clear");
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(inner);
+
+    let label = editor.selected_field.label(provider);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::raw(format!("Field: {label}")),
+            Line::raw("Enter: save field"),
+            Line::raw("Esc: cancel field editing"),
+        ]))
+        .wrap(Wrap { trim: false }),
+        parts[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(editor.input.as_str())
+            .block(Block::default().borders(Borders::ALL).title(label)),
+        parts[1],
+    );
+    place_cursor(
+        frame,
+        parts[1],
+        text_display_width_at(editor.input.as_str(), editor.cursor),
+    );
+}
+
+fn chatbot_provider_field_ids(provider: &str) -> &'static [ChatbotProviderFieldId] {
+    ChatbotProviderFieldId::fields_for(provider)
+}
+
+fn chatbot_provider_display_value(
+    config: &SetupConfig,
+    provider: &str,
+    field: ChatbotProviderFieldId,
+) -> String {
+    match (provider, field) {
+        ("telegram", ChatbotProviderFieldId::Enabled) => checkbox_text(config.chatbot_telegram_enabled),
+        ("telegram", ChatbotProviderFieldId::ApiBase) => config.chatbot_telegram_api_base.clone(),
+        ("telegram", ChatbotProviderFieldId::Token) => config.chatbot_telegram_apikey.clone(),
+        ("telegram", ChatbotProviderFieldId::PollSeconds) => {
+            config.chatbot_telegram_poll_interval_seconds.to_string()
+        }
+        ("telegram", ChatbotProviderFieldId::WhitelistUserIds) => {
+            config.chatbot_telegram_whitelist_user_ids.clone()
+        }
+        ("feishu", ChatbotProviderFieldId::Enabled) => checkbox_text(config.chatbot_feishu_enabled),
+        ("feishu", ChatbotProviderFieldId::ApiBase) => config.chatbot_feishu_api_base.clone(),
+        ("feishu", ChatbotProviderFieldId::AppId) => config.chatbot_feishu_app_id.clone(),
+        ("feishu", ChatbotProviderFieldId::AppSecret) => config.chatbot_feishu_app_secret.clone(),
+        ("feishu", ChatbotProviderFieldId::Token) => config.chatbot_feishu_access_token.clone(),
+        ("feishu", ChatbotProviderFieldId::PollSeconds) => {
+            config.chatbot_feishu_poll_interval_seconds.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::ChatId) => config.chatbot_feishu_chat_id.clone(),
+        ("weixin", ChatbotProviderFieldId::Enabled) => checkbox_text(config.chatbot_weixin_enabled),
+        ("weixin", ChatbotProviderFieldId::ApiBase) => config.chatbot_weixin_api_base.clone(),
+        ("weixin", ChatbotProviderFieldId::CdnBase) => config.chatbot_weixin_cdn_base.clone(),
+        ("weixin", ChatbotProviderFieldId::Token) => config.chatbot_weixin_apikey.clone(),
+        ("weixin", ChatbotProviderFieldId::AccountId) => config.chatbot_weixin_account_id.clone(),
+        ("weixin", ChatbotProviderFieldId::UserId) => config.chatbot_weixin_user_id.clone(),
+        ("weixin", ChatbotProviderFieldId::WhitelistUserIds) => {
+            config.chatbot_weixin_whitelist_user_ids.clone()
+        }
+        ("weixin", ChatbotProviderFieldId::PollSeconds) => {
+            config.chatbot_weixin_poll_interval_seconds.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::LongPollTimeoutMs) => {
+            config.chatbot_weixin_long_poll_timeout_ms.to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+fn chatbot_provider_detail_lines(config: &SetupConfig, provider: &str) -> Vec<Line<'static>> {
+    chatbot_provider_field_ids(provider)
+        .iter()
+        .map(|field| {
+            let value = chatbot_provider_display_value(config, provider, *field);
+            let shown = if field.is_masked() {
+                mask_secret(&value)
+            } else {
+                value
+            };
+            Line::raw(format!("{}: {}", field.label(provider), shown))
+        })
+        .collect()
+}
+
+fn checkbox_text(value: bool) -> String {
+    if value {
+        "[x] true".to_string()
+    } else {
+        "[ ] false".to_string()
+    }
 }
 
 fn render_message_modal(frame: &mut Frame, title: &str, message: &str) {

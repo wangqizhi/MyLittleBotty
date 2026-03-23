@@ -106,6 +106,7 @@ pub enum CreateSkillEditorFocus {
 pub enum SetupOverlay {
     Field(FieldEdit),
     AiProfiles(SetupProfilePanel),
+    ChatbotProviders(ChatbotProviderPanel),
 }
 
 pub struct GuyEnvEditor {
@@ -144,6 +145,23 @@ pub struct SetupProfileEditor {
 
 pub struct ProfileFieldEdit {
     pub selected_field: AiProfileFieldId,
+    pub input: String,
+    pub cursor: usize,
+}
+
+pub struct ChatbotProviderPanel {
+    pub message: Option<String>,
+    pub editor: Option<ChatbotProviderEditor>,
+}
+
+pub struct ChatbotProviderEditor {
+    pub provider: String,
+    pub selected_field: usize,
+    pub field_editor: Option<ChatbotFieldEdit>,
+}
+
+pub struct ChatbotFieldEdit {
+    pub selected_field: ChatbotProviderFieldId,
     pub input: String,
     pub cursor: usize,
 }
@@ -188,6 +206,110 @@ impl AiProfileFieldId {
 
     pub fn is_toggle(self) -> bool {
         matches!(self, AiProfileFieldId::Debug | AiProfileFieldId::Vision)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ChatbotProviderFieldId {
+    Enabled,
+    ApiBase,
+    Token,
+    PollSeconds,
+    WhitelistUserIds,
+    AppId,
+    AppSecret,
+    ChatId,
+    CdnBase,
+    AccountId,
+    UserId,
+    LongPollTimeoutMs,
+}
+
+const TELEGRAM_CHATBOT_FIELDS: [ChatbotProviderFieldId; 5] = [
+    ChatbotProviderFieldId::Enabled,
+    ChatbotProviderFieldId::ApiBase,
+    ChatbotProviderFieldId::Token,
+    ChatbotProviderFieldId::PollSeconds,
+    ChatbotProviderFieldId::WhitelistUserIds,
+];
+
+const FEISHU_CHATBOT_FIELDS: [ChatbotProviderFieldId; 6] = [
+    ChatbotProviderFieldId::Enabled,
+    ChatbotProviderFieldId::ApiBase,
+    ChatbotProviderFieldId::AppId,
+    ChatbotProviderFieldId::AppSecret,
+    ChatbotProviderFieldId::Token,
+    ChatbotProviderFieldId::PollSeconds,
+];
+
+const FEISHU_CHATBOT_FIELDS_WITH_CHAT_ID: [ChatbotProviderFieldId; 7] = [
+    ChatbotProviderFieldId::Enabled,
+    ChatbotProviderFieldId::ApiBase,
+    ChatbotProviderFieldId::AppId,
+    ChatbotProviderFieldId::AppSecret,
+    ChatbotProviderFieldId::Token,
+    ChatbotProviderFieldId::PollSeconds,
+    ChatbotProviderFieldId::ChatId,
+];
+
+const WEIXIN_CHATBOT_FIELDS: [ChatbotProviderFieldId; 9] = [
+    ChatbotProviderFieldId::Enabled,
+    ChatbotProviderFieldId::ApiBase,
+    ChatbotProviderFieldId::CdnBase,
+    ChatbotProviderFieldId::Token,
+    ChatbotProviderFieldId::AccountId,
+    ChatbotProviderFieldId::UserId,
+    ChatbotProviderFieldId::WhitelistUserIds,
+    ChatbotProviderFieldId::PollSeconds,
+    ChatbotProviderFieldId::LongPollTimeoutMs,
+];
+
+impl ChatbotProviderFieldId {
+    pub fn fields_for(provider: &str) -> &'static [ChatbotProviderFieldId] {
+        match provider {
+            "telegram" => &TELEGRAM_CHATBOT_FIELDS,
+            "feishu" => &FEISHU_CHATBOT_FIELDS_WITH_CHAT_ID,
+            "weixin" => &WEIXIN_CHATBOT_FIELDS,
+            _ => &FEISHU_CHATBOT_FIELDS,
+        }
+    }
+
+    pub fn from_provider_index(provider: &str, index: usize) -> Self {
+        Self::fields_for(provider)
+            .get(index)
+            .copied()
+            .unwrap_or(ChatbotProviderFieldId::Enabled)
+    }
+
+    pub fn label(self, provider: &str) -> &'static str {
+        match (provider, self) {
+            (_, ChatbotProviderFieldId::Enabled) => "enabled",
+            (_, ChatbotProviderFieldId::ApiBase) => "api base",
+            ("telegram", ChatbotProviderFieldId::Token) => "bot token",
+            ("feishu", ChatbotProviderFieldId::Token) => "access token",
+            ("weixin", ChatbotProviderFieldId::Token) => "apikey",
+            (_, ChatbotProviderFieldId::PollSeconds) => "poll seconds",
+            (_, ChatbotProviderFieldId::WhitelistUserIds) => "whitelist user_ids",
+            ("feishu", ChatbotProviderFieldId::AppId) => "app id",
+            ("feishu", ChatbotProviderFieldId::AppSecret) => "app secret",
+            ("feishu", ChatbotProviderFieldId::ChatId) => "chat id",
+            ("weixin", ChatbotProviderFieldId::CdnBase) => "cdn base",
+            ("weixin", ChatbotProviderFieldId::AccountId) => "account id",
+            ("weixin", ChatbotProviderFieldId::UserId) => "user id",
+            ("weixin", ChatbotProviderFieldId::LongPollTimeoutMs) => "long poll timeout ms",
+            _ => "value",
+        }
+    }
+
+    pub fn is_toggle(self) -> bool {
+        matches!(self, ChatbotProviderFieldId::Enabled)
+    }
+
+    pub fn is_masked(self) -> bool {
+        matches!(
+            self,
+            ChatbotProviderFieldId::Token | ChatbotProviderFieldId::AppSecret
+        )
     }
 }
 
@@ -609,26 +731,9 @@ impl FrontendApp {
         *selected_field = (*selected_field + 1) % SetupFieldId::ALL.len();
     }
 
-    pub fn setup_cycle_provider(&mut self, delta: i32) {
-        let Mode::Setup {
-            selected_field,
-            selected_provider,
-            config,
-            ..
-        } = &mut self.mode
-        else {
-            return;
-        };
-
-        if SetupFieldId::from_index(*selected_field) == SetupFieldId::ChatbotProvider {
-            config.cycle_provider(selected_provider, delta);
-        }
-    }
-
     pub fn setup_activate(&mut self) {
         let Mode::Setup {
             selected_field,
-            selected_provider,
             overlay,
             config,
             ..
@@ -647,13 +752,16 @@ impl FrontendApp {
             return;
         }
 
-        if field.is_toggle() {
-            config.toggle_field(field);
+        if field == SetupFieldId::ChatbotProvider {
+            *overlay = Some(SetupOverlay::ChatbotProviders(ChatbotProviderPanel {
+                message: None,
+                editor: None,
+            }));
             return;
         }
 
-        if field == SetupFieldId::ChatbotProvider {
-            config.cycle_provider(selected_provider, 1);
+        if field.is_toggle() {
+            config.toggle_field(field);
             return;
         }
 
@@ -704,6 +812,22 @@ impl FrontendApp {
             if panel.message.is_some() {
                 panel.message = None;
                 return;
+            }
+            if panel.editor.is_some() {
+                panel.editor = None;
+                return;
+            }
+        }
+        if let Some(SetupOverlay::ChatbotProviders(panel)) = overlay.as_mut() {
+            if panel.message.is_some() {
+                panel.message = None;
+                return;
+            }
+            if let Some(editor) = panel.editor.as_mut() {
+                if editor.field_editor.is_some() {
+                    editor.field_editor = None;
+                    return;
+                }
             }
             if panel.editor.is_some() {
                 panel.editor = None;
@@ -922,6 +1046,126 @@ impl FrontendApp {
         self.setup_ai_profiles_panel_mut()?.editor.as_mut()
     }
 
+    pub fn setup_chatbot_providers_prev(&mut self) {
+        let Mode::Setup {
+            selected_provider,
+            config,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        config.cycle_provider(selected_provider, -1);
+    }
+
+    pub fn setup_chatbot_providers_next(&mut self) {
+        let Mode::Setup {
+            selected_provider,
+            config,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        config.cycle_provider(selected_provider, 1);
+    }
+
+    pub fn setup_chatbot_providers_edit_selected(&mut self) {
+        let provider = match &self.mode {
+            Mode::Setup { config, .. } => config.chatbot_provider.clone(),
+            _ => return,
+        };
+        let Some(panel) = self.setup_chatbot_panel_mut() else {
+            return;
+        };
+        panel.message = None;
+        panel.editor = Some(ChatbotProviderEditor {
+            provider,
+            selected_field: 0,
+            field_editor: None,
+        });
+    }
+
+    pub fn setup_chatbot_provider_editor_prev_field(&mut self) {
+        let Some(editor) = self.setup_chatbot_provider_editor_mut() else {
+            return;
+        };
+        let len = ChatbotProviderFieldId::fields_for(editor.provider.as_str()).len();
+        if editor.selected_field == 0 {
+            editor.selected_field = len.saturating_sub(1);
+        } else {
+            editor.selected_field -= 1;
+        }
+    }
+
+    pub fn setup_chatbot_provider_editor_next_field(&mut self) {
+        let Some(editor) = self.setup_chatbot_provider_editor_mut() else {
+            return;
+        };
+        let len = ChatbotProviderFieldId::fields_for(editor.provider.as_str()).len();
+        if len == 0 {
+            return;
+        }
+        editor.selected_field = (editor.selected_field + 1) % len;
+    }
+
+    pub fn setup_chatbot_provider_editor_activate(&mut self) {
+        let (provider, selected_field) = match self.setup_chatbot_provider_editor_mut() {
+            Some(editor) => (editor.provider.clone(), editor.selected_field),
+            None => return,
+        };
+        let field = ChatbotProviderFieldId::from_provider_index(
+            provider.as_str(),
+            selected_field,
+        );
+        if field.is_toggle() {
+            self.setup_chatbot_provider_editor_toggle_selected();
+            return;
+        }
+
+        let input = match &self.mode {
+            Mode::Setup { config, .. } => chatbot_provider_field_value(config, provider.as_str(), field),
+            _ => String::new(),
+        };
+
+        let Some(editor) = self.setup_chatbot_provider_editor_mut() else {
+            return;
+        };
+        editor.field_editor = Some(ChatbotFieldEdit {
+            selected_field: field,
+            cursor: input.len(),
+            input,
+        });
+    }
+
+    pub fn setup_chatbot_provider_editor_toggle_selected(&mut self) {
+        let (provider, selected_field) = match self.setup_chatbot_provider_editor_mut() {
+            Some(editor) => (editor.provider.clone(), editor.selected_field),
+            None => return,
+        };
+        let field = ChatbotProviderFieldId::from_provider_index(provider.as_str(), selected_field);
+        if !field.is_toggle() {
+            return;
+        }
+        if let Mode::Setup { config, .. } = &mut self.mode {
+            toggle_chatbot_provider_field(config, provider.as_str(), field);
+        }
+    }
+
+    fn setup_chatbot_panel_mut(&mut self) -> Option<&mut ChatbotProviderPanel> {
+        let Mode::Setup { overlay, .. } = &mut self.mode else {
+            return None;
+        };
+        match overlay.as_mut() {
+            Some(SetupOverlay::ChatbotProviders(panel)) => Some(panel),
+            _ => None,
+        }
+    }
+
+    fn setup_chatbot_provider_editor_mut(&mut self) -> Option<&mut ChatbotProviderEditor> {
+        self.setup_chatbot_panel_mut()?.editor.as_mut()
+    }
+
     pub fn guy_env_prev_entry(&mut self) {
         match &mut self.mode {
             Mode::GuyEnvEdit {
@@ -1030,6 +1274,18 @@ impl FrontendApp {
                         return;
                     }
                 }
+                if let Some(SetupOverlay::ChatbotProviders(panel)) = overlay.as_mut() {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if editor.field_editor.is_some() {
+                            editor.field_editor = None;
+                            return;
+                        }
+                    }
+                    if panel.editor.is_some() {
+                        panel.editor = None;
+                        return;
+                    }
+                }
                 *overlay = None;
             }
             Mode::GuyEnvEdit { editor, .. } => *editor = None,
@@ -1044,6 +1300,13 @@ impl FrontendApp {
                     delete_previous_char(&mut field.input, &mut field.cursor);
                 }
                 Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            delete_previous_char(&mut field.input, &mut field.cursor);
+                        }
+                    }
+                }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
                     if let Some(editor) = panel.editor.as_mut() {
                         if let Some(field) = editor.field_editor.as_mut() {
                             delete_previous_char(&mut field.input, &mut field.cursor);
@@ -1081,6 +1344,13 @@ impl FrontendApp {
                         }
                     }
                 }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            delete_current_char(&mut field.input, field.cursor);
+                        }
+                    }
+                }
                 None => {}
             },
             Mode::GuyEnvEdit { editor, .. } => {
@@ -1107,6 +1377,14 @@ impl FrontendApp {
                     field.cursor += c.len_utf8();
                 }
                 Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.input.insert(field.cursor, c);
+                            field.cursor += c.len_utf8();
+                        }
+                    }
+                }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
                     if let Some(editor) = panel.editor.as_mut() {
                         if let Some(field) = editor.field_editor.as_mut() {
                             field.input.insert(field.cursor, c);
@@ -1147,6 +1425,13 @@ impl FrontendApp {
                         }
                     }
                 }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = previous_char_boundary(&field.input, field.cursor);
+                        }
+                    }
+                }
                 None => {}
             },
             Mode::GuyEnvEdit { editor, .. } => {
@@ -1174,6 +1459,13 @@ impl FrontendApp {
                     field.cursor = next_char_boundary(&field.input, field.cursor);
                 }
                 Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = next_char_boundary(&field.input, field.cursor);
+                        }
+                    }
+                }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
                     if let Some(editor) = panel.editor.as_mut() {
                         if let Some(field) = editor.field_editor.as_mut() {
                             field.cursor = next_char_boundary(&field.input, field.cursor);
@@ -1211,6 +1503,13 @@ impl FrontendApp {
                         }
                     }
                 }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = 0;
+                        }
+                    }
+                }
                 None => {}
             },
             Mode::GuyEnvEdit { editor, .. } => {
@@ -1230,6 +1529,13 @@ impl FrontendApp {
             Mode::Setup { overlay, .. } => match overlay.as_mut() {
                 Some(SetupOverlay::Field(field)) => field.cursor = field.input.len(),
                 Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.cursor = field.input.len();
+                        }
+                    }
+                }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
                     if let Some(editor) = panel.editor.as_mut() {
                         if let Some(field) = editor.field_editor.as_mut() {
                             field.cursor = field.input.len();
@@ -1258,6 +1564,14 @@ impl FrontendApp {
                     field.cursor = 0;
                 }
                 Some(SetupOverlay::AiProfiles(panel)) => {
+                    if let Some(editor) = panel.editor.as_mut() {
+                        if let Some(field) = editor.field_editor.as_mut() {
+                            field.input.clear();
+                            field.cursor = 0;
+                        }
+                    }
+                }
+                Some(SetupOverlay::ChatbotProviders(panel)) => {
                     if let Some(editor) = panel.editor.as_mut() {
                         if let Some(field) = editor.field_editor.as_mut() {
                             field.input.clear();
@@ -1331,6 +1645,22 @@ impl FrontendApp {
                                 }
                                 Err(err) => panel.message = Some(format!("{err}")),
                             }
+                        }
+                    }
+                    Some(SetupOverlay::ChatbotProviders(panel)) => {
+                        if let Some(editor) = panel.editor.as_mut() {
+                            if let Some(field) = editor.field_editor.take() {
+                                set_chatbot_provider_field(
+                                    config,
+                                    editor.provider.as_str(),
+                                    field.selected_field,
+                                    field.input.as_str(),
+                                );
+                                return;
+                            }
+
+                            panel.editor = None;
+                            panel.message = None;
                         }
                     }
                     None => {}
@@ -2255,6 +2585,146 @@ impl FrontendApp {
             }
             Err(err) => self.push_system(&format!("save custom skill failed: {err}")),
         }
+    }
+}
+
+fn chatbot_provider_field_value(
+    config: &SetupConfig,
+    provider: &str,
+    field: ChatbotProviderFieldId,
+) -> String {
+    match (provider, field) {
+        ("telegram", ChatbotProviderFieldId::Enabled) => checkbox_value(config.chatbot_telegram_enabled),
+        ("telegram", ChatbotProviderFieldId::ApiBase) => config.chatbot_telegram_api_base.clone(),
+        ("telegram", ChatbotProviderFieldId::Token) => config.chatbot_telegram_apikey.clone(),
+        ("telegram", ChatbotProviderFieldId::PollSeconds) => {
+            config.chatbot_telegram_poll_interval_seconds.to_string()
+        }
+        ("telegram", ChatbotProviderFieldId::WhitelistUserIds) => {
+            config.chatbot_telegram_whitelist_user_ids.clone()
+        }
+        ("feishu", ChatbotProviderFieldId::Enabled) => checkbox_value(config.chatbot_feishu_enabled),
+        ("feishu", ChatbotProviderFieldId::ApiBase) => config.chatbot_feishu_api_base.clone(),
+        ("feishu", ChatbotProviderFieldId::AppId) => config.chatbot_feishu_app_id.clone(),
+        ("feishu", ChatbotProviderFieldId::AppSecret) => config.chatbot_feishu_app_secret.clone(),
+        ("feishu", ChatbotProviderFieldId::Token) => config.chatbot_feishu_access_token.clone(),
+        ("feishu", ChatbotProviderFieldId::PollSeconds) => {
+            config.chatbot_feishu_poll_interval_seconds.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::ChatId) => config.chatbot_feishu_chat_id.clone(),
+        ("weixin", ChatbotProviderFieldId::Enabled) => checkbox_value(config.chatbot_weixin_enabled),
+        ("weixin", ChatbotProviderFieldId::ApiBase) => config.chatbot_weixin_api_base.clone(),
+        ("weixin", ChatbotProviderFieldId::CdnBase) => config.chatbot_weixin_cdn_base.clone(),
+        ("weixin", ChatbotProviderFieldId::Token) => config.chatbot_weixin_apikey.clone(),
+        ("weixin", ChatbotProviderFieldId::AccountId) => config.chatbot_weixin_account_id.clone(),
+        ("weixin", ChatbotProviderFieldId::UserId) => config.chatbot_weixin_user_id.clone(),
+        ("weixin", ChatbotProviderFieldId::WhitelistUserIds) => {
+            config.chatbot_weixin_whitelist_user_ids.clone()
+        }
+        ("weixin", ChatbotProviderFieldId::PollSeconds) => {
+            config.chatbot_weixin_poll_interval_seconds.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::LongPollTimeoutMs) => {
+            config.chatbot_weixin_long_poll_timeout_ms.to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+fn set_chatbot_provider_field(
+    config: &mut SetupConfig,
+    provider: &str,
+    field: ChatbotProviderFieldId,
+    value: &str,
+) {
+    match (provider, field) {
+        ("telegram", ChatbotProviderFieldId::ApiBase) => {
+            config.chatbot_telegram_api_base = value.to_string()
+        }
+        ("telegram", ChatbotProviderFieldId::Token) => {
+            config.chatbot_telegram_apikey = value.to_string()
+        }
+        ("telegram", ChatbotProviderFieldId::PollSeconds) => {
+            if let Ok(seconds) = value.trim().parse::<u64>() {
+                config.chatbot_telegram_poll_interval_seconds = seconds.max(1);
+            }
+        }
+        ("telegram", ChatbotProviderFieldId::WhitelistUserIds) => {
+            config.chatbot_telegram_whitelist_user_ids = value.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::ApiBase) => {
+            config.chatbot_feishu_api_base = value.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::AppId) => {
+            config.chatbot_feishu_app_id = value.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::AppSecret) => {
+            config.chatbot_feishu_app_secret = value.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::Token) => {
+            config.chatbot_feishu_access_token = value.to_string()
+        }
+        ("feishu", ChatbotProviderFieldId::PollSeconds) => {
+            if let Ok(seconds) = value.trim().parse::<u64>() {
+                config.chatbot_feishu_poll_interval_seconds = seconds.max(1);
+            }
+        }
+        ("feishu", ChatbotProviderFieldId::ChatId) => {
+            config.chatbot_feishu_chat_id = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::ApiBase) => {
+            config.chatbot_weixin_api_base = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::CdnBase) => {
+            config.chatbot_weixin_cdn_base = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::Token) => {
+            config.chatbot_weixin_apikey = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::AccountId) => {
+            config.chatbot_weixin_account_id = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::UserId) => {
+            config.chatbot_weixin_user_id = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::WhitelistUserIds) => {
+            config.chatbot_weixin_whitelist_user_ids = value.to_string()
+        }
+        ("weixin", ChatbotProviderFieldId::PollSeconds) => {
+            if let Ok(seconds) = value.trim().parse::<u64>() {
+                config.chatbot_weixin_poll_interval_seconds = seconds.max(1);
+            }
+        }
+        ("weixin", ChatbotProviderFieldId::LongPollTimeoutMs) => {
+            if let Ok(timeout) = value.trim().parse::<u64>() {
+                config.chatbot_weixin_long_poll_timeout_ms = timeout.max(1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn toggle_chatbot_provider_field(
+    config: &mut SetupConfig,
+    provider: &str,
+    field: ChatbotProviderFieldId,
+) {
+    if field != ChatbotProviderFieldId::Enabled {
+        return;
+    }
+    match provider {
+        "telegram" => config.chatbot_telegram_enabled = !config.chatbot_telegram_enabled,
+        "feishu" => config.chatbot_feishu_enabled = !config.chatbot_feishu_enabled,
+        "weixin" => config.chatbot_weixin_enabled = !config.chatbot_weixin_enabled,
+        _ => {}
+    }
+}
+
+fn checkbox_value(value: bool) -> String {
+    if value {
+        "[x] true".to_string()
+    } else {
+        "[ ] false".to_string()
     }
 }
 
