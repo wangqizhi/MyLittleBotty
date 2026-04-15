@@ -128,10 +128,11 @@ fn run_due_reminders(now: &str, now_ts: i64) -> io::Result<()> {
 }
 
 fn run_system_tasks(now: &str, now_ts: i64) -> io::Result<()> {
+    let config = load_chatbot_config()?;
     let mut state = load_system_crond_state()?;
     let mut dirty = false;
 
-    for task in system_tasks() {
+    for task in system_tasks(&config) {
         let Some(scheduled_at) = task.due_at(now_ts, state.last_run_slot(task.id))? else {
             continue;
         };
@@ -658,13 +659,17 @@ fn append_result_line(executed_at: &str, status: &str, output: &str) -> io::Resu
     Ok(())
 }
 
-fn system_tasks() -> [SystemTask; 1] {
-    [SystemTask {
-        id: "remember-hourly",
-        description: "refresh long-term memory via /remember",
-        request_message: "/remember",
-        cadence: SystemTaskCadence::Hourly,
-    }]
+fn system_tasks(config: &ChatbotConfig) -> Vec<SystemTask> {
+    let mut tasks = Vec::new();
+    if config.system_remember_hourly_enabled {
+        tasks.push(SystemTask {
+            id: "remember-hourly",
+            description: "refresh long-term memory via /remember",
+            request_message: "/remember",
+            cadence: SystemTaskCadence::Hourly,
+        });
+    }
+    tasks
 }
 
 fn execute_system_task(task: &SystemTask, scheduled_at: &str, now: &str) -> io::Result<String> {
@@ -743,6 +748,7 @@ fn save_system_crond_state(state: &SystemCrondState) -> io::Result<()> {
 }
 
 struct ChatbotConfig {
+    system_remember_hourly_enabled: bool,
     telegram_enabled: bool,
     telegram_apikey: String,
     telegram_api_base: String,
@@ -758,6 +764,7 @@ struct ChatbotConfig {
 impl Default for ChatbotConfig {
     fn default() -> Self {
         Self {
+            system_remember_hourly_enabled: true,
             telegram_enabled: true,
             telegram_apikey: String::new(),
             telegram_api_base: TELEGRAM_API_BASE.to_string(),
@@ -791,6 +798,9 @@ fn load_chatbot_config() -> io::Result<ChatbotConfig> {
         };
         let value = value.trim();
         match key.trim() {
+            "system.remember_hourly.enabled" => {
+                config.system_remember_hourly_enabled = parse_bool(value)
+            }
             "chatbot.provider" => {
                 config.telegram_enabled = value
                     .split(',')

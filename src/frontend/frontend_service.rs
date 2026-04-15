@@ -36,6 +36,7 @@ pub enum SetupFieldId {
     AgentProvider,
     AgentCodexCommand,
     AgentClaudeCommand,
+    RememberHourlyEnabled,
     BrowserChromeCommand,
     BrowserChromeHeadless,
     BrowserChromeUserDataDir,
@@ -45,11 +46,12 @@ pub enum SetupFieldId {
 }
 
 impl SetupFieldId {
-    pub const ALL: [SetupFieldId; 10] = [
+    pub const ALL: [SetupFieldId; 11] = [
         SetupFieldId::AiProfiles,
         SetupFieldId::AgentProvider,
         SetupFieldId::AgentCodexCommand,
         SetupFieldId::AgentClaudeCommand,
+        SetupFieldId::RememberHourlyEnabled,
         SetupFieldId::BrowserChromeCommand,
         SetupFieldId::BrowserChromeHeadless,
         SetupFieldId::BrowserChromeUserDataDir,
@@ -71,6 +73,7 @@ impl SetupFieldId {
             SetupFieldId::AgentProvider => "agent provider",
             SetupFieldId::AgentCodexCommand => "codex command",
             SetupFieldId::AgentClaudeCommand => "claude command",
+            SetupFieldId::RememberHourlyEnabled => "remember-hourly enabled",
             SetupFieldId::BrowserChromeCommand => "browser chrome command",
             SetupFieldId::BrowserChromeHeadless => "browser chrome headless",
             SetupFieldId::BrowserChromeUserDataDir => "browser chrome user data dir",
@@ -81,7 +84,10 @@ impl SetupFieldId {
     }
 
     pub fn is_toggle(self) -> bool {
-        matches!(self, SetupFieldId::BrowserChromeHeadless)
+        matches!(
+            self,
+            SetupFieldId::RememberHourlyEnabled | SetupFieldId::BrowserChromeHeadless
+        )
     }
 
     pub fn is_masked(self) -> bool {
@@ -130,6 +136,7 @@ pub struct SetupConfig {
     pub browser_chrome_headless: bool,
     pub browser_chrome_user_data_dir: String,
     pub browser_chrome_max_tabs: usize,
+    pub system_remember_hourly_enabled: bool,
     pub work_dir: String,
     pub chatbot_provider: String,
     pub chatbot_telegram_api_base: String,
@@ -167,6 +174,7 @@ impl Default for SetupConfig {
             browser_chrome_headless: false,
             browser_chrome_user_data_dir: DEFAULT_BROWSER_USER_DATA_DIR.to_string(),
             browser_chrome_max_tabs: 10,
+            system_remember_hourly_enabled: true,
             work_dir: botty_io::default_work_dir_display(),
             chatbot_provider: "telegram".to_string(),
             chatbot_telegram_api_base: "https://api.telegram.org".to_string(),
@@ -220,6 +228,13 @@ impl SetupConfig {
             SetupFieldId::AgentProvider => self.agent_provider.clone(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
+            SetupFieldId::RememberHourlyEnabled => {
+                if self.system_remember_hourly_enabled {
+                    "[x] true".to_string()
+                } else {
+                    "[ ] false".to_string()
+                }
+            }
             SetupFieldId::BrowserChromeCommand => self.browser_chrome_command.clone(),
             SetupFieldId::BrowserChromeHeadless => {
                 if self.browser_chrome_headless {
@@ -241,6 +256,7 @@ impl SetupConfig {
             SetupFieldId::AgentProvider => self.agent_provider.clone(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command.clone(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command.clone(),
+            SetupFieldId::RememberHourlyEnabled => String::new(),
             SetupFieldId::BrowserChromeCommand => self.browser_chrome_command.clone(),
             SetupFieldId::BrowserChromeHeadless => String::new(),
             SetupFieldId::BrowserChromeUserDataDir => self.browser_chrome_user_data_dir.clone(),
@@ -256,6 +272,7 @@ impl SetupConfig {
             SetupFieldId::AgentProvider => self.agent_provider = value.trim().to_ascii_lowercase(),
             SetupFieldId::AgentCodexCommand => self.agent_codex_command = value.to_string(),
             SetupFieldId::AgentClaudeCommand => self.agent_claude_command = value.to_string(),
+            SetupFieldId::RememberHourlyEnabled => {}
             SetupFieldId::BrowserChromeCommand => self.browser_chrome_command = value.to_string(),
             SetupFieldId::BrowserChromeHeadless => {}
             SetupFieldId::BrowserChromeUserDataDir => {
@@ -275,6 +292,9 @@ impl SetupConfig {
 
     pub fn toggle_field(&mut self, field: SetupFieldId) {
         match field {
+            SetupFieldId::RememberHourlyEnabled => {
+                self.system_remember_hourly_enabled = !self.system_remember_hourly_enabled
+            }
             SetupFieldId::BrowserChromeHeadless => {
                 self.browser_chrome_headless = !self.browser_chrome_headless
             }
@@ -716,6 +736,9 @@ fn load_setup_config() -> io::Result<SetupConfig> {
             "agent.provider" => config.agent_provider = value.to_ascii_lowercase(),
             "agent.codex.command" => config.agent_codex_command = value.to_string(),
             "agent.claude.command" => config.agent_claude_command = value.to_string(),
+            "system.remember_hourly.enabled" => {
+                config.system_remember_hourly_enabled = parse_bool(value)
+            }
             "browser.chrome.command" => config.browser_chrome_command = value.to_string(),
             "browser.chrome.headless" => config.browser_chrome_headless = parse_bool(value),
             "browser.chrome.user_data_dir" => {
@@ -845,12 +868,13 @@ fn save_setup_config(config: &SetupConfig) -> io::Result<()> {
     }
 
     let content = format!(
-        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nbrowser.chrome.max_tabs={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.weixin.api_base={}\nchatbot.weixin.cdn_base={}\nchatbot.weixin.apikey={}\nchatbot.weixin.account_id={}\nchatbot.weixin.user_id={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.weixin.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.weixin.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.weixin.poll_interval_seconds={}\nchatbot.weixin.long_poll_timeout_ms={}\nchatbot.feishu.chat_id={}\n",
+        "ai.provider.active={}\n{}agent.provider={}\nagent.codex.command={}\nagent.claude.command={}\nsystem.remember_hourly.enabled={}\nbrowser.chrome.command={}\nbrowser.chrome.headless={}\nbrowser.chrome.user_data_dir={}\nbrowser.chrome.max_tabs={}\nchatbot.provider={}\nchatbot.telegram.api_base={}\nchatbot.telegram.apikey={}\nchatbot.feishu.api_base={}\nchatbot.feishu.app_id={}\nchatbot.feishu.app_secret={}\nchatbot.feishu.apikey={}\nchatbot.weixin.api_base={}\nchatbot.weixin.cdn_base={}\nchatbot.weixin.apikey={}\nchatbot.weixin.account_id={}\nchatbot.weixin.user_id={}\nchatbot.telegram.enabled={}\nchatbot.feishu.enabled={}\nchatbot.weixin.enabled={}\nchatbot.telegram.whitelist_user_ids={}\nchatbot.weixin.whitelist_user_ids={}\nchatbot.telegram.poll_interval_seconds={}\nchatbot.feishu.poll_interval_seconds={}\nchatbot.weixin.poll_interval_seconds={}\nchatbot.weixin.long_poll_timeout_ms={}\nchatbot.feishu.chat_id={}\n",
         config.ai_provider_active,
         serialize_ai_profiles(&config.ai_provider_profiles),
         config.agent_provider,
         config.agent_codex_command,
         config.agent_claude_command,
+        config.system_remember_hourly_enabled,
         config.browser_chrome_command,
         config.browser_chrome_headless,
         config.browser_chrome_user_data_dir,

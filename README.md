@@ -30,6 +30,7 @@ Built-in TUI commands:
 
 - `/setup`: open the setup editor for AI provider and chatbot settings
 - `AI profiles` in `/setup`: manage multiple named AI provider profiles from an overlay panel; supports create, edit, activate, and delete
+- `remember-hourly enabled` in `/setup`: toggle the built-in hourly `/remember` system task without code changes
 - `/restart-server`: restart local Botty background services
 - `/new`: start a new chat session
 - `/remember`: trigger long-term memory summarization and refresh all configured role-specific experience memory files
@@ -130,6 +131,7 @@ Botty currently exposes seven built-in tools, though role access differs:
 - One-time reminders are marked as `done` after execution. Recurring reminders stay active until their time window ends, then are marked as `done`.
 - If Telegram or Feishu output is enabled, reminder results are pushed back to those channels.
 - The first built-in system task is `remember-hourly`, which triggers `/remember` once per hour.
+- `remember-hourly` can be disabled from `/setup` or by setting `system.remember_hourly.enabled=false` in `setup.conf`.
 - Built-in system task execution is logged to `~/.mylittlebotty/log/system-crond.log` and deduplicated across restarts with `~/.mylittlebotty/run/system-crond-state.json`.
 
 ### 8. Telegram / Feishu / Weixin integration
@@ -401,6 +403,7 @@ ai.provider.default.debug=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
+system.remember_hourly.enabled=true
 browser.chrome.command=
 browser.chrome.headless=false
 browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
@@ -439,6 +442,7 @@ Common meanings:
 - `agent.provider`: terminal-agent provider used by the `terminal` skill, currently `codex` by default
 - `agent.codex.command`: executable name or path for Codex CLI
 - `agent.claude.command`: executable name or path reserved for a Claude terminal agent
+- `system.remember_hourly.enabled`: enable or disable the built-in hourly `/remember` system task
 - `browser.chrome.command`: executable name or path for Chrome/Chromium; leave empty to auto-detect
 - `browser.chrome.headless`: whether the browser skill launches Chrome in headless mode by default
 - `browser.chrome.user_data_dir`: optional persistent Chrome user-data directory; relative paths are resolved under `~/.mylittlebotty/`

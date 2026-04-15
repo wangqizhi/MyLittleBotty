@@ -397,7 +397,6 @@ fn endpoint_requires_apikey(endpoint: &str) -> bool {
     true
 }
 
-
 fn append_debug_log_line(
     direction: &str,
     content: &str,

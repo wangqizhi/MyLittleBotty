@@ -7,6 +7,8 @@
 
 System tasks are not stored in `reminder.rec` and are not editable through the `crond` tool. They start running automatically after the service starts.
 
+`remember-hourly` can now be toggled from `/setup` or by setting `system.remember_hourly.enabled=true|false` in `setup.conf`.
+
 ## Current Built-in Task
 
 - `remember-hourly`: runs `/remember` once per hour through the normal Botty request path
@@ -27,7 +29,7 @@ The state file stores the last completed schedule slot for each task so the same
 
 Add the task in [`src/botty/botty-crond.rs`](~/Project/MyLittleBotty/src/botty/botty-crond.rs):
 
-1. Extend `system_tasks()` with a new `SystemTask`.
+1. Extend `system_tasks(config)` with a new `SystemTask`.
 2. Pick a stable `id`, a readable `description`, and the request text to send through `request_message`.
 3. Choose the cadence in `SystemTaskCadence`.
 4. If a new cadence is needed, extend `SystemTaskCadence` and `SystemTask::due_at()`.
@@ -36,21 +38,23 @@ Add the task in [`src/botty/botty-crond.rs`](~/Project/MyLittleBotty/src/botty/b
 Example:
 
 ```rust
-fn system_tasks() -> [SystemTask; 2] {
-    [
-        SystemTask {
+fn system_tasks(config: &ChatbotConfig) -> Vec<SystemTask> {
+    let mut tasks = Vec::new();
+    if config.system_remember_hourly_enabled {
+        tasks.push(SystemTask {
             id: "remember-hourly",
             description: "refresh long-term memory via /remember",
             request_message: "/remember",
             cadence: SystemTaskCadence::Hourly,
-        },
-        SystemTask {
-            id: "daily-summary",
-            description: "run the daily summary command",
-            request_message: "/daily-summary",
-            cadence: SystemTaskCadence::Daily,
-        },
-    ]
+        });
+    }
+    tasks.push(SystemTask {
+        id: "daily-summary",
+        description: "run the daily summary command",
+        request_message: "/daily-summary",
+        cadence: SystemTaskCadence::Daily,
+    });
+    tasks
 }
 ```
 

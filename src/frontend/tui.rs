@@ -755,6 +755,7 @@ fn render_setup_page(
         Line::raw("- Esc: Cancel"),
         Line::raw("- Tab / Shift+Tab: Next/Prev field"),
         Line::raw("- Enter on AI profiles opens profile manager"),
+        Line::raw("- remember-hourly enabled toggles the built-in /remember system task"),
         Line::raw("- Enter on chatbot providers opens provider manager"),
         Line::raw(""),
         Line::raw("Work dir:"),
@@ -848,7 +849,8 @@ fn render_chatbot_providers_panel(
         parts[0],
     );
 
-    let details: Vec<Line> = chatbot_provider_detail_lines(config, config.chatbot_provider.as_str());
+    let details: Vec<Line> =
+        chatbot_provider_detail_lines(config, config.chatbot_provider.as_str());
     frame.render_widget(
         Paragraph::new(Text::from(details))
             .wrap(Wrap { trim: false })
@@ -1128,9 +1130,9 @@ fn render_chatbot_provider_editor(
     let area = centered_rect(frame.area(), 72, 68);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Block::default().borders(Borders::ALL).title(
-            "Edit Chatbot Provider | Enter Edit/Toggle | Ctrl+S Save | Esc Cancel",
-        ),
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Edit Chatbot Provider | Enter Edit/Toggle | Ctrl+S Save | Esc Cancel"),
         area,
     );
 
@@ -1145,11 +1147,7 @@ fn render_chatbot_provider_editor(
         .iter()
         .enumerate()
         .map(|(idx, field)| {
-            let value = chatbot_provider_display_value(
-                config,
-                editor.provider.as_str(),
-                *field,
-            );
+            let value = chatbot_provider_display_value(config, editor.provider.as_str(), *field);
             let shown = if field.is_masked() {
                 mask_secret(&value)
             } else {
@@ -1237,7 +1235,9 @@ fn chatbot_provider_display_value(
     field: ChatbotProviderFieldId,
 ) -> String {
     match (provider, field) {
-        ("telegram", ChatbotProviderFieldId::Enabled) => checkbox_text(config.chatbot_telegram_enabled),
+        ("telegram", ChatbotProviderFieldId::Enabled) => {
+            checkbox_text(config.chatbot_telegram_enabled)
+        }
         ("telegram", ChatbotProviderFieldId::ApiBase) => config.chatbot_telegram_api_base.clone(),
         ("telegram", ChatbotProviderFieldId::Token) => config.chatbot_telegram_apikey.clone(),
         ("telegram", ChatbotProviderFieldId::PollSeconds) => {

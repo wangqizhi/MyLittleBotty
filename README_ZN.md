@@ -28,6 +28,7 @@ TUI 内置命令：
 
 - `/setup`：进入配置界面，编辑 AI Provider 和聊天机器人配置。
 - `/setup` 中的 `AI profiles`：在覆盖式弹层里管理多个命名 AI profile，支持创建、编辑、激活和删除。
+- `/setup` 中的 `remember-hourly enabled`：可直接开关内置的每小时 `/remember` system 任务。
 - `/restart-server`：重启本地 Botty 后台服务。
 - `/new`：开始新会话。
 - `/remember`：触发长期记忆摘要整理，并同步刷新所有已配置的 role 经验记忆。
@@ -127,6 +128,7 @@ TUI 内置命令：
 - 单次提醒执行后会变成 `done`；重复提醒会持续生效，直到超出生效时间窗后再变成 `done`。
 - 如果启用了 Telegram/飞书推送，提醒结果会回发到对应聊天渠道。
 - 当前第一个内置 system 任务是 `remember-hourly`，会每小时触发一次 `/remember`。
+- `remember-hourly` 现在可以通过 `/setup` 或 `setup.conf` 里的 `system.remember_hourly.enabled=false` 关闭。
 - 内置 system 任务执行日志写入 `~/.mylittlebotty/log/system-crond.log`，并通过 `~/.mylittlebotty/run/system-crond-state.json` 避免服务重启后在同一时间槽重复执行。
 
 ### 8. Telegram / 飞书 / 微信接入
@@ -399,6 +401,7 @@ ai.provider.default.vision=false
 agent.provider=codex
 agent.codex.command=codex
 agent.claude.command=claude
+system.remember_hourly.enabled=true
 browser.chrome.command=
 browser.chrome.headless=false
 browser.chrome.user_data_dir=~/.mylittlebotty/app/browser/user_dir
@@ -436,6 +439,7 @@ chatbot.feishu.chat_id=
 - `agent.provider`：`terminal` skill 使用的终端代理提供方，当前默认是 `codex`
 - `agent.codex.command`：Codex CLI 的可执行文件名或路径
 - `agent.claude.command`：预留给 Claude 终端代理的可执行文件名或路径
+- `system.remember_hourly.enabled`：是否启用内置的每小时 `/remember` system 任务
 - `browser.chrome.command`：Chrome/Chromium 的可执行文件名或路径；留空时自动探测
 - `browser.chrome.headless`：`browser` skill 默认是否以 headless 模式启动 Chrome
 - `browser.chrome.user_data_dir`：可选的持久 Chrome user-data 目录；相对路径会解析到 `~/.mylittlebotty/` 下

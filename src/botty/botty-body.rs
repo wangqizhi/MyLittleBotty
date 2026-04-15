@@ -1,6 +1,5 @@
 use crate::botty_brain::{
-    active_and_image_providers_differ, active_supports_vision, is_llm_connection_error,
-    BottyBrain,
+    active_and_image_providers_differ, active_supports_vision, is_llm_connection_error, BottyBrain,
 };
 use crate::botty_guy::{
     builtin_role_specs, expand_custom_role_skill_names, expand_role_skill_names,

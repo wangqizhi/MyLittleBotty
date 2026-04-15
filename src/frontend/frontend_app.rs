@@ -1114,17 +1114,16 @@ impl FrontendApp {
             Some(editor) => (editor.provider.clone(), editor.selected_field),
             None => return,
         };
-        let field = ChatbotProviderFieldId::from_provider_index(
-            provider.as_str(),
-            selected_field,
-        );
+        let field = ChatbotProviderFieldId::from_provider_index(provider.as_str(), selected_field);
         if field.is_toggle() {
             self.setup_chatbot_provider_editor_toggle_selected();
             return;
         }
 
         let input = match &self.mode {
-            Mode::Setup { config, .. } => chatbot_provider_field_value(config, provider.as_str(), field),
+            Mode::Setup { config, .. } => {
+                chatbot_provider_field_value(config, provider.as_str(), field)
+            }
             _ => String::new(),
         };
 
@@ -2594,7 +2593,9 @@ fn chatbot_provider_field_value(
     field: ChatbotProviderFieldId,
 ) -> String {
     match (provider, field) {
-        ("telegram", ChatbotProviderFieldId::Enabled) => checkbox_value(config.chatbot_telegram_enabled),
+        ("telegram", ChatbotProviderFieldId::Enabled) => {
+            checkbox_value(config.chatbot_telegram_enabled)
+        }
         ("telegram", ChatbotProviderFieldId::ApiBase) => config.chatbot_telegram_api_base.clone(),
         ("telegram", ChatbotProviderFieldId::Token) => config.chatbot_telegram_apikey.clone(),
         ("telegram", ChatbotProviderFieldId::PollSeconds) => {
@@ -2603,7 +2604,9 @@ fn chatbot_provider_field_value(
         ("telegram", ChatbotProviderFieldId::WhitelistUserIds) => {
             config.chatbot_telegram_whitelist_user_ids.clone()
         }
-        ("feishu", ChatbotProviderFieldId::Enabled) => checkbox_value(config.chatbot_feishu_enabled),
+        ("feishu", ChatbotProviderFieldId::Enabled) => {
+            checkbox_value(config.chatbot_feishu_enabled)
+        }
         ("feishu", ChatbotProviderFieldId::ApiBase) => config.chatbot_feishu_api_base.clone(),
         ("feishu", ChatbotProviderFieldId::AppId) => config.chatbot_feishu_app_id.clone(),
         ("feishu", ChatbotProviderFieldId::AppSecret) => config.chatbot_feishu_app_secret.clone(),
@@ -2612,7 +2615,9 @@ fn chatbot_provider_field_value(
             config.chatbot_feishu_poll_interval_seconds.to_string()
         }
         ("feishu", ChatbotProviderFieldId::ChatId) => config.chatbot_feishu_chat_id.clone(),
-        ("weixin", ChatbotProviderFieldId::Enabled) => checkbox_value(config.chatbot_weixin_enabled),
+        ("weixin", ChatbotProviderFieldId::Enabled) => {
+            checkbox_value(config.chatbot_weixin_enabled)
+        }
         ("weixin", ChatbotProviderFieldId::ApiBase) => config.chatbot_weixin_api_base.clone(),
         ("weixin", ChatbotProviderFieldId::CdnBase) => config.chatbot_weixin_cdn_base.clone(),
         ("weixin", ChatbotProviderFieldId::Token) => config.chatbot_weixin_apikey.clone(),
