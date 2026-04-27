@@ -79,6 +79,7 @@ impl LlmProvider for AnthropicProvider {
                 )
             })?;
 
+        let mut tool_uses = Vec::new();
         for block in content {
             if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                 let id = block.get("id").and_then(Value::as_str).ok_or_else(|| {
@@ -88,7 +89,7 @@ impl LlmProvider for AnthropicProvider {
                     io::Error::new(io::ErrorKind::InvalidData, "tool_use missing name")
                 })?;
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
-                return Ok(ProviderResponse::ToolUses(vec![ProviderToolUse {
+                tool_uses.push(ProviderToolUse {
                     id: id.to_string(),
                     name: name.to_string(),
                     input_json: serde_json::to_string(&input).map_err(|err| {
@@ -103,8 +104,12 @@ impl LlmProvider for AnthropicProvider {
                             format!("serialize assistant content failed: {err}"),
                         )
                     })?,
-                }]));
+                });
             }
+        }
+
+        if !tool_uses.is_empty() {
+            return Ok(ProviderResponse::ToolUses(tool_uses));
         }
 
         let mut texts = Vec::new();
@@ -159,8 +164,10 @@ fn normalize_endpoint(endpoint: &str) -> String {
 
 fn build_messages(messages: &[ProviderMessage]) -> io::Result<Vec<Value>> {
     let mut serialized = Vec::new();
-    for message in messages {
-        match message {
+    let mut index = 0;
+
+    while index < messages.len() {
+        match &messages[index] {
             ProviderMessage::UserText(text) => serialized.push(json!({
                 "role": "user",
                 "content": [{"type": "text", "text": text}],
@@ -168,17 +175,6 @@ fn build_messages(messages: &[ProviderMessage]) -> io::Result<Vec<Value>> {
             ProviderMessage::User { parts } => serialized.push(json!({
                 "role": "user",
                 "content": build_user_content(parts),
-            })),
-            ProviderMessage::UserToolResult {
-                tool_use_id,
-                content,
-            } => serialized.push(json!({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": content,
-                }],
             })),
             ProviderMessage::AssistantToolUse {
                 assistant_content_json,
@@ -194,8 +190,42 @@ fn build_messages(messages: &[ProviderMessage]) -> io::Result<Vec<Value>> {
                     "role": "assistant",
                     "content": content,
                 }));
+
+                let mut results = Vec::new();
+                index += 1;
+                while index < messages.len() {
+                    match &messages[index] {
+                        ProviderMessage::UserToolResult {
+                            tool_use_id,
+                            content,
+                        } => {
+                            results.push(json!({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": content,
+                            }));
+                            index += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                if !results.is_empty() {
+                    serialized.push(json!({
+                        "role": "user",
+                        "content": results,
+                    }));
+                }
+                continue;
+            }
+            ProviderMessage::UserToolResult { .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "tool result must follow an assistant tool use",
+                ));
             }
         }
+        index += 1;
     }
     Ok(serialized)
 }
