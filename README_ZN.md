@@ -46,11 +46,15 @@ TUI 内置命令：
 - Anthropic
 - MiniMax
 - GLM 的 Anthropic 兼容 endpoint（`open.bigmodel.cn/api/anthropic`）
+- DeepSeek V4
+- 小米 `xiaomi-mimo-2.5pro`
 
 测试状态：
 
-- 实际只测试过 MiniMax。
-- `glm-4.7` 已在智谱 Anthropic 兼容接口上做过真实调用验证。
+- MiniMax 已做过真实调用验证。
+- `glm-4.7` 已在智谱 Anthropic 兼容接口上做过真实 API 调用验证，但遗憾的是 CodePlan 不支持。
+- DeepSeek V4 已做过真实调用验证。
+- 小米 `xiaomi-mimo-2.5pro` 已做过真实调用验证。感谢小米创造者激励计划对这部分验证的支持。
 - OpenAI 兼容接口和通用 Anthropic 适配器目前仍然只是代码里有适配，尚未广泛验证。
 
 实际使用依赖配置文件中的：
@@ -465,7 +469,8 @@ chatbot.feishu.chat_id=
 - TUI 中的 `AI profiles` 支持创建、编辑、激活和删除。
 - 当前激活的 AI profile 不能直接删除，需要先切换到其他 profile。
 - 配置读取仍兼容老版本单 provider 的 `ai.provider.*` 键。
-- 如果要接入智谱 Claude 兼容接口，可使用 `https://open.bigmodel.cn/api/anthropic`，模型建议填 `glm-4.7`。
+- 如果要接入智谱 Claude 兼容接口，可使用 `https://open.bigmodel.cn/api/anthropic`，模型建议填 `glm-4.7`；真实 API 调用已验证通过，但 CodePlan 不支持。
+- DeepSeek V4 和小米 `xiaomi-mimo-2.5pro` 也已做过真实 API 调用验证。小米部分感谢小米创造者激励计划的支持。
 - 如果没有任何 `vision=true` 的 profile，chatbot 收到图片时会返回 `暂不支持图像识别，请配置支持图像的 provider。`
 - 对于 `localhost`、`127.0.0.1`、`10.x`、`192.168.x`、`172.16-31.x` 这类本地或内网 HTTP 模型地址，Botty 不再强制要求非空 API key。
 

@@ -48,11 +48,15 @@ The code currently supports these provider adapters:
 - Anthropic
 - MiniMax
 - GLM Anthropic-compatible endpoint (`open.bigmodel.cn/api/anthropic`)
+- DeepSeek V4
+- Xiaomi `xiaomi-mimo-2.5pro`
 
 Testing status:
 
-- Only MiniMax has been tested in practice.
-- GLM Anthropic-compatible access has been verified in practice with `glm-4.7`.
+- MiniMax has been tested in practice.
+- GLM Anthropic-compatible access has been verified in practice with `glm-4.7`, but CodePlan is not supported there, regrettably.
+- DeepSeek V4 has been tested in practice.
+- Xiaomi `xiaomi-mimo-2.5pro` has been tested in practice. Thanks to Xiaomi's Creator Incentive Program for supporting this validation.
 - OpenAI-compatible and generic Anthropic adapters still exist in code, but have not been broadly verified in real use yet.
 
 Runtime behavior depends on these config keys:
@@ -468,7 +472,8 @@ Notes:
 - The TUI `AI profiles` manager supports create, edit, activate, and delete.
 - You cannot delete the currently active AI profile; activate another one first.
 - The config loader is backward-compatible with legacy single-provider `ai.provider.*` keys.
-- For GLM Claude-compatible access, use `https://open.bigmodel.cn/api/anthropic` with a model such as `glm-4.7`.
+- For GLM Claude-compatible access, use `https://open.bigmodel.cn/api/anthropic` with a model such as `glm-4.7`; API calls have passed real validation, but CodePlan is not supported.
+- DeepSeek V4 and Xiaomi `xiaomi-mimo-2.5pro` have also passed real API validation. Thanks to Xiaomi's Creator Incentive Program for the Xiaomi-side support.
 - If no `vision=true` profile exists, chatbot image requests return `暂不支持图像识别，请配置支持图像的 provider。`
 - For private/local HTTP model endpoints such as `localhost`, `127.0.0.1`, `10.x`, `192.168.x`, or `172.16-31.x`, Botty does not force a non-empty API key.
 
